@@ -1,0 +1,18 @@
+{
+  "name": "@gis/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@gis/config": "workspace:*",
+    "@gis/database": "workspace:*",
+    "@gis/shared": "workspace:*",
+    "ioredis": "^5.4.1"
+  }
+}
