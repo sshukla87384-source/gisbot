@@ -1,0 +1,75 @@
+--progress is a global compose flag, better use `docker compose --progress xx build ...
+ Image gis-worker Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 994B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile.node
+#2 transferring dockerfile: 3.46kB done
+#2 DONE 0.0s
+
+#3 resolve image config for docker-image://docker.io/docker/dockerfile:1.7
+#3 DONE 0.9s
+
+#4 docker-image://docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+#4 resolve docker.io/docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e 0.0s done
+#4 CACHED
+
+#5 [internal] load metadata for docker.io/library/node:22-alpine
+#5 DONE 0.8s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 176B done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 DONE 0.0s
+
+#8 [deps 1/8] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
+#8 resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 0.0s done
+#8 DONE 0.0s
+
+#9 [runner 2/4] RUN corepack enable && corepack prepare pnpm@11.13.0 --activate && apk add --no-cache curl
+#9 CACHED
+
+#10 [runner 3/4] WORKDIR /app
+#10 CACHED
+
+#7 [internal] load build context
+#7 transferring context: 10.78kB 0.0s done
+#7 DONE 0.0s
+
+#11 [deps 5/8] RUN pnpm fetch
+#11 CACHED
+
+#12 [deps 3/8] WORKDIR /app
+#12 CACHED
+
+#13 [deps 4/8] COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+#13 CACHED
+
+#14 [deps 2/8] RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
+#14 CACHED
+
+#15 [deps 6/8] COPY . .
+#15 CACHED
+
+#16 [deps 7/8] RUN pnpm install --offline --frozen-lockfile       --filter "@gis/worker..."       --filter "@gis/database..."
+#16 0.914 Scope: 6 of 10 workspace projects
+#16 1.045 ✓ Lockfile passes supply-chain policies (verified 4m ago)
+#16 1.051 Lockfile is up to date, resolution step is skipped
+#16 1.555 [ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @nestjs/core@10.4.22, @prisma/client@5.22.0, @prisma/engines@5.22.0, @scarf/scarf@1.4.0, esbuild@0.28.1, msgpackr-extract@3.0.4, prisma@5.22.0
+#16 1.555 
+#16 1.555 Run "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.
+#16 ERROR: process "/bin/sh -c pnpm install --offline --frozen-lockfile       --filter \"${APP}...\"       --filter \"@gis/database...\"" did not complete successfully: exit code: 1
+------
+ > [deps 7/8] RUN pnpm install --offline --frozen-lockfile       --filter "@gis/worker..."       --filter "@gis/database...":
+0.914 Scope: 6 of 10 workspace projects
+1.045 ✓ Lockfile passes supply-chain policies (verified 4m ago)
+1.051 Lockfile is up to date, resolution step is skipped
+1.555 [ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: @nestjs/core@10.4.22, @prisma/client@5.22.0, @prisma/engines@5.22.0, @scarf/scarf@1.4.0, esbuild@0.28.1, msgpackr-extract@3.0.4, prisma@5.22.0
+1.555 
+1.555 Run "pnpm approve-builds" to pick which dependencies should be allowed to run scripts.
+------
+failed to solve: process "/bin/sh -c pnpm install --offline --frozen-lockfile       --filter \"${APP}...\"       --filter \"@gis/database...\"" did not complete successfully: exit code: 1
+
