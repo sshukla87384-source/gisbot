@@ -2,7 +2,7 @@
 
 Target: single Hostinger **KVM 8** VPS (8 vCPU / 32 GB RAM / 400 GB NVMe), Ubuntu 24.04, Docker Compose. Resource budget: Postgres 8 GB, Redis 3 GB, apps ~1 GB each, generous OS headroom (Architecture doc §1).
 
-Current deployable scope: **bot + worker (payments/fulfillment/cron) + postgres + redis + nginx/certbot + migrate** (default compose profile). `api` and `admin` sit behind `--profile full` and activate as those apps ship — no compose changes needed later.
+Current deployable scope (default profile): **bot + worker + postgres + redis + nginx/certbot + migrate**. The **admin API + admin panel** are built and sit behind `--profile full`; bring the whole stack up with `./infrastructure/scripts/deploy.sh full` (set `PUBLIC_API_URL`, `ADMIN_PANEL_ORIGIN`, `NEXT_PUBLIC_API_URL` in `.env` first). Log in to `admin.yourdomain.com` with `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`.
 
 ## 1. Buy & provision the VPS
 
