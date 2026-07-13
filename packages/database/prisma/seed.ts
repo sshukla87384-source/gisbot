@@ -5,6 +5,7 @@
  */
 import { loadConfig } from "@gis/config";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
+import { hash as argonHash } from "@node-rs/argon2";
 import { ensureDbObjects, prisma } from "../src/index.js";
 
 const PERMISSIONS: Array<{ key: string; group: string }> = [
@@ -197,11 +198,36 @@ async function seedDemoCatalog(masterKey: string): Promise<void> {
   }
 }
 
+async function seedSuperAdmin(email: string, password: string): Promise<void> {
+  const role = await prisma.role.findUniqueOrThrow({ where: { name: "SUPER_ADMIN" } });
+  const passwordHash = await argonHash(password, { memoryCost: 65536, timeCost: 3, parallelism: 4 });
+  const user = await prisma.user.upsert({
+    where: { email },
+    create: {
+      email,
+      emailVerified: true,
+      passwordHash,
+      firstName: "Admin",
+      currency: "INR",
+      wallet: { create: { currency: "INR" } },
+    },
+    update: { passwordHash },
+  });
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId: user.id, roleId: role.id } },
+    create: { userId: user.id, roleId: role.id },
+    update: {},
+  });
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   await ensureDbObjects();
   await seedRbac();
   await seedTiersAndSettings();
+  if (config.SEED_ADMIN_EMAIL && config.SEED_ADMIN_PASSWORD) {
+    await seedSuperAdmin(config.SEED_ADMIN_EMAIL, config.SEED_ADMIN_PASSWORD);
+  }
   if (config.NODE_ENV !== "production") {
     await seedDemoCatalog(config.ENCRYPTION_MASTER_KEY);
     // eslint-disable-next-line no-console
