@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1.7
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameterized image for all Node apps (api / telegram-bot / worker).
+# Build from the REPO ROOT:
+#
+#   docker build -f infrastructure/docker/Dockerfile.node \
+#     --build-arg APP=@gis/api .
+#
+#   APP is the pnpm workspace package name:
+#     @gis/api | @gis/telegram-bot | @gis/worker | @gis/database (migrate job)
+#
+# Notes:
+# - Apps run TypeScript directly via tsx ("start": "tsx src/main.ts"); there is
+#   no build/transpile step, so devDependencies (tsx, typescript, prisma CLI)
+#   MUST stay installed. Do NOT add --prod / pnpm prune here — it would strip
+#   tsx and the container would not start. The workspace filter below keeps the
+#   image lean instead (only APP + its workspace deps are installed).
+# - pnpm-lock.yaml must be committed; the fetch/offline-install pattern below
+#   depends on it and gives reproducible, cache-friendly builds.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG NODE_VERSION=22
+
+# ── deps: install workspace-filtered node_modules ───────────────────────────
+FROM node:${NODE_VERSION}-alpine AS deps
+ARG APP
+RUN corepack enable
+WORKDIR /app
+
+# Lockfile-only fetch → this layer is cached until pnpm-lock.yaml changes.
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm fetch
+
+# Now bring in the source and link the store offline.
+COPY . .
+# Install APP plus all of its workspace dependencies ("${APP}..." selector).
+# @gis/database is included explicitly so the Prisma CLI/client are always
+# present (migrate job image, prisma generate below).
+RUN pnpm install --offline --frozen-lockfile \
+      --filter "${APP}..." \
+      --filter "@gis/database..."
+
+# Generate the Prisma client into node_modules.
+RUN pnpm --filter @gis/database exec prisma generate
+
+# ── runner: non-root production runtime ─────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS runner
+ARG APP
+RUN corepack enable && apk add --no-cache curl
+
+ENV NODE_ENV=production
+# CMD cannot expand build ARGs, so persist the filter as an ENV for runtime.
+ENV APP_FILTER=${APP}
+
+WORKDIR /app
+# pnpm's virtual store lives inside /app/node_modules/.pnpm → one copy is enough.
+COPY --from=deps --chown=node:node /app /app
+
+USER node
+
+# api listens on PORT=8080, bot on PORT=8081 (set per-service in compose).
+# The worker has no HTTP server — compose.prod.yml overrides its healthcheck
+# with a trivial `node -e "process.exit(0)"` liveness probe.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/health" || exit 1
+
+# Shell form so $APP_FILTER expands at runtime; exec keeps PID 1 signals sane.
+CMD ["sh", "-c", "exec pnpm --filter \"$APP_FILTER\" start"]

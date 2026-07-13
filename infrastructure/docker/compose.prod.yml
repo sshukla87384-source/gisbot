@@ -1,0 +1,254 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Get It Sasta — production stack (single Hostinger VPS KVM 8: 8 vCPU / 32 GB).
+#
+# ALWAYS run from the REPO ROOT so variable interpolation reads the root .env:
+#
+#   docker compose --env-file .env -f infrastructure/docker/compose.prod.yml up -d
+#
+# (infrastructure/scripts/deploy.sh wraps this.) Only nginx publishes ports;
+# everything else talks over the internal network. See docs/deployment/production.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: gis
+
+x-defaults: &defaults
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging: &default-logging
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+  networks:
+    - internal
+
+services:
+  # ── Edge ───────────────────────────────────────────────────────────────────
+  nginx:
+    <<: *defaults
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../nginx/gis.conf:/etc/nginx/conf.d/gis.conf:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      - bot
+    # Reload every 6h so renewed certificates get picked up.
+    command: >
+      /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done
+      & exec nginx -g 'daemon off;'"
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  certbot:
+    <<: *defaults
+    image: certbot/certbot:latest
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    # Webroot renewal loop (initial issuance is a one-shot bootstrap command —
+    # see docs/deployment/production.md §6).
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do
+      certbot renew --webroot -w /var/www/certbot --quiet;
+      sleep 12h & wait $${!}; done"
+
+  # ── Data stores ────────────────────────────────────────────────────────────
+  postgres:
+    <<: *defaults
+    image: postgres:16-alpine
+    shm_size: 1g
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-gis}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=4GB
+      - -c
+      - effective_cache_size=12GB
+      - -c
+      - max_connections=200
+      - -c
+      - wal_compression=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gis} -d ${POSTGRES_DB:-gis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          memory: 8g
+
+  redis:
+    <<: *defaults
+    image: redis:7-alpine
+    # noeviction: BullMQ job data must never be silently evicted.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
+  # ── One-shot: migrations + seed (gates app startup) ───────────────────────
+  migrate:
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    networks:
+      - internal
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP: "@gis/database"
+    env_file: ../../.env
+    environment:
+      NODE_ENV: production
+    command: >
+      sh -c "pnpm --filter @gis/database exec prisma migrate deploy
+      && pnpm --filter @gis/database db:seed"
+    restart: "no"
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Applications ───────────────────────────────────────────────────────────
+  api:
+    <<: *defaults
+    # Activates when the app ships: docker compose --profile full up -d
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP: "@gis/api"
+    env_file: ../../.env
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  bot:
+    <<: *defaults
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP: "@gis/telegram-bot"
+    env_file: ../../.env
+    environment:
+      NODE_ENV: production
+      BOT_MODE: webhook
+      PORT: 8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  worker:
+    <<: *defaults
+    # Activates when the app ships: docker compose --profile full up -d
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP: "@gis/worker"
+    env_file: ../../.env
+    environment:
+      NODE_ENV: production
+    # No HTTP server — override the image healthcheck with a liveness no-op.
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  admin:
+    <<: *defaults
+    # Activates when the app ships: docker compose --profile full up -d
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.admin
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.getitsasta.com}
+    env_file: ../../.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    depends_on:
+      api:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  certbot_certs:
+  certbot_www:

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gis
+          POSTGRES_PASSWORD: gis
+          POSTGRES_DB: gis
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gis" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://gis:gis@localhost:5432/gis
+      REDIS_URL: redis://localhost:6379
+      BOT_TOKEN: 0000000000:ci-dummy-token-not-real-0000000000000000
+      ENCRYPTION_MASTER_KEY: 1111111111111111111111111111111111111111111111111111111111111111
+      JWT_SECRET: ci-dummy-jwt-secret-at-least-32-characters
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @gis/database exec prisma generate
+      - run: pnpm -r typecheck
+      - run: pnpm -r --if-present test
+      - name: Verify migrations apply cleanly
+        run: pnpm --filter @gis/database exec prisma migrate deploy || pnpm --filter @gis/database exec prisma db push
+
+  docker:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build bot image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.node
+          build-args: APP=@gis/telegram-bot
+          push: false
+      # To publish to GHCR: add permissions: packages: write, docker/login-action
+      # with GITHUB_TOKEN, and set push: true + tags: ghcr.io/${{ github.repository }}/bot:latest

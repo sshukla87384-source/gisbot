@@ -4,7 +4,9 @@ Enterprise-grade Telegram-based marketplace for digital products (license keys, 
 
 ## Status
 
-**Phases 1–6 complete (design):** PRD, system architecture, bot UX, database schema, API spec, security architecture — see [`docs/`](./docs). Implementation (Phases 7–18) pending approval.
+**Design (Phases 1–6):** complete — see [`docs/`](./docs).
+**Implemented:** Telegram bot with catalog/cart/wallet + transactional wallet checkout and instant license delivery (Phase 7); production deployment for Hostinger VPS KVM 8 — Docker images, hardened compose stack, nginx+TLS, CI, encrypted off-site backups, runbook ([`docs/deployment/production.md`](./docs/deployment/production.md)).
+**In progress (parked in [`wip/`](./wip)):** admin API, admin panel. **Next:** payment gateways (Razorpay/Stripe), fulfillment worker, reseller flows.
 
 ## Stack
 
