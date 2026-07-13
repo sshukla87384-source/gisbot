@@ -12,6 +12,7 @@ import {
   type CartView,
 } from "@gis/core";
 import { prisma, type Currency } from "@gis/database";
+import { PROVIDER_LABELS, listEnabledProviders } from "@gis/payments";
 import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
@@ -151,6 +152,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     getCartView(user.id, user.currency as Currency),
     getWallet(user.id),
   ]);
+  const gateways = listEnabledProviders(user.currency);
   const enough = wallet.balanceMinor >= BigInt(view.subtotalMinor);
   const lines = [
     "🧾 <b>Checkout</b>",
@@ -158,12 +160,17 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     cartText(view),
     "",
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>`,
-    enough ? "" : "⚠️ Balance too low — top up your wallet first.",
-    "",
-    "Gateway payments (UPI/Cards/PayPal/Stars) arrive in the payments phase — wallet checkout is live now.",
+    gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
-  if (view.allAvailable && enough) kb.text(`💰 Pay ${fmt(view.subtotalMinor, view.currency)} from Wallet`, cb("ord", "paywallet")).row();
+  if (view.allAvailable && enough) {
+    kb.text(`💰 Pay ${fmt(view.subtotalMinor, view.currency)} from Wallet`, cb("ord", "paywallet")).row();
+  }
+  if (view.allAvailable) {
+    for (const p of gateways) {
+      kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
+    }
+  }
   kb.text("◀️ Back to Cart", cb("crt", "view"));
   backToMenuRow(kb);
   return { text: lines.join("\n"), kb };
@@ -214,7 +221,7 @@ export async function walletView(user: BotUser): Promise<View> {
     text: [
       `💳 <b>Wallet</b> — <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
       "",
-      "Deposits via UPI/Cards/PayPal arrive with the payments phase.",
+      "Wallet deposits via UPI/crypto arrive with the deposit phase — pay orders directly with UPI/crypto at checkout meanwhile.",
     ].join("\n"),
     kb,
   };
@@ -298,7 +305,7 @@ export function helpView(): View {
       "❓ <b>Help</b>",
       "",
       "• Browse 🛍 Shop or 📂 Categories, tap a product, add to 🛒 Cart.",
-      "• Pay from your 💳 Wallet — instant items are delivered in seconds.",
+      "• Pay by UPI, crypto, or wallet — instant items are delivered in seconds.",
       "• Delivered keys live forever in 🔑 My Licenses.",
       "• Problems? Open a 🎫 Support ticket — a human replies here in chat.",
     ].join("\n"),

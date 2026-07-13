@@ -5,6 +5,7 @@ import {
   changeQty,
   checkoutWithWallet,
   clearCart,
+  createGatewayCheckout,
   createTicket,
   getProductIdBySlug,
   getRedis,
@@ -106,7 +107,7 @@ export function createBot(): Bot<Ctx> {
   bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
 
   if (isDev()) {
-    // Dev-only wallet top-up so checkout is testable before gateways land (Phase 10).
+    // Dev-only wallet top-up so checkout is testable end-to-end.
     bot.command("devtopup", async (ctx) => {
       const amount = Number.parseInt(ctx.match.trim(), 10);
       if (!Number.isFinite(amount) || amount <= 0) return ctx.reply("Usage: /devtopup <amount-minor-units>");
@@ -228,6 +229,23 @@ export function createBot(): Bot<Ctx> {
             );
           }
           await render(ctx, await views.menuView(user), false);
+          break;
+        }
+        case "ord:paygw": {
+          await ctx.answerCallbackQuery({ text: "⏳ Creating payment link…" });
+          const gw = await createGatewayCheckout(user.id, args[0] ?? "");
+          const payKb = new InlineKeyboard()
+            .url(`🔗 Pay ${fmt(gw.totalMinor, gw.currency)}`, gw.url)
+            .row()
+            .text("🛒 Back to Cart", "crt:view");
+          await ctx.editMessageText(
+            [
+              `🧾 Order <b>${gw.orderNumber}</b> created — ${fmt(gw.totalMinor, gw.currency)}.`,
+              "",
+              "Complete the payment within <b>15 minutes</b>. Delivery lands here automatically after confirmation.",
+            ].join("\n"),
+            { parse_mode: "HTML", reply_markup: payKb },
+          );
           break;
         }
         case "ord:list":

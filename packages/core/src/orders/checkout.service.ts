@@ -1,6 +1,7 @@
 import { loadConfig } from "@gis/config";
-import { nextOrderNumber, prisma, type Currency, type Prisma } from "@gis/database";
-import { CoreError, decryptSecret, encryptSecret } from "@gis/shared";
+import { nextOrderNumber, prisma, type Currency } from "@gis/database";
+import { CoreError, encryptSecret } from "@gis/shared";
+import { assignAccountSlot, assignLicenseKey, priceCart } from "./assign.js";
 
 /**
  * Wallet-funded checkout with automatic fulfillment (PRD §6.1, Security doc §5).
@@ -9,8 +10,8 @@ import { CoreError, decryptSecret, encryptSecret } from "@gis/shared";
  *   wallet row lock → live price recheck → order + items → inventory assignment
  *   via FOR UPDATE SKIP LOCKED → ledger debit → audit log.
  * Duplicate delivery is impossible: LicenseKey.orderItemId is UNIQUE.
- * Gateway checkouts (Razorpay/Stripe/…) reuse assignInventory() in Phase 10 —
- * only the funding step differs.
+ * Gateway checkouts (Razorpay UPI / NOWPayments crypto) share the same
+ * assignment primitives — see gateway-checkout.service.ts + fulfillment.service.ts.
  */
 
 export interface DeliveredSecret {
@@ -31,124 +32,6 @@ export interface CheckoutResult {
   status: "COMPLETED" | "PENDING_FULFILLMENT";
   deliveries: DeliveredSecret[];
   pendingManualItems: number;
-}
-
-type Tx = Prisma.TransactionClient;
-
-interface PricedLine {
-  variantId: string;
-  productId: string;
-  productName: string;
-  variantName: string;
-  productType: string;
-  activationGuide: string | null;
-  resellerId: string | null;
-  quantity: number;
-  unitPriceMinor: number;
-  fulfillmentMode: "AUTOMATIC" | "MANUAL";
-}
-
-async function priceCart(tx: Tx, userId: string, currency: Currency): Promise<PricedLine[]> {
-  const cart = await tx.cart.findUnique({
-    where: { userId },
-    include: {
-      items: {
-        include: {
-          variant: {
-            include: {
-              product: true,
-              prices: { where: { currency, tier: { name: "RETAIL" } } },
-            },
-          },
-        },
-      },
-    },
-  });
-  if (!cart || cart.items.length === 0) throw new CoreError("CART_EMPTY");
-
-  return cart.items.map((item) => {
-    const v = item.variant;
-    if (!v.isActive || v.deletedAt !== null || v.product.status !== "ACTIVE" || v.product.deletedAt !== null) {
-      throw new CoreError("CART_ITEM_UNAVAILABLE", `${v.product.name} is no longer available`);
-    }
-    const price = v.prices[0];
-    if (!price) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no ${currency} price`);
-    return {
-      variantId: v.id,
-      productId: v.productId,
-      productName: v.product.name,
-      variantName: v.name,
-      productType: v.product.type,
-      activationGuide: v.product.activationGuide,
-      resellerId: v.product.resellerId,
-      quantity: item.quantity,
-      unitPriceMinor: price.amountMinor,
-      fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
-    };
-  });
-}
-
-async function assignLicenseKey(
-  tx: Tx,
-  variantId: string,
-  orderItemId: string,
-  masterKey: string,
-): Promise<{ key: string; expiresAt: Date | null }> {
-  const rows = await tx.$queryRaw<Array<{ id: string; keyEncrypted: string; expiresAt: Date | null }>>`
-    SELECT "id", "keyEncrypted", "expiresAt" FROM "LicenseKey"
-    WHERE "variantId" = ${variantId} AND "status" = 'AVAILABLE' AND "deletedAt" IS NULL
-    ORDER BY "createdAt" ASC
-    LIMIT 1
-    FOR UPDATE SKIP LOCKED`;
-  const row = rows[0];
-  if (!row) throw new CoreError("OUT_OF_STOCK");
-
-  await tx.licenseKey.update({
-    where: { id: row.id },
-    data: { status: "SOLD", soldAt: new Date(), orderItemId },
-  });
-  return { key: decryptSecret(row.keyEncrypted, masterKey), expiresAt: row.expiresAt };
-}
-
-async function assignAccountSlot(
-  tx: Tx,
-  variantId: string,
-  orderItemId: string,
-  masterKey: string,
-): Promise<{ username: string; password: string; expiresAt: Date | null }> {
-  const rows = await tx.$queryRaw<
-    Array<{
-      id: string;
-      usernameEncrypted: string;
-      passwordEncrypted: string;
-      expiresAt: Date | null;
-      maxSlots: number;
-      usedSlots: number;
-    }>
-  >`
-    SELECT "id", "usernameEncrypted", "passwordEncrypted", "expiresAt", "maxSlots", "usedSlots"
-    FROM "DigitalAccount"
-    WHERE "variantId" = ${variantId} AND "status" = 'AVAILABLE' AND "deletedAt" IS NULL
-      AND "usedSlots" < "maxSlots"
-    ORDER BY "createdAt" ASC
-    LIMIT 1
-    FOR UPDATE SKIP LOCKED`;
-  const row = rows[0];
-  if (!row) throw new CoreError("OUT_OF_STOCK");
-
-  const nowFull = row.usedSlots + 1 >= row.maxSlots;
-  await tx.digitalAccount.update({
-    where: { id: row.id },
-    data: { usedSlots: { increment: 1 }, ...(nowFull ? { status: "SOLD" } : {}) },
-  });
-  await tx.accountAssignment.create({
-    data: { accountId: row.id, orderItemId, slotLabel: `Slot ${row.usedSlots + 1}` },
-  });
-  return {
-    username: decryptSecret(row.usernameEncrypted, masterKey),
-    password: decryptSecret(row.passwordEncrypted, masterKey),
-    expiresAt: row.expiresAt,
-  };
 }
 
 export async function checkoutWithWallet(userId: string): Promise<CheckoutResult> {

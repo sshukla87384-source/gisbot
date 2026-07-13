@@ -1,5 +1,5 @@
 {
-  "name": "@gis/core",
+  "name": "@gis/payments",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,10 +11,7 @@
   },
   "dependencies": {
     "@gis/config": "workspace:*",
-    "@gis/database": "workspace:*",
-    "@gis/payments": "workspace:*",
     "@gis/shared": "workspace:*",
-    "bullmq": "^5.34.0",
-    "ioredis": "^5.4.1"
+    "razorpay": "^2.9.5"
   }
 }

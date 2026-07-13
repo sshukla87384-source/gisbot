@@ -89,10 +89,11 @@ enum OrderStatus {
 }
 
 enum PaymentProvider {
-  RAZORPAY
-  STRIPE
-  PAYPAL
-  TELEGRAM_STARS
+  RAZORPAY // UPI / cards / netbanking
+  NOWPAYMENTS // crypto (BTC/ETH/USDT/...)
+  STRIPE // reserved - not enabled (product decision: UPI + crypto only)
+  PAYPAL // reserved
+  TELEGRAM_STARS // reserved
   WALLET
 }
 

@@ -1,5 +1,5 @@
 {
-  "name": "@gis/telegram-bot",
+  "name": "@gis/worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,7 +14,10 @@
     "@gis/database": "workspace:*",
     "@gis/payments": "workspace:*",
     "@gis/shared": "workspace:*",
-    "grammy": "^1.32.0"
+    "bullmq": "^5.34.0",
+    "grammy": "^1.32.0",
+    "ioredis": "^5.4.1",
+    "resend": "^4.0.1"
   },
   "devDependencies": {
     "tsx": "^4.19.2"

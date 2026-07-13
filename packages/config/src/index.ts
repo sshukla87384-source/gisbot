@@ -31,7 +31,7 @@ const envSchema = z
     REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
     // ── HTTP ──
-    PORT: z.coerce.number().int().positive().default(8081), // bot webhook server
+    PORT: z.coerce.number().int().positive().default(8081), // bot webhook / worker server
     API_PORT: z.coerce.number().int().positive().default(8080),
     PUBLIC_API_URL: z.string().url().optional(), // payment redirects / webhook base
     ADMIN_PANEL_ORIGIN: z.string().url().default("http://localhost:3000"),
@@ -40,12 +40,12 @@ const envSchema = z
     SEED_ADMIN_EMAIL: z.string().email().optional(),
     SEED_ADMIN_PASSWORD: z.string().min(12).optional(),
 
-    // ── Payment gateways (optional groups) ──
+    // ── Payment gateways (optional groups) — UPI + crypto only ──
     RAZORPAY_KEY_ID: z.string().optional(),
     RAZORPAY_KEY_SECRET: z.string().optional(),
     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
-    STRIPE_SECRET_KEY: z.string().optional(),
-    STRIPE_WEBHOOK_SECRET: z.string().optional(),
+    NOWPAYMENTS_API_KEY: z.string().optional(),
+    NOWPAYMENTS_IPN_SECRET: z.string().optional(),
 
     // ── Email (Resend) ──
     RESEND_API_KEY: z.string().optional(),
@@ -84,12 +84,12 @@ const envSchema = z
         message: "Set all of RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET or none",
       });
     }
-    const stripeVars = [env.STRIPE_SECRET_KEY, env.STRIPE_WEBHOOK_SECRET];
-    if (stripeVars.some(Boolean) && !stripeVars.every(Boolean)) {
+    const nowVars = [env.NOWPAYMENTS_API_KEY, env.NOWPAYMENTS_IPN_SECRET];
+    if (nowVars.some(Boolean) && !nowVars.every(Boolean)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["STRIPE_SECRET_KEY"],
-        message: "Set both STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET or neither",
+        path: ["NOWPAYMENTS_API_KEY"],
+        message: "Set both NOWPAYMENTS_API_KEY and NOWPAYMENTS_IPN_SECRET or neither",
       });
     }
   });

@@ -73,4 +73,5 @@ export const ERROR_COPY: Record<string, string> = {
   VARIANT_NOT_FOUND: "This option is no longer available.",
   ORDER_NOT_FOUND: "Order not found.",
   WALLET_NOT_FOUND: "Wallet not found — send /start to reinitialize.",
+  VALIDATION_FAILED: "⚠️ That didn't work — please try again.",
 };

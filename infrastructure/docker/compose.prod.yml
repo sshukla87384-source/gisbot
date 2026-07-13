@@ -194,8 +194,6 @@ services:
 
   worker:
     <<: *defaults
-    # Activates when the app ships: docker compose --profile full up -d
-    profiles: ["full"]
     build:
       context: ../..
       dockerfile: infrastructure/docker/Dockerfile.node
@@ -204,12 +202,7 @@ services:
     env_file: ../../.env
     environment:
       NODE_ENV: production
-    # No HTTP server — override the image healthcheck with a liveness no-op.
-    healthcheck:
-      test: ["CMD", "node", "-e", "process.exit(0)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      PORT: 8082 # payment webhook receiver + /health (image healthcheck uses it)
     depends_on:
       postgres:
         condition: service_healthy

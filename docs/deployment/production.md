@@ -2,7 +2,7 @@
 
 Target: single Hostinger **KVM 8** VPS (8 vCPU / 32 GB RAM / 400 GB NVMe), Ubuntu 24.04, Docker Compose. Resource budget: Postgres 8 GB, Redis 3 GB, apps ~1 GB each, generous OS headroom (Architecture doc §1).
 
-Current deployable scope: **bot + postgres + redis + nginx/certbot + migrate** (default compose profile). `api`, `worker`, `admin` services are defined behind `--profile full` and activate as those apps ship — no compose changes needed later.
+Current deployable scope: **bot + worker (payments/fulfillment/cron) + postgres + redis + nginx/certbot + migrate** (default compose profile). `api` and `admin` sit behind `--profile full` and activate as those apps ship — no compose changes needed later.
 
 ## 1. Buy & provision the VPS
 
@@ -73,7 +73,7 @@ Edit `.env` — production values checklist:
 | `NGINX_DOMAIN` | `yourdomain.com` (deploy.sh renders nginx config from it) |
 | `ADMIN_ALERT_CHAT_ID` | Telegram chat id of your admin group (optional) |
 | Backups | `BACKUP_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL` (any S3-compatible bucket on a **different provider**), `BACKUP_AGE_RECIPIENT` (`age-keygen` — keep the identity offline) |
-| Gateways | leave `RAZORPAY_*` / `STRIPE_*` empty until the payments phase |
+| Gateways | **UPI:** set `RAZORPAY_KEY_ID/KEY_SECRET/WEBHOOK_SECRET`; in the Razorpay dashboard add webhook URL `https://api.yourdomain.com/webhooks/payments/razorpay` (events: payment_link.paid, payment.failed, refund.processed). **Crypto:** set `NOWPAYMENTS_API_KEY/IPN_SECRET`; IPN callback is sent automatically per invoice. Leave a group empty to hide that payment method in the bot. |
 
 ## 6. TLS bootstrap (once, before first full start)
 
