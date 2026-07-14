@@ -132,7 +132,9 @@ services:
       NODE_ENV: production
     command: >
       sh -c "pnpm --filter @gis/database exec prisma migrate deploy
-      && pnpm --filter @gis/database db:seed"
+      && echo '=== MIGRATIONS APPLIED OK ==='
+      && pnpm --filter @gis/database db:seed
+      && echo '=== SEED OK ==='"
     restart: "no"
     healthcheck:
       disable: true

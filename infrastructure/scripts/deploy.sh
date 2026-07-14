@@ -23,7 +23,14 @@ echo "==> Building images"
 $COMPOSE build --pull
 
 echo "==> Applying stack (migrations run as the one-shot 'migrate' service)"
-$COMPOSE up -d --remove-orphans
+if ! $COMPOSE up -d --remove-orphans; then
+  echo ""
+  echo "===================================================================="
+  echo "  DEPLOY FAILED — the real error from the migrate container is:"
+  echo "===================================================================="
+  $COMPOSE logs --tail=80 migrate || true
+  exit 1
+fi
 
 echo "==> Waiting for bot health"
 for i in $(seq 1 30); do
