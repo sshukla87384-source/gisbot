@@ -21,25 +21,25 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
 export function mainMenuKeyboard(user: BotUser): InlineKeyboard {
   const loc = user.locale;
   const kb = new InlineKeyboard()
-    .text(t(loc, "b_shop"), cb("shp", "home", 1))
-    .text(t(loc, "b_categories"), cb("shp", "root"))
+    .text("🟢 " + t(loc, "b_shop"), cb("shp", "home", 1))
+    .text("🟢 " + t(loc, "b_categories"), cb("shp", "root"))
     .row()
-    .text(t(loc, "b_search"), cb("mnu", "search"))
-    .text(t(loc, "b_cart"), cb("crt", "view"))
+    .text("🟢 " + t(loc, "b_search"), cb("mnu", "search"))
+    .text("🟢 " + t(loc, "b_cart"), cb("crt", "view"))
     .row()
-    .text(t(loc, "b_orders"), cb("ord", "list", 1))
-    .text(t(loc, "b_licenses"), cb("lic", "list", 1))
+    .text("🔵 " + t(loc, "b_orders"), cb("ord", "list", 1))
+    .text("🔵 " + t(loc, "b_licenses"), cb("lic", "list", 1))
     .row()
-    .text(t(loc, "b_wallet"), cb("wal", "view"))
-    .text(t(loc, "b_referral"), cb("ref", "view"))
+    .text("🔵 " + t(loc, "b_wallet"), cb("wal", "view"))
+    .text("🔵 " + t(loc, "b_referral"), cb("ref", "view"))
     .row()
-    .text(t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"))
-    .text(t(loc, "b_language"), cb("lang", "home"))
+    .text("🔵 " + t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"))
+    .text("🔵 " + t(loc, "b_language"), cb("lang", "home"))
     .row()
-    .text(t(loc, "b_support"), cb("sup", "home"))
-    .text(t(loc, "b_help"), cb("mnu", "help"))
+    .text("🔵 " + t(loc, "b_support"), cb("sup", "home"))
+    .text("🔵 " + t(loc, "b_help"), cb("mnu", "help"))
     .row()
-    .text(t(loc, "b_developer"), cb("api", "home"));
+    .text("🔵 " + t(loc, "b_developer"), cb("api", "home"));
   if (user.roleNames.includes("RESELLER")) {
     kb.row().text(t(loc, "b_reseller"), cb("rsl", "home"));
   }
