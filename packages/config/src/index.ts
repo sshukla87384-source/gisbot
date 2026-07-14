@@ -55,6 +55,9 @@ const envSchema = z
     BINANCE_API_SECRET: z.string().optional(),
     BINANCE_USDT_INR_RATE: z.coerce.number().positive().default(90), // INR per 1 USDT
     BINANCE_USDT_USD_RATE: z.coerce.number().positive().default(1), // USD per 1 USDT
+    // In-bot admin panel: passcode gate + optional telegram-id allowlist.
+    BOT_ADMIN_PASSCODE: z.string().optional(),
+    BOT_ADMIN_IDS: z.string().optional(), // comma-separated telegram ids allowed to log in
 
     // ── Email (Resend) ──
     RESEND_API_KEY: z.string().optional(),

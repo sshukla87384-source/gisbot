@@ -89,3 +89,55 @@ export async function pollBinancePayments(): Promise<number> {
   }
   return confirmed;
 }
+
+
+export type BinanceVerifyResult =
+  | { ok: true; orderNumber: string }
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" };
+
+/**
+ * Verify a specific Binance Pay transaction ID against an order and confirm it.
+ * Used when the customer/admin pastes the transaction ID (e.g. auto-poll missed
+ * it, or two orders shared a base amount). Requires the read-only API key; with
+ * no key it returns { ok:false, reason:"NO_API" } so the caller can fall back.
+ */
+export async function verifyBinanceByTxnId(orderId: string, txnId: string): Promise<BinanceVerifyResult> {
+  const cfg = loadConfig();
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true },
+  });
+  if (!order) return { ok: false, reason: "NOT_FOUND" };
+  if (order.status !== "PENDING_PAYMENT") return { ok: false, reason: "ORDER_NOT_PENDING" };
+
+  const clean = txnId.trim();
+  const dup = await prisma.order.findFirst({ where: { binanceTxnId: clean }, select: { id: true } });
+  if (dup) return { ok: false, reason: "ALREADY_USED" };
+
+  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) return { ok: false, reason: "NO_API" };
+
+  let txns: PayTxn[];
+  try {
+    txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("binance verify fetch failed", { error: String(e) });
+    return { ok: false, reason: "NOT_FOUND" };
+  }
+
+  const txn = txns.find((t) => String(t.transactionId) === clean);
+  if (!txn || txn.currency !== "USDT" || parseFloat(txn.amount) <= 0) return { ok: false, reason: "NOT_FOUND" };
+
+  const want = parseFloat(order.binanceAmount ?? "0");
+  if (!(want > 0) || Math.abs(parseFloat(txn.amount) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
+
+  const claimed = await prisma.order.updateMany({
+    where: { id: orderId, status: "PENDING_PAYMENT" },
+    data: { binanceTxnId: clean },
+  });
+  if (claimed.count === 0) return { ok: false, reason: "ORDER_NOT_PENDING" };
+
+  await confirmManualPayment(orderId);
+  await enqueueAdminAlert(`✅ Binance verified by txn ${clean} — ${order.orderNumber} (${order.binanceAmount} USDT).`);
+  return { ok: true, orderNumber: order.orderNumber };
+}

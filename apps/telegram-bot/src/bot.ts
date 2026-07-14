@@ -25,6 +25,7 @@ import {
 import { Bot, GrammyError, InlineKeyboard, session } from "grammy";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
+import { adminCommand, handleAdminCallback, handleAdminText } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import * as views from "./views.js";
 import type { View } from "./views.js";
@@ -119,6 +120,7 @@ export function createBot(): Bot<Ctx> {
   bot.command("wallet", async (ctx) => render(ctx, await views.walletView(ctx.user), false));
   bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
   bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
+  bot.command("admin", async (ctx) => adminCommand(ctx));
 
   if (isDev()) {
     // Dev-only wallet top-up so checkout is testable end-to-end.
@@ -139,6 +141,10 @@ export function createBot(): Bot<Ctx> {
   bot.on("message:text", async (ctx) => {
     const awaiting = ctx.session.awaiting;
     ctx.session.awaiting = null;
+    if (awaiting && awaiting.startsWith("admin_")) {
+      const handled = await handleAdminText(ctx, awaiting);
+      if (handled) return;
+    }
     if (awaiting === "search") {
       const q = ctx.message.text.trim().slice(0, 64);
       ctx.session.lastSearch = q;
@@ -165,6 +171,10 @@ export function createBot(): Bot<Ctx> {
     const user = ctx.user;
 
     try {
+      if (ns === "adm") {
+        await handleAdminCallback(ctx, action, args);
+        return;
+      }
       switch (route) {
         case "mnu:home":
           await render(ctx, await views.menuView(user), true);
