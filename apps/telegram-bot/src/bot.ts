@@ -73,6 +73,19 @@ export function createBot(): Bot<Ctx> {
 
   const render = async (ctx: Ctx, view: View, edit: boolean): Promise<void> => {
     const opts = { parse_mode: "HTML" as const, reply_markup: view.kb };
+    // A photo message can't be produced by editing a text message, so image
+    // cards are always sent fresh (with the text as the caption).
+    if (view.photo) {
+      const caption = view.text.length > 1024 ? `${view.text.slice(0, 1021)}…` : view.text;
+      try {
+        await ctx.replyWithPhoto(view.photo, { caption, parse_mode: "HTML", reply_markup: view.kb });
+        return;
+      } catch {
+        // Bad/broken image URL → fall back to a plain text card.
+        await ctx.reply(view.text, opts);
+        return;
+      }
+    }
     if (edit && ctx.callbackQuery?.message) {
       try {
         await ctx.editMessageText(view.text, opts);

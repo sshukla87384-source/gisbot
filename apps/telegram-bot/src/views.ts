@@ -22,6 +22,7 @@ import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginat
 export interface View {
   text: string;
   kb: InlineKeyboard;
+  photo?: string; // optional image URL → product card / broadcast image
 }
 
 export async function menuView(user: BotUser): Promise<View> {
@@ -116,7 +117,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
   }
   kb.text("🛒 View Cart", cb("crt", "view"));
   backToMenuRow(kb);
-  return { text: lines.join("\n"), kb };
+  return { text: lines.join("\n"), kb, photo: p.imageUrl || undefined };
 }
 
 export function cartText(view: CartView): string {

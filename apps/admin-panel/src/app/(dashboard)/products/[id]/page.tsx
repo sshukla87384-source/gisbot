@@ -11,7 +11,7 @@ import { errorMessage } from "@/lib/utils";
 
 interface Price { currency: string; amountMinor: number; tier?: { name: string } }
 interface Variant { id: string; name: string; sku: string; isActive: boolean; prices: Price[] }
-interface Product { id: string; name: string; description: string | null; status: string; fulfillmentMode: string; variants: Variant[] }
+interface Product { id: string; name: string; description: string | null; status: string; fulfillmentMode: string; imageUrl: string | null; variants: Variant[] }
 const STATUSES = ["DRAFT", "ACTIVE", "PAUSED", "ARCHIVED"];
 
 export default function ProductDetail() {
@@ -20,8 +20,8 @@ export default function ProductDetail() {
   const toast = useToast();
   const { data, isLoading } = useQuery({ queryKey: ["product", id], queryFn: () => apiData<Product>(`/products/${id}`) });
 
-  const [fields, setFields] = useState({ name: "", description: "", status: "DRAFT", fulfillmentMode: "AUTOMATIC" });
-  useEffect(() => { if (data) setFields({ name: data.name, description: data.description ?? "", status: data.status, fulfillmentMode: data.fulfillmentMode }); }, [data]);
+  const [fields, setFields] = useState({ name: "", description: "", status: "DRAFT", fulfillmentMode: "AUTOMATIC", imageUrl: "" });
+  useEffect(() => { if (data) setFields({ name: data.name, description: data.description ?? "", status: data.status, fulfillmentMode: data.fulfillmentMode, imageUrl: data.imageUrl ?? "" }); }, [data]);
 
   const save = useMutation({
     mutationFn: () => apiData(`/products/${id}`, { method: "PATCH", body: fields }),
@@ -49,6 +49,8 @@ export default function ProductDetail() {
           <div><Label>Status</Label><Select value={fields.status} onChange={(e) => setFields({ ...fields, status: e.target.value })}>{STATUSES.map((s) => <option key={s}>{s}</option>)}</Select></div>
           <div><Label>Fulfillment</Label><Select value={fields.fulfillmentMode} onChange={(e) => setFields({ ...fields, fulfillmentMode: e.target.value })}><option>AUTOMATIC</option><option>MANUAL</option></Select></div>
           <div className="md:col-span-2"><Label>Description</Label><Textarea rows={3} value={fields.description} onChange={(e) => setFields({ ...fields, description: e.target.value })} /></div>
+          <div className="md:col-span-2"><Label>Image URL</Label><Input value={fields.imageUrl} onChange={(e) => setFields({ ...fields, imageUrl: e.target.value })} placeholder="https://…/product.jpg" /></div>
+          {fields.imageUrl.trim() ? <div className="md:col-span-2"><img src={fields.imageUrl} alt="preview" className="max-h-44 rounded-lg border border-slate-200" /></div> : null}
         </div>
         <div className="mt-3"><Button onClick={() => save.mutate()} disabled={save.isPending}>Save</Button></div>
       </Card>

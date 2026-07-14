@@ -1,4 +1,4 @@
-import { adjustWallet, enqueueAdminAlert, getRedis } from "@gis/core";
+import { adjustWallet, dispatchDueBroadcasts, enqueueAdminAlert, getRedis } from "@gis/core";
 import { prisma } from "@gis/database";
 
 /**
@@ -153,6 +153,11 @@ async function reconcileWallets(): Promise<void> {
   }
 }
 
+/** Fire scheduled / recurring broadcasts whose time has come (every 60 s). */
+async function runScheduledBroadcasts(): Promise<void> {
+  await dispatchDueBroadcasts();
+}
+
 export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
   const every = (sec: number, key: string, ttl: number, fn: () => Promise<void>) =>
     setInterval(() => void withLock(key, ttl, fn), sec * 1000);
@@ -162,6 +167,7 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
 
   return [
     every(60, "sweep", 55, sweepReservationsAndOrders),
+    every(60, "broadcasts", 55, runScheduledBroadcasts),
     every(600, "holds", 590, releaseHolds),
     every(3600, "lowstock", 3590, lowStockAlerts),
     every(86_400, "reconcile", 86_390, reconcileWallets),

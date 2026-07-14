@@ -20,6 +20,7 @@ export interface FulfillmentJob {
 export interface OutboxJob {
   telegramId: string;
   text: string;
+  photo?: string; // optional image URL → sent as photo with text as caption
 }
 export interface EmailJob {
   to: string;
@@ -69,10 +70,15 @@ export async function enqueueFulfillment(webhookEventId: string): Promise<void> 
 }
 
 /** All outbound Telegram messages flow through this throttled queue (§3.3). */
-export async function enqueueTelegramMessage(telegramId: bigint | string, text: string): Promise<void> {
+export async function enqueueTelegramMessage(
+  telegramId: bigint | string,
+  text: string,
+  photo?: string,
+): Promise<void> {
   await getQueue(QUEUE_NAMES.outbox).add("send", {
     telegramId: telegramId.toString(),
     text,
+    ...(photo ? { photo } : {}),
   } satisfies OutboxJob);
 }
 

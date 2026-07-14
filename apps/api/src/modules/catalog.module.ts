@@ -24,6 +24,7 @@ const createProduct = z.object({
   activationGuide: z.string().max(4000).optional(),
   sourcingNote: z.string().max(1000).optional(),
   isFeatured: z.boolean().optional(),
+  imageUrl: z.string().url().max(2000).optional().or(z.literal("")),
 });
 const updateProduct = createProduct.partial().extend({
   status: z.enum(["DRAFT", "PENDING_APPROVAL", "ACTIVE", "PAUSED", "ARCHIVED"]).optional(),
@@ -122,6 +123,7 @@ export class CatalogController {
   @Post("products")
   async createProduct(@Body() body: unknown, @Req() req: ApiRequest) {
     const data = validate(createProduct, body);
+    if (data.imageUrl === "") data.imageUrl = undefined;
     const p = await prisma.product.create({ data: { ...data, status: "DRAFT" } });
     await invalidate("cat:*");
     await writeAudit(req, "product.create", "Product", p.id, undefined, p);
@@ -132,6 +134,7 @@ export class CatalogController {
   @Patch("products/:id")
   async updateProduct(@Param("id") id: string, @Body() body: unknown, @Req() req: ApiRequest) {
     const data = validate(updateProduct, body);
+    if (data.imageUrl === "") (data as { imageUrl?: string | null }).imageUrl = null;
     const before = await prisma.product.findUnique({ where: { id } });
     if (!before) throw notFound("Product");
     const p = await prisma.product.update({ where: { id }, data });

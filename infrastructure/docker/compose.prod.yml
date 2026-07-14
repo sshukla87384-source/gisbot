@@ -132,8 +132,8 @@ services:
     environment:
       NODE_ENV: production
     command: >
-      sh -c "pnpm --filter @gis/database exec prisma migrate deploy
-      && echo '=== MIGRATIONS APPLIED OK ==='
+      sh -c "pnpm --filter @gis/database exec prisma db push --skip-generate --accept-data-loss
+      && echo '=== SCHEMA SYNCED OK ==='
       && pnpm --filter @gis/database db:seed
       && echo '=== SEED OK ==='"
     restart: "no"

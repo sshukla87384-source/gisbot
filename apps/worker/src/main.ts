@@ -41,7 +41,13 @@ async function main(): Promise<void> {
     QUEUE_NAMES.outbox,
     async (job) => {
       try {
-        await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML" });
+        if (job.data.photo) {
+          // Caption limit is 1024 chars; trim defensively.
+          const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
+          await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML" });
+        } else {
+          await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML" });
+        }
       } catch (e) {
         if (e instanceof GrammyError && e.error_code === 403) {
           // Bot blocked — stop notifying, don't retry (Bot UX doc §14).

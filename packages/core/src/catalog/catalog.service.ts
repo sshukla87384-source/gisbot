@@ -36,6 +36,7 @@ export interface ProductView {
   id: string;
   name: string;
   description: string | null;
+  imageUrl: string | null;
   type: string;
   fulfillmentMode: string;
   activationGuide: string | null;
@@ -146,6 +147,7 @@ export async function getProductView(productId: string, currency: Currency): Pro
     id: p.id,
     name: p.name,
     description: p.description,
+    imageUrl: p.imageUrl,
     type: p.type,
     fulfillmentMode: p.fulfillmentMode,
     activationGuide: p.activationGuide,
