@@ -1,4 +1,4 @@
-import { announceProduct, invalidate } from "@gis/core";
+import { announceFlashSale, announceProduct, invalidate } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { BadRequestException, Body, Controller, Delete, Get, Module, Param, Patch, Post, Put, Query, Req, UploadedFile, UseInterceptors } from "@nestjs/common";
@@ -170,6 +170,12 @@ export class CatalogController {
     // Auto-announce the first time a product goes ACTIVE.
     if (before.status !== "ACTIVE" && p.status === "ACTIVE" && !before.announcedAt) {
       await announceProduct(p.id, { createdById: req.user!.id }).catch(() => undefined);
+    }
+    // Instantly announce a flash sale whenever the discount is set/changed.
+    const saleChanged = (data as { salePercentBp?: number }).salePercentBp !== undefined
+      && (p.salePercentBp ?? 0) > 0 && before.salePercentBp !== p.salePercentBp;
+    if (saleChanged) {
+      await announceFlashSale(p.id, { createdById: req.user!.id }).catch(() => undefined);
     }
     return p;
   }

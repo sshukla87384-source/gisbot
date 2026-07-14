@@ -210,3 +210,63 @@ export async function announceProduct(
   await prisma.product.update({ where: { id: p.id }, data: { announcedAt: new Date() } });
   return { announced: true, broadcastId: res.broadcastId, targets: res.targets };
 }
+
+function saleTimeLeft(until: Date | null): string {
+  if (!until) return "";
+  let ms = until.getTime() - Date.now();
+  if (ms <= 0) return "";
+  const d = Math.floor(ms / 86_400_000); ms -= d * 86_400_000;
+  const h = Math.floor(ms / 3_600_000); ms -= h * 3_600_000;
+  const m = Math.floor(ms / 60_000);
+  if (d > 0) return `${d}d ${h}h left`;
+  if (h > 0) return `${h}h ${m}m left`;
+  return `${m}m left`;
+}
+
+/**
+ * Instantly broadcast a flash-sale announcement for a product to all users:
+ * 🔥 X% OFF, sale price, countdown, and a ⚡ Buy Now deep-link button.
+ */
+export async function announceFlashSale(
+  productId: string,
+  opts: { createdById: string; pin?: boolean } = { createdById: "system" },
+): Promise<{ announced: boolean; targets?: number }> {
+  const p = await prisma.product.findUnique({
+    where: { id: productId },
+    include: { variants: { where: { isActive: true, deletedAt: null }, include: { prices: { where: { tier: { name: "RETAIL" } } } } } },
+  });
+  if (!p || p.status !== "ACTIVE" || p.deletedAt) return { announced: false };
+  if (!isSaleActive(p)) return { announced: false };
+
+  const cfg = loadConfig();
+  const pct = Math.round((p.salePercentBp ?? 0) / 100);
+  const all = p.variants.flatMap((v) => v.prices);
+  const inr = all.filter((pr) => pr.currency === "INR");
+  const picks = (inr.length > 0 ? inr : all).map((pr) => ({
+    currency: pr.currency, was: pr.amountMinor, now: effectivePriceMinor(pr.amountMinor, p),
+  }));
+  const cheapest = picks.length > 0 ? picks.reduce((a, b) => (b.now < a.now ? b : a)) : null;
+  const left = saleTimeLeft(p.saleEndsAt);
+
+  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+  const title = `🔥 FLASH SALE — ${icon}${p.name}`;
+  const body = [
+    `${pct}% OFF${left ? ` · ⏳ ${left}` : ""}!`,
+    cheapest ? `${fmtMinor(cheapest.was, cheapest.currency)} ➜ ${fmtMinor(cheapest.now, cheapest.currency)}` : "",
+    "",
+    "Grab it before the timer runs out! ⚡",
+  ].filter((l) => l !== "").join("\n");
+
+  const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
+  const res = await sendBroadcast({
+    title,
+    body,
+    segment: "all",
+    imageUrl: p.imageUrl ?? undefined,
+    buttonText: buttonUrl ? "⚡ Grab the deal" : undefined,
+    buttonUrl,
+    pin: opts.pin ?? false,
+    createdById: opts.createdById,
+  });
+  return { announced: true, targets: res.targets };
+}

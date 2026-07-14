@@ -9,6 +9,7 @@ import {
   listApiKeys,
   revokeApiKey,
   announceProduct,
+  announceFlashSale,
   clearFlashSale,
   confirmManualPayment,
   createCategoryQuick,
@@ -506,7 +507,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (!Number.isFinite(pct) || pct <= 0) { await ctx.reply("❌ Bad format. Send like: 20 48"); return true; }
     const endsAt = Number.isFinite(hours) && hours > 0 ? new Date(Date.now() + hours * 3_600_000) : null;
     await setFlashSale(productId, pct, endsAt);
-    await ctx.reply(`🔥 Flash sale set: ${pct}% off${endsAt ? ` for ${hours} h` : " (until you end it)"}.`);
+    const ann = await announceFlashSale(productId, { createdById: "bot-admin" });
+    await ctx.reply(`🔥 Flash sale set: ${pct}% off${endsAt ? ` for ${hours} h` : " (until you end it)"}.${ann.announced ? ` 📣 Notified ${ann.targets ?? 0} users instantly.` : ""}`);
     await sendPanel(ctx, false);
     return true;
   }
