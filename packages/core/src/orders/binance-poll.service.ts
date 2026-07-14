@@ -118,7 +118,7 @@ export async function pollBinancePayments(): Promise<number> {
 
 export type BinanceVerifyResult =
   | { ok: true; orderNumber: string }
-  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" };
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" | "WRONG_USER" };
 
 /**
  * Verify a specific Binance Pay transaction ID against an order and confirm it.
@@ -126,13 +126,14 @@ export type BinanceVerifyResult =
  * it, or two orders shared a base amount). Requires the read-only API key; with
  * no key it returns { ok:false, reason:"NO_API" } so the caller can fall back.
  */
-export async function verifyBinanceByTxnId(orderId: string, txnId: string): Promise<BinanceVerifyResult> {
+export async function verifyBinanceByTxnId(orderId: string, txnId: string, expectedUserId?: string): Promise<BinanceVerifyResult> {
   const cfg = loadConfig();
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true },
+    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true, userId: true },
   });
   if (!order) return { ok: false, reason: "NOT_FOUND" };
+  if (expectedUserId && order.userId !== expectedUserId) return { ok: false, reason: "WRONG_USER" };
   if (order.status !== "PENDING_PAYMENT") return { ok: false, reason: "ORDER_NOT_PENDING" };
 
   const clean = txnId.trim();

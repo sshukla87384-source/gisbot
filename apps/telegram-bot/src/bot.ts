@@ -189,7 +189,7 @@ export function createBot(): Bot<Ctx> {
     if (awaiting === "binance_txnid") {
       const orderId = ctx.session.binanceOrderId ?? "";
       const txn = ctx.message.text.trim().slice(0, 128);
-      const r = await verifyBinanceByTxnId(orderId, txn);
+      const r = await verifyBinanceByTxnId(orderId, txn, ctx.user.id);
       if (r.ok) {
         ctx.session.binanceOrderId = undefined;
         return ctx.reply("✅ Payment verified! Your order has been delivered. Check 📦 My Orders.");
@@ -208,7 +208,9 @@ export function createBot(): Bot<Ctx> {
           ? "⚠️ That transaction’s amount doesn’t match your order. "
           : r.reason === "ALREADY_USED"
             ? "⚠️ That transaction was already used. "
-            : "";
+            : r.reason === "WRONG_USER"
+              ? "⚠️ That order doesn’t belong to your account. "
+              : "";
       return ctx.reply(
         `${note}We’ve logged your Transaction ID and our team will verify and deliver shortly. You’ll get a message here once it’s confirmed.`,
       );
@@ -246,7 +248,7 @@ export function createBot(): Bot<Ctx> {
     if (awaiting === "wallet_topup_txn") {
       const topupId = ctx.session.walletTopupId ?? "";
       const txn = ctx.message.text.trim().slice(0, 128);
-      const r = await verifyTopupByTxn(topupId, txn);
+      const r = await verifyTopupByTxn(topupId, txn, ctx.user.id);
       if (r.ok) {
         ctx.session.walletTopupId = undefined;
         return ctx.reply(`✅ Wallet topped up by ${fmt(r.amountMinor, r.currency)}! New balance: <b>${fmt(r.newBalanceMinor, r.currency)}</b>.`, { parse_mode: "HTML" });
@@ -286,7 +288,8 @@ export function createBot(): Bot<Ctx> {
         parse_mode: "HTML",
       });
     }
-    return render(ctx, await views.menuView(ctx.user), false);
+    // Don't pop the menu on random text — only /start, /menu or buttons open it.
+    return ctx.reply("Tap /menu 🏠 to open the menu, or use /shop to browse.");
   });
 
   // ── Callback router (Bot UX doc §1: every callback answered < 1 s) ──

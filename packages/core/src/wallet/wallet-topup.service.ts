@@ -43,13 +43,14 @@ export async function createWalletTopup(userId: string, amountMinor: number): Pr
 
 export type TopupVerify =
   | { ok: true; newBalanceMinor: bigint; amountMinor: number; currency: string }
-  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "NOT_PENDING" };
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "NOT_PENDING" | "WRONG_USER" };
 
 /** Verify a Binance transaction ID against a pending top-up and credit the wallet. */
-export async function verifyTopupByTxn(topupId: string, txnId: string): Promise<TopupVerify> {
+export async function verifyTopupByTxn(topupId: string, txnId: string, expectedUserId?: string): Promise<TopupVerify> {
   const cfg = loadConfig();
   const topup = await prisma.walletTopup.findUnique({ where: { id: topupId } });
   if (!topup) return { ok: false, reason: "NOT_FOUND" };
+  if (expectedUserId && topup.userId !== expectedUserId) return { ok: false, reason: "WRONG_USER" };
   if (topup.status !== "PENDING") return { ok: false, reason: "NOT_PENDING" };
 
   const clean = txnId.trim();
