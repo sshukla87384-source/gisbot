@@ -349,8 +349,11 @@ model ApiKey {
   id        String    @id @default(cuid())
   name      String
   keyHash   String    @unique
-  prefix    String // first 8 chars for identification
-  scopes    String[] // permission keys
+  prefix    String // shown prefix for identification (e.g. gis_live_1a2b)
+  scopes    String[] // developer scopes: catalog:read, orders:read, analytics:read
+  rateLimitPerMin Int  @default(120)
+  callCount Int        @default(0)
+  ownerUserId String?
   lastUsedAt DateTime?
   expiresAt DateTime?
   createdAt DateTime  @default(now())

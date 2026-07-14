@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   BarChart3, Boxes, ClipboardList, FileClock, LayoutDashboard, LogOut, Package,
-  Settings, Ticket, Users, Wallet, BadgePercent, Megaphone,
+  Settings, Ticket, Users, Wallet, BadgePercent, Megaphone, KeyRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -21,6 +21,7 @@ const NAV = [
   { href: "/coupons", label: "Coupons", icon: BadgePercent },
   { href: "/tickets", label: "Tickets", icon: Ticket },
   { href: "/broadcasts", label: "Broadcasts", icon: Megaphone },
+  { href: "/developer", label: "Developer API", icon: KeyRound },
   { href: "/settings", label: "Settings", icon: Settings },
   { href: "/audit", label: "Audit Logs", icon: BarChart3 },
 ];

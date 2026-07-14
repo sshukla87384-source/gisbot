@@ -14,4 +14,5 @@ export * from "./orders/manual-pay.service.js";
 export * from "./orders/binance-poll.service.js";
 export * from "./broadcast.service.js";
 export * from "./admin.service.js";
+export * from "./apikey.service.js";
 export * from "./pricing.js";

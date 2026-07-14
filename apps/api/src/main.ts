@@ -7,6 +7,7 @@ import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { AppModule } from "./app.module.js";
+import { DeveloperModule } from "./modules/developer.module.js";
 
 async function bootstrap(): Promise<void> {
   const config = loadConfig();
@@ -27,6 +28,15 @@ async function bootstrap(): Promise<void> {
       .build();
     SwaggerModule.setup("api/docs", app, SwaggerModule.createDocument(app, swagger));
   }
+
+  // Public developer API docs — available in every environment.
+  const devDoc = new DocumentBuilder()
+    .setTitle("Get It Sasta — Developer API")
+    .setDescription("Public, API-key authenticated. Send your key as the 'X-API-Key' header. Read-only v1.")
+    .setVersion("1.0")
+    .addApiKey({ type: "apiKey", name: "X-API-Key", in: "header" }, "apiKey")
+    .build();
+  SwaggerModule.setup("api/v1/developer/docs", app, SwaggerModule.createDocument(app, devDoc, { include: [DeveloperModule] }));
 
   await app.listen(config.API_PORT);
   Logger.log(`API listening on :${config.API_PORT}`, "Bootstrap");

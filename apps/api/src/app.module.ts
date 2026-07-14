@@ -11,6 +11,8 @@ import { AuthModule } from "./modules/auth.module.js";
 import { BroadcastsModule } from "./modules/broadcasts.module.js";
 import { CatalogModule } from "./modules/catalog.module.js";
 import { CouponsModule } from "./modules/coupons.module.js";
+import { DeveloperModule } from "./modules/developer.module.js";
+import { ApiKeysModule } from "./modules/apikeys.module.js";
 import { InventoryModule } from "./modules/inventory.module.js";
 import { OrdersModule } from "./modules/orders.module.js";
 import { PlatformModule } from "./modules/platform.module.js";
@@ -31,6 +33,8 @@ import { WalletsModule } from "./modules/wallets.module.js";
     CouponsModule,
     TicketsModule,
     PlatformModule,
+    DeveloperModule,
+    ApiKeysModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
