@@ -12,6 +12,7 @@ WORKDIR /app
 COPY . .
 RUN pnpm install --no-frozen-lockfile
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} NEXT_TELEMETRY_DISABLED=1
+ENV NODE_OPTIONS=--max-old-space-size=2048
 RUN pnpm --filter @gis/admin-panel build
 
 FROM node:${NODE_VERSION}-alpine AS runner
