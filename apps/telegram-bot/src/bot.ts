@@ -21,6 +21,8 @@ import {
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
+  registerPostTarget,
+  removePostTargetByChat,
   type DeliveredSecret,
 } from "@gis/core";
 import {
@@ -63,6 +65,27 @@ export function createBot(): Bot<Ctx> {
       return;
     }
     await next();
+  });
+
+  // ── Group registration commands (work in groups/channels; admin-gated) ──
+  bot.command("registergroup", async (ctx) => {
+    if (!(await isBotAdmin(ctx.from?.id))) {
+      await ctx.reply("Only a logged-in admin can register a group. DM me and use /admin first.").catch(() => undefined);
+      return;
+    }
+    if (!ctx.chat || ctx.chat.type === "private") {
+      await ctx.reply("Run this inside the group or channel you want to post products to (add me there as admin first).").catch(() => undefined);
+      return;
+    }
+    const title = "title" in ctx.chat ? (ctx.chat.title ?? null) : null;
+    await registerPostTarget(String(ctx.chat.id), title, ctx.from ? String(ctx.from.id) : undefined);
+    await ctx.reply("✅ Registered! Product posts from the admin panel will appear here.").catch(() => undefined);
+  });
+  bot.command("unregistergroup", async (ctx) => {
+    if (!(await isBotAdmin(ctx.from?.id))) return;
+    if (!ctx.chat || ctx.chat.type === "private") return;
+    await removePostTargetByChat(String(ctx.chat.id));
+    await ctx.reply("✅ Unregistered — no more product posts here.").catch(() => undefined);
   });
 
   // ── Resolve DB user for private chats ──

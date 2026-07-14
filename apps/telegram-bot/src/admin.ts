@@ -20,7 +20,10 @@ import {
   listProductsBrief,
   listRecentOrders,
   listCategoriesBrief,
+  listPostTargets,
   listVariantsBrief,
+  postProductToGroups,
+  removePostTarget,
   sendBroadcast,
   setFlashSale,
   setProductImage,
@@ -121,7 +124,8 @@ function panelKeyboard(): InlineKeyboard {
     .text("➕ Add product", cb("adm", "addp")).row()
     .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
-    .text("📢 Broadcast", cb("adm", "bc")).text("🔑 API keys", cb("adm", "apikeys")).row()
+    .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
+    .text("🔑 API keys", cb("adm", "apikeys")).row()
     .text("🚪 Logout", cb("adm", "logout")).row();
 }
 
@@ -211,6 +215,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
   kb.row().text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
@@ -266,6 +271,25 @@ async function apiKeysView(ctx: Ctx): Promise<void> {
     if (!k.revokedAt) kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("adm", "apirevoke", k.id)).row();
   }
   if (keys.length === 0) lines.push("No keys yet. Create one to give partners read-only API access.");
+  kb.text("◀️ Back", cb("adm", "home"));
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+async function groupsView(ctx: Ctx): Promise<void> {
+  const targets = await listPostTargets();
+  const kb = new InlineKeyboard();
+  const lines = [
+    "📣 <b>Groups &amp; Channels</b>",
+    "",
+    "To add one: add this bot to your group/channel (as admin for channels), then send <code>/registergroup</code> there.",
+    "Then open any product → <b>📣 Post to groups</b>.",
+    "",
+  ];
+  if (targets.length === 0) lines.push("No groups registered yet.");
+  for (const t of targets.slice(0, 15)) {
+    lines.push(`• ${escapeHtml(t.title ?? t.chatId)}${t.active ? "" : " (inactive)"}`);
+    kb.text(`🗑 Remove ${(t.title ?? t.chatId).slice(0, 18)}`, cb("adm", "grpdel", t.id)).row();
+  }
   kb.text("◀️ Back", cb("adm", "home"));
   await show(ctx, lines.join("\n"), kb, true);
 }
@@ -395,6 +419,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await setProductStatus(id, "ACTIVE");
       const r = await announceProduct(id, { createdById: "bot-admin", force: true });
       await ctx.reply(`🟢 Live!${r.announced ? ` 📣 Announced to ${r.targets ?? 0} users.` : ""}`);
+      return productView(ctx, id);
+    }
+    case "groups": return groupsView(ctx);
+    case "grpdel": { await removePostTarget(id); await ctx.reply("🗑 Removed."); return groupsView(ctx); }
+    case "gpost": {
+      const n = await postProductToGroups(id);
+      await ctx.reply(n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
     case "apikeys": return apiKeysView(ctx);

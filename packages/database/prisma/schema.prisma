@@ -345,6 +345,15 @@ model Session {
   @@index([userId])
 }
 
+model PostTarget {
+  id        String   @id @default(cuid())
+  chatId    String   @unique // Telegram group/channel chat id (may be negative)
+  title     String?
+  addedById String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
 model WalletTopup {
   id           String   @id @default(cuid())
   userId       String
