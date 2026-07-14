@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   BarChart3, Boxes, ClipboardList, FileClock, LayoutDashboard, LogOut, Package,
-  Settings, Ticket, Users, Wallet, BadgePercent,
+  Settings, Ticket, Users, Wallet, BadgePercent, Megaphone,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -13,12 +13,14 @@ const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/orders", label: "Orders", icon: ClipboardList },
   { href: "/manual-queue", label: "Manual Queue", icon: FileClock },
+  { href: "/categories", label: "Categories", icon: Boxes },
   { href: "/products", label: "Products", icon: Package },
   { href: "/inventory", label: "Inventory", icon: Boxes },
   { href: "/users", label: "Users", icon: Users },
   { href: "/withdrawals", label: "Withdrawals", icon: Wallet },
   { href: "/coupons", label: "Coupons", icon: BadgePercent },
   { href: "/tickets", label: "Tickets", icon: Ticket },
+  { href: "/broadcasts", label: "Broadcasts", icon: Megaphone },
   { href: "/settings", label: "Settings", icon: Settings },
   { href: "/audit", label: "Audit Logs", icon: BarChart3 },
 ];

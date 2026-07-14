@@ -57,6 +57,12 @@ export default function OrderDetail() {
     onError: (e) => toast(errorMessage(e), "error"),
   });
 
+  const confirmPay = useMutation({
+    mutationFn: () => apiData(`/orders/${id}/confirm-payment`, { method: "POST" }),
+    onSuccess: () => { toast("Payment confirmed — items delivered"); void qc.invalidateQueries({ queryKey: ["order", id] }); },
+    onError: (e) => toast(errorMessage(e), "error"),
+  });
+
   const resend = useMutation({
     mutationFn: () => apiData(`/orders/${id}/resend-delivery`, { method: "POST" }),
     onSuccess: () => toast("Delivery re-sent"),
@@ -74,6 +80,9 @@ export default function OrderDetail() {
         </div>
         <div className="flex items-center gap-3">
           <Badge tone={statusTone(order.status)}>{order.status}</Badge>
+          {order.status === "PENDING_PAYMENT" ? (
+            <Button onClick={() => { if (confirm("Confirm payment received (e.g. Binance) and deliver the order?")) confirmPay.mutate(); }} disabled={confirmPay.isPending}>Confirm payment</Button>
+          ) : null}
           <Button variant="secondary" onClick={() => resend.mutate()} disabled={resend.isPending}>Resend delivery</Button>
         </div>
       </div>

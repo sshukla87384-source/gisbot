@@ -46,6 +46,8 @@ const envSchema = z
     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
     NOWPAYMENTS_API_KEY: z.string().optional(),
     NOWPAYMENTS_IPN_SECRET: z.string().optional(),
+    // Binance Pay (manual P2P via UID — no auto webhook; admin confirms)
+    BINANCE_PAY_UID: z.string().optional(),
 
     // ── Email (Resend) ──
     RESEND_API_KEY: z.string().optional(),

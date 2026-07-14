@@ -6,6 +6,7 @@ import {
   checkoutWithWallet,
   clearCart,
   createGatewayCheckout,
+  createBinanceManualCheckout,
   createTicket,
   getProductIdBySlug,
   getRedis,
@@ -246,6 +247,33 @@ export function createBot(): Bot<Ctx> {
             ].join("\n"),
             { parse_mode: "HTML", reply_markup: payKb },
           );
+          break;
+        }
+        case "ord:paybinance": {
+          await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
+          const bz = await createBinanceManualCheckout(user.id);
+          await ctx.editMessageText(
+            [
+              `🟡 <b>Pay via Binance</b> — Order <b>${bz.orderNumber}</b>`,
+              "",
+              `Amount: <b>${fmt(bz.totalMinor, bz.currency)}</b>`,
+              `Send to Binance UID: <code>${bz.binanceUid}</code>`,
+              "",
+              "After paying, tap “I’ve paid” and our team will verify and deliver shortly.",
+            ].join("\n"),
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("✅ I’ve paid", `ord:binancepaid:${bz.orderNumber}`)
+                .row()
+                .text("🏠 Menu", "mnu:home"),
+            },
+          );
+          break;
+        }
+        case "ord:binancepaid": {
+          await ctx.answerCallbackQuery({ text: "Thanks! We’ll verify and deliver soon.", show_alert: true });
+          await createTicket(user.id, "PAYMENT_ISSUE", `Binance payment sent for order ${args[0] ?? ""}. Please verify UID and confirm.`).catch(() => undefined);
           break;
         }
         case "ord:list":

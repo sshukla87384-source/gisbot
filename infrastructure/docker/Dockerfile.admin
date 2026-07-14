@@ -1,56 +1,28 @@
 # syntax=docker/dockerfile:1.7
-# ─────────────────────────────────────────────────────────────────────────────
 # Admin panel (@gis/admin-panel — Next.js 14, output: "standalone").
-# Build from the REPO ROOT:
-#
-#   docker build -f infrastructure/docker/Dockerfile.admin \
-#     --build-arg NEXT_PUBLIC_API_URL=https://api.getitsasta.com .
-#
-# NEXT_PUBLIC_* vars are inlined at BUILD time by Next.js — changing the API
-# URL requires an image rebuild, not just a restart.
-# ─────────────────────────────────────────────────────────────────────────────
-
+# pnpm installed via npm (pinned) — no corepack/frozen-lockfile fragility.
 ARG NODE_VERSION=22
+ARG PNPM_VERSION=9.15.0
 
-# ── deps + build ─────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS build
 ARG NEXT_PUBLIC_API_URL
-RUN corepack enable
+ARG PNPM_VERSION
+RUN apk add --no-cache openssl && npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /app
-
-COPY pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm fetch
-
 COPY . .
-RUN pnpm install --offline --frozen-lockfile --filter "@gis/admin-panel..."
-
-ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} \
-    NEXT_TELEMETRY_DISABLED=1
+RUN pnpm install --no-frozen-lockfile
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} NEXT_TELEMETRY_DISABLED=1
 RUN pnpm --filter @gis/admin-panel build
 
-# ── runner: standalone server, non-root ──────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runner
 RUN apk add --no-cache curl
-
-ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
-    PORT=3000 \
-    HOSTNAME=0.0.0.0
-
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 WORKDIR /app
-
-# Next standalone output bundles a minimal node_modules + server.js. In a pnpm
-# monorepo the tree is rooted at the repo, so server.js ends up under
-# apps/admin-panel/ inside the standalone dir.
 COPY --from=build --chown=node:node /app/apps/admin-panel/.next/standalone ./
 COPY --from=build --chown=node:node /app/apps/admin-panel/.next/static ./apps/admin-panel/.next/static
 COPY --from=build --chown=node:node /app/apps/admin-panel/public ./apps/admin-panel/public
-
 USER node
-
 EXPOSE 3000
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:3000/" || exit 1
-
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
+  CMD curl -fsS "http://127.0.0.1:3000/login" || exit 1
 CMD ["node", "apps/admin-panel/server.js"]

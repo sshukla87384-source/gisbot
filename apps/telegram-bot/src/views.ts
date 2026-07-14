@@ -12,6 +12,7 @@ import {
   type CartView,
 } from "@gis/core";
 import { prisma, type Currency } from "@gis/database";
+import { loadConfig } from "@gis/config";
 import { PROVIDER_LABELS, listEnabledProviders } from "@gis/payments";
 import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
@@ -169,6 +170,9 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   if (view.allAvailable) {
     for (const p of gateways) {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
+    }
+    if (loadConfig().BINANCE_PAY_UID) {
+      kb.text("🟡 Pay via Binance (UID)", cb("ord", "paybinance")).row();
     }
   }
   kb.text("◀️ Back to Cart", cb("crt", "view"));

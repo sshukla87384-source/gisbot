@@ -8,6 +8,7 @@ import { PermissionsGuard } from "./common/permissions.guard.js";
 import type { ApiRequest, ApiResponse } from "./common/types.js";
 import { AnalyticsModule } from "./modules/analytics.module.js";
 import { AuthModule } from "./modules/auth.module.js";
+import { BroadcastsModule } from "./modules/broadcasts.module.js";
 import { CatalogModule } from "./modules/catalog.module.js";
 import { CouponsModule } from "./modules/coupons.module.js";
 import { InventoryModule } from "./modules/inventory.module.js";
@@ -20,6 +21,7 @@ import { WalletsModule } from "./modules/wallets.module.js";
 @Module({
   imports: [
     AuthModule,
+    BroadcastsModule,
     AnalyticsModule,
     CatalogModule,
     InventoryModule,

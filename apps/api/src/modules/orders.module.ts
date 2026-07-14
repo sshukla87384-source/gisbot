@@ -1,5 +1,5 @@
 import { loadConfig } from "@gis/config";
-import { enqueueTelegramMessage } from "@gis/core";
+import { confirmManualPayment, enqueueTelegramMessage } from "@gis/core";
 import { prisma } from "@gis/database";
 import { decryptSecret, encryptSecret } from "@gis/shared";
 import { Body, Controller, Get, Module, Param, Post, Query, Req } from "@nestjs/common";
@@ -122,6 +122,14 @@ export class OrdersController {
     }
     await writeAudit(req, "order.fulfill.manual", "Order", id, undefined, { itemId, kind: data.kind });
     return { ok: true, orderCompleted: remaining === 0 };
+  }
+
+  @RequirePermission("orders.fulfill")
+  @Post(":id/confirm-payment")
+  async confirmPayment(@Param("id") id: string, @Req() req: ApiRequest) {
+    const res = await confirmManualPayment(id, req.user!.id);
+    await writeAudit(req, "order.confirm-payment", "Order", id, undefined, res);
+    return res;
   }
 
   @RequirePermission("orders.fulfill")
