@@ -1,14 +1,17 @@
 # syntax=docker/dockerfile:1.7
 # Parameterized image for all Node apps (api / telegram-bot / worker / migrate).
 # Build from repo root:  docker build -f infrastructure/docker/Dockerfile.node --build-arg APP=@gis/api .
-# Apps run TypeScript via tsx (no transpile), so devDependencies stay installed.
-# We use --no-frozen-lockfile so a lockfile drift can never block a deploy.
+# pnpm is installed directly via npm (NOT corepack) at a pinned version, so the
+# build never depends on corepack downloading/verifying a newer pnpm release —
+# that was the silent build failure. --no-frozen-lockfile tolerates drift.
 
 ARG NODE_VERSION=22
+ARG PNPM_VERSION=9.15.0
 
 FROM node:${NODE_VERSION}-alpine AS deps
 ARG APP
-RUN apk add --no-cache openssl && corepack enable
+ARG PNPM_VERSION
+RUN apk add --no-cache openssl && npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /app
 COPY . .
 RUN pnpm install --no-frozen-lockfile
@@ -16,7 +19,8 @@ RUN pnpm --filter @gis/database exec prisma generate
 
 FROM node:${NODE_VERSION}-alpine AS runner
 ARG APP
-RUN apk add --no-cache openssl curl && corepack enable
+ARG PNPM_VERSION
+RUN apk add --no-cache openssl curl && npm install -g pnpm@${PNPM_VERSION}
 ENV NODE_ENV=production
 ENV APP_FILTER=${APP}
 WORKDIR /app
