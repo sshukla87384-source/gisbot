@@ -269,10 +269,12 @@ export function createBot(): Bot<Ctx> {
             [
               `🟡 <b>Pay via Binance</b> — Order <b>${bz.orderNumber}</b>`,
               "",
-              `Amount: <b>${fmt(bz.totalMinor, bz.currency)}</b>`,
-              `Send to Binance UID: <code>${bz.binanceUid}</code>`,
+              `Order value: <b>${fmt(bz.totalMinor, bz.currency)}</b>`,
+              `Send exactly: <b>${bz.binanceAmount} ${bz.binanceAsset}</b>`,
+              `To Binance UID: <code>${bz.binanceUid}</code>`,
               "",
-              "After paying, tap “I’ve paid” and our team will verify and deliver shortly.",
+              "⚠️ Send the <b>exact</b> amount shown — it’s how we auto-detect your payment.",
+              "Delivery is automatic within ~1–2 minutes of payment. If it doesn’t arrive, tap “I’ve paid” and we’ll verify manually.",
             ].join("\n"),
             {
               parse_mode: "HTML",

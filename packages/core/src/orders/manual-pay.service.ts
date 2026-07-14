@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { randomInt } from "node:crypto";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
@@ -17,6 +18,21 @@ export interface BinanceCheckoutResult {
   totalMinor: number;
   currency: Currency;
   binanceUid: string;
+  binanceAsset: string; // always "USDT"
+  binanceAmount: string; // exact USDT amount to send (unique for auto-matching)
+}
+
+/**
+ * Convert an order total (minor units, INR/USD) to a UNIQUE USDT amount so the
+ * payment poller can match an incoming Binance transfer to exactly one order.
+ * A tiny random tail (< 0.01 USDT) disambiguates equal-priced orders.
+ */
+function toUniqueUsdt(totalMinor: number, currency: Currency): string {
+  const cfg = loadConfig();
+  const rate = currency === "INR" ? cfg.BINANCE_USDT_INR_RATE : cfg.BINANCE_USDT_USD_RATE;
+  const base = totalMinor / 100 / rate;
+  const unique = base + randomInt(1, 100) / 10_000; // +0.0001 … +0.0099 USDT
+  return unique.toFixed(4);
 }
 
 export async function createBinanceManualCheckout(userId: string): Promise<BinanceCheckoutResult> {
@@ -34,6 +50,7 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
     });
     const lines = await priceCart(tx, userId, user.currency);
     const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+    const usdt = toUniqueUsdt(totalMinor, user.currency);
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
       data: {
@@ -44,6 +61,8 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
         subtotalMinor: totalMinor,
         totalMinor,
         expiresAt,
+        binanceAsset: "USDT",
+        binanceAmount: usdt,
       },
     });
     for (const line of lines) {
@@ -75,13 +94,13 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
         after: { orderNumber, totalMinor, currency: user.currency },
       },
     });
-    return { orderId: order.id, orderNumber, totalMinor };
+    return { orderId: order.id, orderNumber, totalMinor, binanceAmount: usdt };
   });
 
   await enqueueAdminAlert(
-    `🟡 New Binance order ${created.orderNumber} — ${formatMinor(created.totalMinor, user.currency as CurrencyCode)}. Verify UID ${uid} then confirm in the panel.`,
+    `🟡 New Binance order ${created.orderNumber} — ${formatMinor(created.totalMinor, user.currency as CurrencyCode)} (= ${created.binanceAmount} USDT). Auto-confirms when payment arrives; otherwise verify UID ${uid} and confirm in the panel.`,
   );
-  return { ...created, currency: user.currency, binanceUid: uid };
+  return { ...created, currency: user.currency, binanceUid: uid, binanceAsset: "USDT" };
 }
 
 /**

@@ -636,6 +636,9 @@ model Order {
   paidAt         DateTime?
   completedAt    DateTime?
   cancelledAt    DateTime?
+  binanceAsset   String? // e.g. "USDT" — asset expected for Binance Pay
+  binanceAmount  String? // exact (unique) amount the customer must send, for matching
+  binanceTxnId   String? // Binance Pay transactionId that settled this order (dedupe)
   items          OrderItem[]
   payments       Payment[]
   refunds        Refund[]
@@ -646,6 +649,7 @@ model Order {
   @@index([userId, createdAt])
   @@index([status, createdAt])
   @@index([status, expiresAt])
+  @@index([status, binanceAsset])
 }
 
 model OrderItem {

@@ -50,6 +50,11 @@ const envSchema = z
     NOWPAYMENTS_IPN_SECRET: z.string().optional(),
     // Binance Pay (manual P2P via UID — no auto webhook; admin confirms)
     BINANCE_PAY_UID: z.string().optional(),
+    // Auto-verification via a READ-ONLY Binance API key (Pay history polling).
+    BINANCE_API_KEY: z.string().optional(),
+    BINANCE_API_SECRET: z.string().optional(),
+    BINANCE_USDT_INR_RATE: z.coerce.number().positive().default(90), // INR per 1 USDT
+    BINANCE_USDT_USD_RATE: z.coerce.number().positive().default(1), // USD per 1 USDT
 
     // ── Email (Resend) ──
     RESEND_API_KEY: z.string().optional(),
