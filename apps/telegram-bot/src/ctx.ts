@@ -12,6 +12,7 @@ export interface SessionData {
     | "admin_txnid"
     | "admin_flashsale"
     | "admin_addkeys"
+    | "binance_txnid"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -19,6 +20,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Customer Binance order awaiting a transaction ID. */
+  binanceOrderId?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

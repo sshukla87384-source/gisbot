@@ -7,6 +7,7 @@ import {
   clearCart,
   createGatewayCheckout,
   createBinanceManualCheckout,
+  verifyBinanceByTxnId,
   createTicket,
   getProductIdBySlug,
   getRedis,
@@ -145,6 +146,30 @@ export function createBot(): Bot<Ctx> {
       const handled = await handleAdminText(ctx, awaiting);
       if (handled) return;
     }
+    if (awaiting === "binance_txnid") {
+      const orderId = ctx.session.binanceOrderId ?? "";
+      const txn = ctx.message.text.trim().slice(0, 128);
+      const r = await verifyBinanceByTxnId(orderId, txn);
+      if (r.ok) {
+        ctx.session.binanceOrderId = undefined;
+        return ctx.reply("✅ Payment verified! Your order has been delivered. Check 📦 My Orders.");
+      }
+      // Not auto-verified → keep it simple for the buyer, hand to support with the ID.
+      await createTicket(
+        ctx.user.id,
+        "PAYMENT_ISSUE",
+        `Binance payment — order ${orderId}, transaction ID: ${txn} (auto-verify: ${r.ok ? "ok" : r.reason}).`,
+      ).catch(() => undefined);
+      const note =
+        r.reason === "AMOUNT_MISMATCH"
+          ? "⚠️ That transaction’s amount doesn’t match your order. "
+          : r.reason === "ALREADY_USED"
+            ? "⚠️ That transaction was already used. "
+            : "";
+      return ctx.reply(
+        `${note}We’ve logged your Transaction ID and our team will verify and deliver shortly. You’ll get a message here once it’s confirmed.`,
+      );
+    }
     if (awaiting === "search") {
       const q = ctx.message.text.trim().slice(0, 64);
       ctx.session.lastSearch = q;
@@ -275,6 +300,7 @@ export function createBot(): Bot<Ctx> {
         case "ord:paybinance": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
           const bz = await createBinanceManualCheckout(user.id);
+          ctx.session.binanceOrderId = bz.orderId;
           await ctx.editMessageText(
             [
               `🟡 <b>Pay via Binance</b> — Order <b>${bz.orderNumber}</b>`,
@@ -283,16 +309,28 @@ export function createBot(): Bot<Ctx> {
               `Send exactly: <b>${bz.binanceAmount} ${bz.binanceAsset}</b>`,
               `To Binance UID: <code>${bz.binanceUid}</code>`,
               "",
-              "⚠️ Send the <b>exact</b> amount shown — it’s how we auto-detect your payment.",
-              "Delivery is automatic within ~1–2 minutes of payment. If it doesn’t arrive, tap “I’ve paid” and we’ll verify manually.",
+              "After sending, tap the button below and paste your Binance <b>Transaction ID</b> — we verify it and deliver instantly.",
             ].join("\n"),
             {
               parse_mode: "HTML",
               reply_markup: new InlineKeyboard()
-                .text("✅ I’ve paid", `ord:binancepaid:${bz.orderNumber}`)
+                .text("✅ I’ve paid — enter Transaction ID", "ord:binancetxn")
                 .row()
                 .text("🏠 Menu", "mnu:home"),
             },
+          );
+          break;
+        }
+        case "ord:binancetxn": {
+          await ctx.answerCallbackQuery();
+          if (!ctx.session.binanceOrderId) {
+            await ctx.reply("This checkout expired. Please start again from your cart.");
+            break;
+          }
+          ctx.session.awaiting = "binance_txnid";
+          await ctx.reply(
+            "🔎 Paste your Binance <b>Transaction ID</b> (open the payment in Binance → it’s the long ID on the receipt):",
+            { parse_mode: "HTML" },
           );
           break;
         }

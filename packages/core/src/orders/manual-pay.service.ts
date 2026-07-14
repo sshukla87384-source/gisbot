@@ -1,5 +1,4 @@
 import { loadConfig } from "@gis/config";
-import { randomInt } from "node:crypto";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
@@ -23,16 +22,14 @@ export interface BinanceCheckoutResult {
 }
 
 /**
- * Convert an order total (minor units, INR/USD) to a UNIQUE USDT amount so the
- * payment poller can match an incoming Binance transfer to exactly one order.
- * A tiny random tail (< 0.01 USDT) disambiguates equal-priced orders.
+ * Convert an order total (minor units, INR/USD) to a clean USDT amount the
+ * customer pays exactly. Confirmation is by the Binance transaction ID the
+ * customer submits (or admin verification), so no unique tail is needed.
  */
-function toUniqueUsdt(totalMinor: number, currency: Currency): string {
+function toUsdtAmount(totalMinor: number, currency: Currency): string {
   const cfg = loadConfig();
   const rate = currency === "INR" ? cfg.BINANCE_USDT_INR_RATE : cfg.BINANCE_USDT_USD_RATE;
-  const base = totalMinor / 100 / rate;
-  const unique = base + randomInt(1, 100) / 10_000; // +0.0001 … +0.0099 USDT
-  return unique.toFixed(4);
+  return (totalMinor / 100 / rate).toFixed(2);
 }
 
 export async function createBinanceManualCheckout(userId: string): Promise<BinanceCheckoutResult> {
@@ -50,7 +47,7 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
     });
     const lines = await priceCart(tx, userId, user.currency);
     const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-    const usdt = toUniqueUsdt(totalMinor, user.currency);
+    const usdt = toUsdtAmount(totalMinor, user.currency);
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
       data: {
