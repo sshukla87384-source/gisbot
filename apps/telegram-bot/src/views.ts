@@ -133,16 +133,17 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
 
   const kb = new InlineKeyboard();
   for (const v of p.variants) {
-    let priceLabel = "—";
-    if (v.priceMinor !== null) {
-      priceLabel =
+    if (v.stock > 0 && v.priceMinor !== null) {
+      const priceLabel =
         v.originalPriceMinor !== null
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
+      // Primary one-tap purchase, plus an add-to-cart for multi-item orders.
+      kb.text(`⚡ Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
+      kb.text(`🛒 Add ${v.name} to cart`, cb("crt", "add", v.id)).row();
+    } else {
+      kb.text(`❌ ${v.name} — out of stock`, cb("mnu", "noop")).row();
     }
-    const label = v.stock > 0 ? `➕ ${v.name} — ${priceLabel}` : `❌ ${v.name} — out of stock`;
-    if (v.stock > 0 && v.priceMinor !== null) kb.text(label, cb("crt", "add", v.id)).row();
-    else kb.text(label, cb("mnu", "noop")).row();
   }
   kb.text("🛒 View Cart", cb("crt", "view"));
   backToMenuRow(kb);

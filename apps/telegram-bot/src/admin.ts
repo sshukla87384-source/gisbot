@@ -2,6 +2,9 @@ import { loadConfig } from "@gis/config";
 import {
   addLicenseKeys,
   adminCancelOrder,
+  createApiKey,
+  listApiKeys,
+  revokeApiKey,
   announceProduct,
   clearFlashSale,
   confirmManualPayment,
@@ -106,7 +109,8 @@ function panelKeyboard(): InlineKeyboard {
     .text("➕ Add product", cb("adm", "addp")).row()
     .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
-    .text("📢 Broadcast", cb("adm", "bc")).text("🚪 Logout", cb("adm", "logout")).row();
+    .text("📢 Broadcast", cb("adm", "bc")).text("🔑 API keys", cb("adm", "apikeys")).row()
+    .text("🚪 Logout", cb("adm", "logout")).row();
 }
 
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
@@ -238,6 +242,20 @@ async function wizardTypeStep(ctx: Ctx): Promise<void> {
   await ctx.reply("<b>New product · Step 3/6</b>\nWhat type is it?", { parse_mode: "HTML", reply_markup: kb });
 }
 
+async function apiKeysView(ctx: Ctx): Promise<void> {
+  const keys = await listApiKeys();
+  const kb = new InlineKeyboard().text("➕ New API key", cb("adm", "apinew")).row();
+  const lines = ["🔑 <b>Developer API keys</b>", ""];
+  for (const k of keys.slice(0, 15)) {
+    const state = k.revokedAt ? "🚫 revoked" : "🟢 active";
+    lines.push(`• <b>${k.name}</b> — <code>${k.prefix}…</code> · ${state} · ${k.callCount} calls`);
+    if (!k.revokedAt) kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("adm", "apirevoke", k.id)).row();
+  }
+  if (keys.length === 0) lines.push("No keys yet. Create one to give partners read-only API access.");
+  kb.text("◀️ Back", cb("adm", "home"));
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
 /** Central callback dispatcher for the admin panel (ns === "adm"). */
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
@@ -332,6 +350,39 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const r = await announceProduct(id, { createdById: "bot-admin", force: true });
       await ctx.reply(`🟢 Live!${r.announced ? ` 📣 Announced to ${r.targets ?? 0} users.` : ""}`);
       return productView(ctx, id);
+    }
+    case "apikeys": return apiKeysView(ctx);
+    case "apinew": {
+      ctx.session.awaiting = "admin_api_name";
+      await askStep(ctx, "🔑 <b>New API key</b>\nSend a <b>name</b> for it (e.g. <code>Acme Integration</code>):");
+      return;
+    }
+    case "apiscope": {
+      const name = ctx.session.admApiName ?? "API key";
+      ctx.session.admApiName = undefined;
+      const preset = args[0] ?? "cat";
+      const scopes =
+        preset === "all" ? ["catalog:read", "orders:read", "analytics:read"]
+        : preset === "catord" ? ["catalog:read", "orders:read"]
+        : ["catalog:read"];
+      const created = await createApiKey({ name, scopes });
+      await ctx.reply(
+        [
+          "✅ <b>API key created</b> — copy it now, it won't be shown again:",
+          "",
+          `<code>${created.apiKey}</code>`,
+          "",
+          `Scopes: ${scopes.join(", ")}`,
+          "Send it as the <code>X-API-Key</code> header.",
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔑 API keys", cb("adm", "apikeys")).text("🏠 Panel", cb("adm", "home")) },
+      );
+      return;
+    }
+    case "apirevoke": {
+      await revokeApiKey(id);
+      await ctx.reply("🔑 Key revoked.");
+      return apiKeysView(ctx);
     }
     case "bc": {
       ctx.session.awaiting = "admin_broadcast";
@@ -453,6 +504,17 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       `✅ <b>Product created</b> (as draft).\nAdd stock, then activate to put it live & announce it to users.`,
       { parse_mode: "HTML", reply_markup: kb },
     );
+    return true;
+  }
+
+  if (awaiting === "admin_api_name") {
+    ctx.session.admApiName = text.slice(0, 120) || "API key";
+    const kb = new InlineKeyboard()
+      .text("📚 Catalog (read)", cb("adm", "apiscope", "cat")).row()
+      .text("📚 Catalog + 📦 Orders", cb("adm", "apiscope", "catord")).row()
+      .text("📚📦📊 Full read", cb("adm", "apiscope", "all")).row()
+      .text("✖️ Cancel", cb("adm", "home"));
+    await ctx.reply("Choose what this key can access:", { parse_mode: "HTML", reply_markup: kb });
     return true;
   }
 

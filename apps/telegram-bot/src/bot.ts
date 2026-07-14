@@ -241,6 +241,11 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery({ text: "✅ Added to cart" });
           await render(ctx, await views.cartViewKb(user), true);
           break;
+        case "crt:buynow":
+          await addToCart(user.id, args[0] ?? "");
+          await ctx.answerCallbackQuery({ text: "⚡ Taking you to checkout…" });
+          await render(ctx, await views.checkoutSummaryView(user), true);
+          break;
         case "crt:view":
           await render(ctx, await views.cartViewKb(user), true);
           break;

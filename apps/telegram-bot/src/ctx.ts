@@ -18,6 +18,7 @@ export interface SessionData {
     | "admin_p_priceinr"
     | "admin_p_priceusd"
     | "admin_newcat"
+    | "admin_api_name"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -35,6 +36,8 @@ export interface SessionData {
     categoryId?: string;
     priceInrMinor?: number;
   };
+  /** Name for an API key being created via the bot admin. */
+  admApiName?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

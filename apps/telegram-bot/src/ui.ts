@@ -7,9 +7,12 @@ export const fmt = (minor: number | bigint, currency: string): string =>
 
 export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: number): string {
   return [
-    "🏠 <b>Get It Sasta — Main Menu</b>",
+    "🏠 <b>Get It Sasta</b>",
+    "Digital products · instant delivery · best prices",
     "",
-    `Wallet: <b>${fmt(balanceMinor, user.currency)}</b> · Orders: <b>${orderCount}</b>`,
+    `💳 Wallet: <b>${fmt(balanceMinor, user.currency)}</b>  ·  📦 Orders: <b>${orderCount}</b>`,
+    "",
+    "👉 Tap <b>🛍 Shop</b>, pick an item, then <b>⚡ Buy</b> — that's it.",
   ].join("\n");
 }
 
