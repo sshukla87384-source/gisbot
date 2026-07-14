@@ -102,6 +102,19 @@ async function seedTiersAndSettings(): Promise<void> {
   }
 }
 
+async function seedDefaultCategories(): Promise<void> {
+  const cats: Array<{ name: string; slug: string; emoji: string; sortOrder: number }> = [
+    { name: "Coupon Codes", slug: "coupon-codes", emoji: "🎟️", sortOrder: 5 },
+  ];
+  for (const c of cats) {
+    await prisma.category.upsert({
+      where: { slug: c.slug },
+      create: { name: c.name, slug: c.slug, emoji: c.emoji, sortOrder: c.sortOrder },
+      update: { name: c.name, emoji: c.emoji },
+    });
+  }
+}
+
 async function seedDemoCatalog(masterKey: string): Promise<void> {
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
 
@@ -225,6 +238,7 @@ async function main(): Promise<void> {
   await ensureDbObjects();
   await seedRbac();
   await seedTiersAndSettings();
+  await seedDefaultCategories();
   if (config.SEED_ADMIN_EMAIL && config.SEED_ADMIN_PASSWORD) {
     await seedSuperAdmin(config.SEED_ADMIN_EMAIL, config.SEED_ADMIN_PASSWORD);
   }
