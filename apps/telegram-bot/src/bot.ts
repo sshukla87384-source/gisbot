@@ -29,7 +29,8 @@ import {
   isCoreError,
   parseCb,
 } from "@gis/shared";
-import { Bot, GrammyError, InlineKeyboard, session } from "grammy";
+import { Bot, GrammyError, InlineKeyboard, InputFile, session } from "grammy";
+import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
 import { adminCommand, handleAdminCallback, handleAdminText } from "./admin.js";
@@ -444,17 +445,34 @@ export function createBot(): Bot<Ctx> {
           if (user.currency !== "INR") { await setUserCurrency(user.id, "INR"); user.currency = "INR"; }
           const up = await createUpiManualCheckout(user.id);
           ctx.session.upiOrderId = up.orderId;
-          await ctx.editMessageText(
-            [
-              `🇮🇳 <b>Pay via UPI</b> — Order <b>${up.orderNumber}</b>`,
-              "",
-              `Amount: <b>${fmt(up.totalMinor, up.currency)}</b>`,
-              `UPI ID: <code>${up.upiId}</code>${up.payeeName ? ` (${escapeHtml(up.payeeName)})` : ""}`,
-              "",
-              "After paying, tap the button and paste your UPI reference / UTR number. We'll verify and deliver.",
-            ].join("\n"),
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I've paid — enter UTR", "ord:upipaid").row().text("🏠 Menu", "mnu:home") },
-          );
+          // Build a UPI deep link for the EXACT amount and render it as a QR.
+          const amountRupees = (up.totalMinor / 100).toFixed(2);
+          const payee = up.payeeName || "Get It Sasta";
+          const upiUri =
+            `upi://pay?pa=${encodeURIComponent(up.upiId)}&pn=${encodeURIComponent(payee)}` +
+            `&am=${amountRupees}&cu=INR&tn=${encodeURIComponent(up.orderNumber)}`;
+          const caption = [
+            `🇮🇳 <b>Pay via UPI</b> — Order <b>${up.orderNumber}</b>`,
+            "",
+            `Amount: <b>${fmt(up.totalMinor, up.currency)}</b>`,
+            `UPI ID: <code>${up.upiId}</code> (${escapeHtml(payee)})`,
+            "",
+            "📷 Scan this QR in any UPI app (GPay/PhonePe/Paytm) — the amount is pre-filled.",
+            "After paying, tap “I've paid” and paste your UTR number.",
+          ].join("\n");
+          try {
+            const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2 });
+            await ctx.replyWithPhoto(new InputFile(png, "upi-qr.png"), {
+              caption,
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text("✅ I've paid — enter UTR", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
+            });
+          } catch {
+            await ctx.reply(caption, {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text("✅ I've paid — enter UTR", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
+            });
+          }
           break;
         }
         case "ord:upipaid": {

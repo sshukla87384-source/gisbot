@@ -14,9 +14,11 @@
     "@gis/database": "workspace:*",
     "@gis/payments": "workspace:*",
     "@gis/shared": "workspace:*",
-    "grammy": "^1.32.0"
+    "grammy": "^1.32.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "tsx": "^4.19.2"
+    "tsx": "^4.19.2",
+    "@types/qrcode": "^1.5.5"
   }
 }
