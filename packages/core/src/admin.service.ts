@@ -234,10 +234,17 @@ export async function createProductFull(input: {
     const variant = await tx.productVariant.create({
       data: { productId: product.id, name: "Standard", sku: `${slug}-STD`.toUpperCase().slice(0, 120) },
     });
+    // Always store both currencies so the bot shows a price in INR and USD.
+    // If no USD given, derive it from INR (USDT≈USD, so INR ÷ INR-per-USDT rate).
+    let usdMinor = input.priceUsdMinor;
+    if (!usdMinor || usdMinor <= 0) {
+      const rate = loadConfig().BINANCE_USDT_INR_RATE || 90;
+      usdMinor = Math.max(1, Math.round(input.priceInrMinor / rate));
+    }
     const prices: Array<{ currency: "INR" | "USD"; amountMinor: number }> = [
       { currency: "INR", amountMinor: input.priceInrMinor },
+      { currency: "USD", amountMinor: usdMinor },
     ];
-    if (input.priceUsdMinor && input.priceUsdMinor > 0) prices.push({ currency: "USD", amountMinor: input.priceUsdMinor });
     for (const p of prices) {
       await tx.variantPrice.create({
         data: { variantId: variant.id, tierId: retail.id, currency: p.currency, amountMinor: p.amountMinor },

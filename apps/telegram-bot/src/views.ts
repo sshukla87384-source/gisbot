@@ -35,7 +35,7 @@ export async function menuView(user: BotUser): Promise<View> {
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
-  const result = await listProducts({ featuredOnly: true, currency: user.currency as Currency, page });
+  const result = await listProducts({ currency: user.currency as Currency, page });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -48,7 +48,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   kb.row().text("📂 All Categories", cb("shp", "root"));
   backToMenuRow(kb);
   return {
-    text: result.items.length > 0 ? "🛍 <b>Featured &amp; Bestsellers</b>" : "🛍 The shop is being restocked — check back soon!",
+    text: result.items.length > 0 ? "🛍 <b>All Products</b> — tap an item to buy" : "🛍 The shop is being restocked — check back soon!",
     kb,
   };
 }
