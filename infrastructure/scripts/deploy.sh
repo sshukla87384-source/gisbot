@@ -28,7 +28,7 @@ if [ "$HAS_ROOT_CERT" != "1" ]; then
   echo "    (landing HTTPS disabled until cert exists — run get-landing-cert.sh)"
 fi
 
-echo "==> Pulling latest code"; git pull --ff-only || true
+echo "==> Syncing to origin/main"; git fetch origin && git reset --hard origin/main
 echo "==> Building images"; $COMPOSE build --pull
 echo "==> Applying stack"; $COMPOSE up -d --remove-orphans
 
