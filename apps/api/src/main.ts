@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { loadConfig, requireJwtSecret } from "@gis/config";
 import { ensureDbObjects } from "@gis/database";
-import { Logger, ValidationPipe } from "@nestjs/common";
+import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import cookieParser from "cookie-parser";
@@ -18,7 +18,6 @@ async function bootstrap(): Promise<void> {
   app.use(helmet());
   app.use(cookieParser());
   app.enableCors({ origin: config.ADMIN_PANEL_ORIGIN, credentials: true });
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   if (config.NODE_ENV !== "production") {
     const swagger = new DocumentBuilder()

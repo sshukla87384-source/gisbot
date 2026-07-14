@@ -32,7 +32,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ../nginx/gis.conf:/etc/nginx/conf.d/gis.conf:ro
+      - ../nginx/gis.rendered.conf:/etc/nginx/conf.d/gis.conf:ro
+      - ../nginx/landing:/usr/share/nginx/landing:ro
       - certbot_certs:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
     depends_on:
