@@ -19,6 +19,7 @@ import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
+import { LOCALES, t } from "./i18n.js";
 
 export interface View {
   text: string;
@@ -204,8 +205,11 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     for (const p of gateways) {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
     }
+    if (loadConfig().UPI_ID) {
+      kb.text("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi")).row();
+    }
     if (loadConfig().BINANCE_PAY_UID) {
-      kb.text("🟡 Pay via Binance (UID)", cb("ord", "paybinance")).row();
+      kb.text("🪙 Pay via Binance (USD)", cb("ord", "paybinance")).row();
     }
   }
   kb.text("◀️ Back to Cart", cb("crt", "view"));
@@ -369,4 +373,20 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   }
   backToMenuRow(kb);
   return { text: lines.join("\n"), kb };
+}
+
+export function languageView(user: BotUser): View {
+  const kb = new InlineKeyboard();
+  for (const l of LOCALES) kb.text(l.label, cb("lang", "set", l.code)).row();
+  backToMenuRow(kb);
+  return { text: t(user.locale, "lang_title"), kb };
+}
+
+export function currencyView(user: BotUser): View {
+  const kb = new InlineKeyboard()
+    .text("🇮🇳 INR (₹)", cb("cur", "set", "INR"))
+    .text("🌐 USD ($)", cb("cur", "set", "USD"))
+    .row();
+  backToMenuRow(kb);
+  return { text: t(user.locale, "cur_title"), kb };
 }

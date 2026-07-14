@@ -32,6 +32,60 @@ function toUsdtAmount(totalMinor: number, currency: Currency): string {
   return (totalMinor / 100 / rate).toFixed(2);
 }
 
+export interface UpiCheckoutResult {
+  orderId: string;
+  orderNumber: string;
+  totalMinor: number;
+  currency: Currency;
+  upiId: string;
+  payeeName: string | null;
+}
+
+/**
+ * Manual UPI checkout (INR). Customer pays to the configured UPI ID and submits
+ * a reference; the admin confirms in the panel/bot (same fulfilment path).
+ */
+export async function createUpiManualCheckout(userId: string): Promise<UpiCheckoutResult> {
+  const cfg = loadConfig();
+  const upiId = cfg.UPI_ID;
+  if (!upiId) throw new CoreError("VALIDATION_FAILED", "UPI is not configured");
+
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const expiresAt = new Date(Date.now() + 60 * 60_000);
+  const created = await prisma.$transaction(async (tx) => {
+    await tx.order.updateMany({
+      where: { userId, status: "PENDING_PAYMENT" },
+      data: { status: "CANCELLED", cancelledAt: new Date() },
+    });
+    const lines = await priceCart(tx, userId, user.currency);
+    const totalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
+    const orderNumber = await nextOrderNumber(tx);
+    const order = await tx.order.create({
+      data: { orderNumber, userId, status: "PENDING_PAYMENT", currency: user.currency, subtotalMinor: totalMinor, totalMinor, expiresAt },
+    });
+    for (const line of lines) {
+      const isUnitStocked = line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT";
+      const unitCount = isUnitStocked ? line.quantity : 1;
+      for (let i = 0; i < unitCount; i++) {
+        await tx.orderItem.create({
+          data: {
+            orderId: order.id, variantId: line.variantId, productNameSnap: line.productName,
+            variantNameSnap: line.variantName, resellerIdSnap: line.resellerId,
+            quantity: isUnitStocked ? 1 : line.quantity, unitPriceMinor: line.unitPriceMinor,
+            totalMinor: isUnitStocked ? line.unitPriceMinor : line.unitPriceMinor * line.quantity,
+            fulfillmentMode: line.fulfillmentMode,
+          },
+        });
+      }
+    }
+    return { orderId: order.id, orderNumber, totalMinor };
+  });
+  await enqueueAdminAlert(
+    `🇮🇳 New UPI order ${created.orderNumber} — ${formatMinor(created.totalMinor, user.currency as CurrencyCode)}. Verify payment to ${upiId}, then confirm in the panel.`,
+  );
+  return { ...created, currency: user.currency, upiId, payeeName: cfg.UPI_PAYEE_NAME ?? null };
+}
+
 export async function createBinanceManualCheckout(userId: string): Promise<BinanceCheckoutResult> {
   const cfg = loadConfig();
   const uid = cfg.BINANCE_PAY_UID;

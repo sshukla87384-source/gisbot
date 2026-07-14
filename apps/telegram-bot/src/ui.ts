@@ -1,44 +1,47 @@
 import { formatMinor, cb, type CurrencyCode } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
+import { t } from "./i18n.js";
 
 export const fmt = (minor: number | bigint, currency: string): string =>
   formatMinor(minor, currency as CurrencyCode);
 
 export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: number): string {
+  const loc = user.locale;
   return [
     "🏠 <b>Get It Sasta</b>",
-    "Digital products · instant delivery · best prices",
+    t(loc, "tagline"),
     "",
-    `💳 Wallet: <b>${fmt(balanceMinor, user.currency)}</b>  ·  📦 Orders: <b>${orderCount}</b>`,
+    t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: orderCount }),
     "",
-    "👉 Tap <b>🛍 Shop</b>, pick an item, then <b>⚡ Buy</b> — that's it.",
+    t(loc, "hint"),
   ].join("\n");
 }
 
 export function mainMenuKeyboard(user: BotUser): InlineKeyboard {
+  const loc = user.locale;
   const kb = new InlineKeyboard()
-    .text("🛍 Shop", cb("shp", "home", 1))
-    .text("📂 Categories", cb("shp", "root"))
+    .text(t(loc, "b_shop"), cb("shp", "home", 1))
+    .text(t(loc, "b_categories"), cb("shp", "root"))
     .row()
-    .text("🔍 Search", cb("mnu", "search"))
-    .text("🛒 Cart", cb("crt", "view"))
+    .text(t(loc, "b_search"), cb("mnu", "search"))
+    .text(t(loc, "b_cart"), cb("crt", "view"))
     .row()
-    .text("📦 Orders", cb("ord", "list", 1))
-    .text("🔑 My Licenses", cb("lic", "list", 1))
+    .text(t(loc, "b_orders"), cb("ord", "list", 1))
+    .text(t(loc, "b_licenses"), cb("lic", "list", 1))
     .row()
-    .text("💳 Wallet", cb("wal", "view"))
-    .text("👥 Referral", cb("ref", "view"))
+    .text(t(loc, "b_wallet"), cb("wal", "view"))
+    .text(t(loc, "b_referral"), cb("ref", "view"))
     .row()
-    .text("🎫 Support", cb("sup", "home"))
-    .text("👤 Profile", cb("prf", "view"))
+    .text(t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"))
+    .text(t(loc, "b_language"), cb("lang", "home"))
     .row()
-    .text("⚙ Settings", cb("set", "view"))
-    .text("❓ Help", cb("mnu", "help"))
+    .text(t(loc, "b_support"), cb("sup", "home"))
+    .text(t(loc, "b_help"), cb("mnu", "help"))
     .row()
-    .text("🧑\u200d💻 Developer API", cb("api", "home"));
+    .text(t(loc, "b_developer"), cb("api", "home"));
   if (user.roleNames.includes("RESELLER")) {
-    kb.row().text("🏪 Reseller Hub", cb("rsl", "home"));
+    kb.row().text(t(loc, "b_reseller"), cb("rsl", "home"));
   }
   return kb;
 }

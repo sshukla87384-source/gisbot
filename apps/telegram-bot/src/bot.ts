@@ -19,6 +19,8 @@ import {
   resolveTelegramUser,
   revealDelivery,
   setUserCurrency,
+  setUserLocale,
+  createUpiManualCheckout,
   type DeliveredSecret,
 } from "@gis/core";
 import {
@@ -32,6 +34,7 @@ import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
 import { adminCommand, handleAdminCallback, handleAdminText } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
+import { t } from "./i18n.js";
 import * as views from "./views.js";
 import type { View } from "./views.js";
 
@@ -113,7 +116,7 @@ export function createBot(): Bot<Ctx> {
       if (productId) return render(ctx, await views.productView(ctx.user, productId), false);
     }
     await ctx.reply(
-      `👋 Welcome to <b>Get It Sasta</b>, ${escapeHtml(ctx.user.firstName ?? "friend")}!\nDigital products, instant delivery, best prices.`,
+      `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend") })}\n${t(ctx.user.locale, "tagline")}`,
       { parse_mode: "HTML" },
     );
     return render(ctx, await views.menuView(ctx.user), false);
@@ -173,6 +176,13 @@ export function createBot(): Bot<Ctx> {
       return ctx.reply(
         `${note}We’ve logged your Transaction ID and our team will verify and deliver shortly. You’ll get a message here once it’s confirmed.`,
       );
+    }
+    if (awaiting === "upi_ref") {
+      const orderId = ctx.session.upiOrderId ?? "";
+      ctx.session.upiOrderId = undefined;
+      const ref = ctx.message.text.trim().slice(0, 64);
+      await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR/ref: ${ref}. Please verify and confirm.`).catch(() => undefined);
+      return ctx.reply("✅ Thanks! We've logged your UPI reference. Your order will be delivered right after we verify the payment.");
     }
     if (awaiting === "wallet_topup_amount") {
       const rupees = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
@@ -362,6 +372,7 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:paybinance": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
+          if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
           const bz = await createBinanceManualCheckout(user.id);
           ctx.session.binanceOrderId = bz.orderId;
           await ctx.editMessageText(
@@ -406,6 +417,53 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.ordersView(user, intArg(args, 0, 1)), true);
           break;
 
+        case "lang:home":
+          await render(ctx, views.languageView(user), true);
+          break;
+        case "lang:set": {
+          const loc = args[0] ?? "en";
+          await setUserLocale(user.id, loc);
+          user.locale = loc;
+          await ctx.answerCallbackQuery({ text: t(loc, "lang_done") });
+          await render(ctx, await views.menuView(user), true);
+          break;
+        }
+        case "cur:home":
+          await render(ctx, views.currencyView(user), true);
+          break;
+        case "cur:set": {
+          const cur = args[0] === "USD" ? "USD" : "INR";
+          await setUserCurrency(user.id, cur);
+          user.currency = cur;
+          await ctx.answerCallbackQuery({ text: t(user.locale, "cur_done", { cur }) });
+          await render(ctx, await views.menuView(user), true);
+          break;
+        }
+        case "ord:payupi": {
+          await ctx.answerCallbackQuery({ text: "⏳ Creating UPI order…" });
+          if (user.currency !== "INR") { await setUserCurrency(user.id, "INR"); user.currency = "INR"; }
+          const up = await createUpiManualCheckout(user.id);
+          ctx.session.upiOrderId = up.orderId;
+          await ctx.editMessageText(
+            [
+              `🇮🇳 <b>Pay via UPI</b> — Order <b>${up.orderNumber}</b>`,
+              "",
+              `Amount: <b>${fmt(up.totalMinor, up.currency)}</b>`,
+              `UPI ID: <code>${up.upiId}</code>${up.payeeName ? ` (${escapeHtml(up.payeeName)})` : ""}`,
+              "",
+              "After paying, tap the button and paste your UPI reference / UTR number. We'll verify and deliver.",
+            ].join("\n"),
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I've paid — enter UTR", "ord:upipaid").row().text("🏠 Menu", "mnu:home") },
+          );
+          break;
+        }
+        case "ord:upipaid": {
+          await ctx.answerCallbackQuery();
+          if (!ctx.session.upiOrderId) { await ctx.reply("This checkout expired. Please start again from your cart."); break; }
+          ctx.session.awaiting = "upi_ref";
+          await ctx.reply("🔎 Paste your UPI <b>reference / UTR number</b>:", { parse_mode: "HTML" });
+          break;
+        }
         case "lic:list":
           await render(ctx, await views.vaultView(user, intArg(args, 0, 1)), true);
           break;

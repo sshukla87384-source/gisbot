@@ -22,6 +22,7 @@ export interface SessionData {
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "api_key_name"
+    | "upi_ref"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -43,6 +44,8 @@ export interface SessionData {
   admApiName?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
+  /** Pending UPI order awaiting a UTR reference. */
+  upiOrderId?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

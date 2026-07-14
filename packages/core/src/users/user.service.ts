@@ -86,6 +86,10 @@ export async function resolveTelegramUser(input: TelegramIdentity): Promise<Reso
   return { user: await withRoleNames(user), isNew: true };
 }
 
+export async function setUserLocale(userId: string, locale: string): Promise<void> {
+  await prisma.user.update({ where: { id: userId }, data: { locale } });
+}
+
 export async function setUserCurrency(userId: string, currency: Currency): Promise<void> {
   await prisma.user.update({ where: { id: userId }, data: { currency } });
 }

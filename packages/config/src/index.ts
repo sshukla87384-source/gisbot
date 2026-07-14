@@ -48,6 +48,9 @@ const envSchema = z
     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
     NOWPAYMENTS_API_KEY: z.string().optional(),
     NOWPAYMENTS_IPN_SECRET: z.string().optional(),
+    // UPI (manual — customer pays to this VPA/ID, admin confirms)
+    UPI_ID: z.string().optional(),
+    UPI_PAYEE_NAME: z.string().optional(),
     // Binance Pay (manual P2P via UID — no auto webhook; admin confirms)
     BINANCE_PAY_UID: z.string().optional(),
     // Auto-verification via a READ-ONLY Binance API key (Pay history polling).
