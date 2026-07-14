@@ -29,7 +29,16 @@ if [ "$HAS_ROOT_CERT" != "1" ]; then
 fi
 
 echo "==> Syncing to origin/main"; git fetch origin && git reset --hard origin/main
-echo "==> Building images"; $COMPOSE build --pull
+# Build images ONE AT A TIME. Parallel builds (BuildKit bake) can exhaust RAM on
+# a single VPS during the heavy Next.js admin build → "connection reset by peer".
+echo "==> Building images (sequential)"
+BUILD_SVCS="migrate bot worker"
+[ "$PROFILE" = "full" ] && BUILD_SVCS="$BUILD_SVCS api admin"
+export COMPOSE_BAKE=false
+for svc in $BUILD_SVCS; do
+  echo "  -> building $svc"
+  $COMPOSE build --pull "$svc"
+done
 echo "==> Applying stack"; $COMPOSE up -d --remove-orphans
 
 echo "==> Waiting for bot health"
