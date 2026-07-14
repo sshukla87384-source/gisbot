@@ -493,7 +493,7 @@ export function createBot(): Bot<Ctx> {
             "After paying, tap “I've paid” and paste your UTR number.",
           ].join("\n");
           try {
-            const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2 });
+            const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
             await ctx.replyWithPhoto(new InputFile(png, "upi-qr.png"), {
               caption,
               parse_mode: "HTML",
