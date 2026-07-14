@@ -46,12 +46,22 @@ async function buildProductPost(productId: string): Promise<{ caption: string; i
   const picks = (inr.length > 0 ? inr : all).map((pr) => ({ currency: pr.currency, minor: effectivePriceMinor(pr.amountMinor, p) }));
   const cheapest = picks.length > 0 ? picks.reduce((a, b) => (b.minor < a.minor ? b : a)) : null;
 
-  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "🆕 ";
-  const lines = [`${icon}<b>${esc(p.name)}</b>`];
-  if (onSale && p.salePercentBp) lines.push(`🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>`);
-  lines.push("");
-  if (p.description) lines.push(esc(p.description), "");
-  if (cheapest) lines.push(`💰 from <b>${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
+  // Live stock for unit-stocked products.
+  const variantIds = p.variants.map((v) => v.id);
+  let stock: number | null = null;
+  if (p.type === "LICENSE_KEY") stock = await prisma.licenseKey.count({ where: { variantId: { in: variantIds }, status: "AVAILABLE", deletedAt: null } });
+  else if (p.type === "DIGITAL_ACCOUNT") stock = await prisma.digitalAccount.count({ where: { variantId: { in: variantIds }, status: "AVAILABLE", deletedAt: null } });
+
+  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "⭐ ";
+  const lines: string[] = [];
+  if (p.fulfillmentMode === "AUTOMATIC") lines.push("🛒 <b>INSTANT DELIVERY</b> ⚡", "");
+  lines.push(`${icon}<b>${esc(p.name)}</b>`, "");
+  if (onSale && p.salePercentBp) lines.push(`🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>`, "");
+  if (cheapest) lines.push(`💰 <b>Price: ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`, "");
+  if (stock !== null) lines.push(`📦 In stock: <b>${stock}</b>`, "");
+  if (p.description) {
+    for (const line of p.description.split("\n").map((l) => l.trim()).filter(Boolean)) lines.push(`✅ ${esc(line)}`);
+  }
 
   const buttons: OutboxButton[] | undefined = cfg.BOT_USERNAME
     ? [{ text: onSale ? "⚡ Buy Now 🔥" : "⚡ Buy Now", url: `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` }]
