@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { createHmac } from "node:crypto";
 import { enqueueAdminAlert } from "../queues.js";
+import { getRedis } from "../redis.js";
 import { confirmManualPayment } from "./manual-pay.service.js";
 
 const BINANCE_BASE = "https://api.binance.com";
@@ -34,6 +35,28 @@ export async function fetchPayTransactions(apiKey: string, apiSecret: string): P
   return json.data ?? [];
 }
 
+async function alertApiFailureThrottled(msg: string): Promise<void> {
+  try {
+    const first = await getRedis().set("binance:apierr", "1", "EX", 1800, "NX"); // once / 30 min
+    if (first) await enqueueAdminAlert(`⚠️ Binance API problem — auto-verify is OFF until fixed:\n${msg.slice(0, 400)}`);
+  } catch { /* ignore */ }
+}
+
+/** Diagnostic: verify the Binance API key can read Pay history. */
+export async function testBinanceApi(): Promise<{ ok: boolean; detail: string }> {
+  const cfg = loadConfig();
+  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) {
+    return { ok: false, detail: "BINANCE_API_KEY / BINANCE_API_SECRET are not set in .env." };
+  }
+  try {
+    const txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+    const sample = txns.slice(0, 3).map((t) => `${t.amount} ${t.currency}`).join("; ");
+    return { ok: true, detail: `OK ✅ — read ${txns.length} recent Pay transaction(s). ${sample ? `Latest: ${sample}` : "(none yet)"}` };
+  } catch (e) {
+    return { ok: false, detail: String(e instanceof Error ? e.message : e).slice(0, 400) };
+  }
+}
+
 /**
  * Poll Binance Pay history and auto-confirm any PENDING_PAYMENT Binance order
  * whose exact USDT amount has arrived. Uses a READ-ONLY API key; never moves
@@ -55,16 +78,17 @@ export async function pollBinancePayments(): Promise<number> {
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("binance poll failed", { error: String(e) });
+    await alertApiFailureThrottled(String(e instanceof Error ? e.message : e));
     return 0;
   }
 
-  const credits = txns.filter((t) => t.currency === "USDT" && parseFloat(t.amount) > 0);
+  const credits = txns.filter((t) => t.currency === "USDT" && Math.abs(parseFloat(t.amount)) > 0);
   let confirmed = 0;
 
   for (const order of pending) {
     if (!order.binanceAmount) continue;
     const want = parseFloat(order.binanceAmount);
-    const match = credits.find((t) => Math.abs(parseFloat(t.amount) - want) < 0.00005);
+    const match = credits.find((t) => Math.abs(Math.abs(parseFloat(t.amount)) - want) < 0.01);
     if (!match) continue;
 
     // One Binance transaction can settle only one order.
@@ -126,10 +150,10 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string): Prom
   }
 
   const txn = txns.find((t) => String(t.transactionId) === clean);
-  if (!txn || txn.currency !== "USDT" || parseFloat(txn.amount) <= 0) return { ok: false, reason: "NOT_FOUND" };
+  if (!txn || txn.currency !== "USDT" || Math.abs(parseFloat(txn.amount)) <= 0) return { ok: false, reason: "NOT_FOUND" };
 
   const want = parseFloat(order.binanceAmount ?? "0");
-  if (!(want > 0) || Math.abs(parseFloat(txn.amount) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
+  if (!(want > 0) || Math.abs(Math.abs(parseFloat(txn.amount)) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
 
   const claimed = await prisma.order.updateMany({
     where: { id: orderId, status: "PENDING_PAYMENT" },

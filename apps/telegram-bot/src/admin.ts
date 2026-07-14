@@ -29,6 +29,7 @@ import {
   setFlashSale,
   setProductImage,
   setProductStatus,
+  testBinanceApi,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
 } from "@gis/core";
@@ -126,7 +127,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
-    .text("🔑 API keys", cb("adm", "apikeys")).row()
+    .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .text("🚪 Logout", cb("adm", "logout")).row();
 }
 
@@ -428,6 +429,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const n = await postProductToGroups(id);
       await ctx.reply(n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
+    }
+    case "bintest": {
+      await ctx.reply("🧪 Testing Binance API…");
+      const r = await testBinanceApi();
+      await ctx.reply(r.ok ? `✅ ${r.detail}` : `❌ Binance API failed:\n<code>${escapeHtml(r.detail)}</code>\n\nCommon fixes: enable READ on the key, remove IP restriction (or allow the VPS IP), and make sure the server clock is correct.`, { parse_mode: "HTML" });
+      return;
     }
     case "apikeys": return apiKeysView(ctx);
     case "apinew": {
