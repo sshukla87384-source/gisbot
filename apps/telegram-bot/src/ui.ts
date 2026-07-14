@@ -10,11 +10,11 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
   const loc = user.locale;
   return [
     "🏠 <b>Get It Sasta</b>",
-    t(loc, "tagline"),
+    `<b>${t(loc, "tagline")}</b>`,
     "",
-    t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: orderCount }),
+    `<b>${t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: orderCount })}</b>`,
     "",
-    t(loc, "hint"),
+    `<b>${t(loc, "hint")}</b>`,
   ].join("\n");
 }
 
