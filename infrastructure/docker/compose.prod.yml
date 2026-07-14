@@ -36,6 +36,7 @@ services:
       - ../nginx/landing:/usr/share/nginx/landing:ro
       - certbot_certs:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
+      - media_data:/data/media:ro
     depends_on:
       - bot
     # Reload every 6h so renewed certificates get picked up.
@@ -159,6 +160,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8080
+      MEDIA_DIR: /data/media
+    volumes:
+      - media_data:/data/media
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/health || exit 1"]
       interval: 30s
@@ -254,3 +258,4 @@ volumes:
   redisdata:
   certbot_certs:
   certbot_www:
+  media_data:

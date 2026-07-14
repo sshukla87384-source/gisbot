@@ -17,10 +17,21 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 export interface FulfillmentJob {
   webhookEventId: string;
 }
+export interface OutboxButton {
+  text: string;
+  url: string;
+}
 export interface OutboxJob {
   telegramId: string;
   text: string;
   photo?: string; // optional image URL → sent as photo with text as caption
+  buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
+  pin?: boolean; // pin the sent message in the chat
+}
+export interface OutboxOptions {
+  photo?: string;
+  buttons?: OutboxButton[];
+  pin?: boolean;
 }
 export interface EmailJob {
   to: string;
@@ -73,12 +84,14 @@ export async function enqueueFulfillment(webhookEventId: string): Promise<void> 
 export async function enqueueTelegramMessage(
   telegramId: bigint | string,
   text: string,
-  photo?: string,
+  opts: OutboxOptions = {},
 ): Promise<void> {
   await getQueue(QUEUE_NAMES.outbox).add("send", {
     telegramId: telegramId.toString(),
     text,
-    ...(photo ? { photo } : {}),
+    ...(opts.photo ? { photo: opts.photo } : {}),
+    ...(opts.buttons && opts.buttons.length > 0 ? { buttons: opts.buttons } : {}),
+    ...(opts.pin ? { pin: true } : {}),
   } satisfies OutboxJob);
 }
 

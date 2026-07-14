@@ -14,6 +14,9 @@ const createBroadcast = z.object({
   body: z.string().min(1).max(3500),
   segment: z.enum(["all", "customers", "resellers"]).default("all"),
   imageUrl: z.string().url().max(2000).optional().or(z.literal("")),
+  buttonText: z.string().max(64).optional().or(z.literal("")),
+  buttonUrl: z.string().url().max(2000).optional().or(z.literal("")),
+  pin: z.boolean().default(false),
   // Optional scheduling. When scheduledAt is a future ISO datetime the
   // broadcast auto-sends then; recurrence re-arms it (auto messaging).
   scheduledAt: z.string().datetime().optional(),
@@ -40,6 +43,9 @@ export class BroadcastsController {
   async send(@Body() body: unknown, @Req() req: ApiRequest) {
     const data = validate(createBroadcast, body);
     const imageUrl = data.imageUrl ? data.imageUrl : undefined;
+    const buttonText = data.buttonText ? data.buttonText : undefined;
+    const buttonUrl = data.buttonUrl ? data.buttonUrl : undefined;
+    const cta = buttonText && buttonUrl ? { buttonText, buttonUrl } : {};
     const when = data.scheduledAt ? new Date(data.scheduledAt) : null;
 
     if (when && when.getTime() > Date.now() + 30_000) {
@@ -48,6 +54,8 @@ export class BroadcastsController {
         body: data.body,
         segment: data.segment,
         imageUrl,
+        ...cta,
+        pin: data.pin,
         scheduledAt: when,
         recurrence: data.recurrence,
         createdById: req.user!.id,
@@ -65,6 +73,8 @@ export class BroadcastsController {
       body: data.body,
       segment: data.segment,
       imageUrl,
+      ...cta,
+      pin: data.pin,
       createdById: req.user!.id,
     });
     await writeAudit(req, "broadcast.send", "Broadcast", res.broadcastId, undefined, {

@@ -1,6 +1,11 @@
-import { invalidate } from "@gis/core";
+import { announceProduct, invalidate } from "@gis/core";
+import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
-import { Body, Controller, Delete, Get, Module, Param, Patch, Post, Put, Query, Req } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Module, Param, Patch, Post, Put, Query, Req, UploadedFile, UseInterceptors } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { z } from "zod";
 import { writeAudit } from "../common/audit.js";
@@ -9,6 +14,26 @@ import { paginated, parseList, filterValue } from "../common/pagination.js";
 import { RequirePermission } from "../common/permissions.decorator.js";
 import { validate } from "../common/zod-body.pipe.js";
 import type { ApiRequest } from "../common/types.js";
+
+interface UploadedImage {
+  originalname: string;
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+}
+
+/** Coerce empty-string optional fields to null/undefined and ISO dates to Date. */
+function normalizeProduct<T extends Record<string, unknown>>(data: T): T {
+  const d = { ...data } as Record<string, unknown>;
+  if (d.imageUrl === "") d.imageUrl = null;
+  if (d.iconEmoji === "") d.iconEmoji = null;
+  for (const k of ["saleStartsAt", "saleEndsAt"] as const) {
+    if (!(k in d)) continue; // absent → leave unchanged
+    if (d[k] === "" || d[k] == null) d[k] = null; // explicit clear
+    else if (typeof d[k] === "string") d[k] = new Date(d[k] as string);
+  }
+  return d as T;
+}
 
 const productType = z.enum(["LICENSE_KEY", "DIGITAL_ACCOUNT", "SUBSCRIPTION", "DOWNLOAD", "MANUAL_SERVICE"]);
 const fulfillMode = z.enum(["AUTOMATIC", "MANUAL"]);
@@ -25,6 +50,10 @@ const createProduct = z.object({
   sourcingNote: z.string().max(1000).optional(),
   isFeatured: z.boolean().optional(),
   imageUrl: z.string().url().max(2000).optional().or(z.literal("")),
+  iconEmoji: z.string().max(16).optional().or(z.literal("")),
+  salePercentBp: z.number().int().min(0).max(9000).optional(),
+  saleStartsAt: z.string().datetime().optional().or(z.literal("")),
+  saleEndsAt: z.string().datetime().optional().or(z.literal("")),
 });
 const updateProduct = createProduct.partial().extend({
   status: z.enum(["DRAFT", "PENDING_APPROVAL", "ACTIVE", "PAUSED", "ARCHIVED"]).optional(),
@@ -122,8 +151,7 @@ export class CatalogController {
   @RequirePermission("catalog.write")
   @Post("products")
   async createProduct(@Body() body: unknown, @Req() req: ApiRequest) {
-    const data = validate(createProduct, body);
-    if (data.imageUrl === "") data.imageUrl = undefined;
+    const data = normalizeProduct(validate(createProduct, body));
     const p = await prisma.product.create({ data: { ...data, status: "DRAFT" } });
     await invalidate("cat:*");
     await writeAudit(req, "product.create", "Product", p.id, undefined, p);
@@ -133,13 +161,16 @@ export class CatalogController {
   @RequirePermission("catalog.write")
   @Patch("products/:id")
   async updateProduct(@Param("id") id: string, @Body() body: unknown, @Req() req: ApiRequest) {
-    const data = validate(updateProduct, body);
-    if (data.imageUrl === "") (data as { imageUrl?: string | null }).imageUrl = null;
+    const data = normalizeProduct(validate(updateProduct, body));
     const before = await prisma.product.findUnique({ where: { id } });
     if (!before) throw notFound("Product");
     const p = await prisma.product.update({ where: { id }, data });
     await invalidate("cat:*");
     await writeAudit(req, "product.update", "Product", id, before, p);
+    // Auto-announce the first time a product goes ACTIVE.
+    if (before.status !== "ACTIVE" && p.status === "ACTIVE" && !before.announcedAt) {
+      await announceProduct(p.id, { createdById: req.user!.id }).catch(() => undefined);
+    }
     return p;
   }
 
@@ -150,6 +181,44 @@ export class CatalogController {
     await invalidate("cat:*");
     await writeAudit(req, "product.delete", "Product", id);
     return { ok: true };
+  }
+
+  @RequirePermission("broadcasts.send")
+  @Post("products/:id/announce")
+  async announce(@Param("id") id: string, @Body() body: unknown, @Req() req: ApiRequest) {
+    const opts = validate(z.object({ pin: z.boolean().default(false) }), body ?? {});
+    const res = await announceProduct(id, { createdById: req.user!.id, pin: opts.pin, force: true });
+    if (!res.announced) throw new BadRequestException("Product must be ACTIVE to announce");
+    await writeAudit(req, "product.announce", "Product", id, undefined, { targets: res.targets });
+    return res;
+  }
+
+  @RequirePermission("media.write")
+  @Post("media/upload")
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: 8 * 1024 * 1024 } }))
+  async uploadMedia(@UploadedFile() file: UploadedImage | undefined, @Req() req: ApiRequest) {
+    if (!file) throw new BadRequestException("No file uploaded");
+    const extByType: Record<string, string> = {
+      "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif",
+    };
+    const ext = extByType[file.mimetype];
+    if (!ext) throw new BadRequestException("Only PNG, JPG, WEBP or GIF images are allowed");
+    const cfg = loadConfig();
+    const name = `${randomUUID()}.${ext}`;
+    await mkdir(cfg.MEDIA_DIR, { recursive: true });
+    await writeFile(join(cfg.MEDIA_DIR, name), file.buffer);
+    await prisma.media.create({
+      data: {
+        kind: "IMAGE",
+        s3Key: name,
+        fileName: file.originalname ?? name,
+        contentType: file.mimetype,
+        sizeBytes: BigInt(file.size ?? file.buffer.length),
+        uploadedById: req.user?.id,
+      },
+    });
+    const base = (cfg.PUBLIC_API_URL ?? "").replace(/\/$/, "");
+    return { url: `${base}/media/${name}`, fileName: name };
   }
 
   @RequirePermission("catalog.write")

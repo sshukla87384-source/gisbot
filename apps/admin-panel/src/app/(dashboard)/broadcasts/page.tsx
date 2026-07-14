@@ -19,7 +19,7 @@ interface Broadcast {
   createdAt: string;
 }
 
-const EMPTY = { title: "", body: "", segment: "all", imageUrl: "", mode: "now", scheduledAt: "", recurrence: "none" };
+const EMPTY = { title: "", body: "", segment: "all", imageUrl: "", buttonText: "", buttonUrl: "", pin: false, mode: "now", scheduledAt: "", recurrence: "none" };
 
 export default function BroadcastsPage() {
   const qc = useQueryClient();
@@ -33,8 +33,9 @@ export default function BroadcastsPage() {
 
   const submit = useMutation({
     mutationFn: () => {
-      const body: Record<string, unknown> = { title: form.title, body: form.body, segment: form.segment };
+      const body: Record<string, unknown> = { title: form.title, body: form.body, segment: form.segment, pin: form.pin };
       if (form.imageUrl.trim()) body.imageUrl = form.imageUrl.trim();
+      if (form.buttonText.trim() && form.buttonUrl.trim()) { body.buttonText = form.buttonText.trim(); body.buttonUrl = form.buttonUrl.trim(); }
       if (form.mode === "schedule") {
         if (!form.scheduledAt) throw new Error("Pick a date & time to schedule.");
         body.scheduledAt = new Date(form.scheduledAt).toISOString();
@@ -70,6 +71,12 @@ export default function BroadcastsPage() {
           <div><Label>Message</Label><Textarea rows={4} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} placeholder="Write your announcement…" /></div>
           <div><Label>Image URL (optional)</Label><Input value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value })} placeholder="https://…/banner.jpg" /></div>
           {form.imageUrl.trim() ? <img src={form.imageUrl} alt="preview" className="max-h-40 rounded-lg border border-slate-200" /> : null}
+
+          <div className="flex flex-wrap gap-4">
+            <div className="w-56"><Label>Button text (optional)</Label><Input value={form.buttonText} onChange={(e) => setForm({ ...form, buttonText: e.target.value })} placeholder="🛍 Shop now" /></div>
+            <div className="flex-1 min-w-[16rem]"><Label>Button link</Label><Input value={form.buttonUrl} onChange={(e) => setForm({ ...form, buttonUrl: e.target.value })} placeholder="https://t.me/YourBot?start=p_slug" /></div>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={form.pin} onChange={(e) => setForm({ ...form, pin: e.target.checked })} /> 📌 Pin this message in each chat</label>
 
           <div className="flex flex-wrap gap-4">
             <div className="w-56"><Label>Audience</Label>

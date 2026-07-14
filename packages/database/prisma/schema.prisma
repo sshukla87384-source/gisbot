@@ -430,7 +430,12 @@ model Product {
   activationGuide String?
   imageId         String?
   image           Media?          @relation(fields: [imageId], references: [id])
-  imageUrl        String? // simple hosted image URL (shown in bot product card)
+  imageUrl        String? // hosted image URL (upload or paste) shown in bot product card
+  iconEmoji       String? // small emoji/icon shown next to the product name
+  salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
+  saleStartsAt    DateTime?
+  saleEndsAt      DateTime?
+  announcedAt     DateTime? // set when auto-announced to bot users (dedupe)
   isFeatured      Boolean         @default(false)
   sortOrder       Int             @default(0)
   variants        ProductVariant[]
@@ -979,6 +984,9 @@ model Broadcast {
   media        Media?          @relation(fields: [mediaId], references: [id])
   imageUrl     String? // optional hosted image URL sent with the broadcast
   recurrence   String          @default("none") // none | daily | weekly (auto-repeat)
+  buttonText   String? // optional call-to-action button label
+  buttonUrl    String? // optional call-to-action button URL
+  pin          Boolean         @default(false) // pin the message in each chat
   segmentQuery Json // segmentation definition
   status       BroadcastStatus @default(DRAFT)
   scheduledAt  DateTime?

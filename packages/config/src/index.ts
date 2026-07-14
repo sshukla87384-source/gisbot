@@ -33,7 +33,9 @@ const envSchema = z
     // ── HTTP ──
     PORT: z.coerce.number().int().positive().default(8081), // bot webhook / worker server
     API_PORT: z.coerce.number().int().positive().default(8080),
-    PUBLIC_API_URL: z.string().url().optional(), // payment redirects / webhook base
+    PUBLIC_API_URL: z.string().url().optional(), // payment redirects / webhook base + media serving
+    BOT_USERNAME: z.string().optional(), // for t.me deep-link buttons in announcements
+    MEDIA_DIR: z.string().default("/data/media"), // local uploaded-image storage
     ADMIN_PANEL_ORIGIN: z.string().url().default("http://localhost:3000"),
 
     // ── Seed super admin (used by db:seed; required for admin panel login) ──

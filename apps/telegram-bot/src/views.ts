@@ -39,7 +39,9 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
     const stock = p.inStock ? "" : " · ❌ out of stock";
-    kb.text(`${p.name} — ${price}${stock}`, cb("shp", "prod", p.id)).row();
+    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    const sale = p.onSale ? "🔥 " : "";
+    kb.text(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().text("📂 All Categories", cb("shp", "root"));
@@ -71,7 +73,9 @@ export async function productListView(
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
     const stock = p.inStock ? "✅" : "❌";
-    kb.text(`${stock} ${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
+    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    const sale = p.onSale ? "🔥 " : "";
+    kb.text(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().text("◀️ Categories", cb("shp", "root"));
@@ -84,7 +88,9 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
-    kb.text(`${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
+    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    const sale = p.onSale ? "🔥 " : "";
+    kb.text(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   backToMenuRow(kb);
@@ -97,10 +103,27 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
   };
 }
 
+function timeLeft(until: Date): string {
+  let ms = until.getTime() - Date.now();
+  if (ms <= 0) return "ending now";
+  const d = Math.floor(ms / 86_400_000); ms -= d * 86_400_000;
+  const h = Math.floor(ms / 3_600_000); ms -= h * 3_600_000;
+  const m = Math.floor(ms / 60_000);
+  if (d > 0) return `${d}d ${h}h left`;
+  if (h > 0) return `${h}h ${m}m left`;
+  return `${m}m left`;
+}
+
 export async function productView(user: BotUser, productId: string): Promise<View> {
   const p = await getProductView(productId, user.currency as Currency);
+  const title = `${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}`;
+  const saleBadge =
+    p.onSale && p.salePercentBp
+      ? `🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>${p.saleEndsAt ? ` · ⏳ ${timeLeft(p.saleEndsAt)}` : ""}`
+      : "";
   const lines = [
-    `<b>${escapeHtml(p.name)}</b>`,
+    `<b>${title}</b>`,
+    saleBadge,
     "",
     p.description ? escapeHtml(p.description) : "",
     "",
@@ -110,8 +133,14 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
 
   const kb = new InlineKeyboard();
   for (const v of p.variants) {
-    const price = v.priceMinor === null ? "—" : fmt(v.priceMinor, user.currency);
-    const label = v.stock > 0 ? `➕ ${v.name} — ${price}` : `❌ ${v.name} — out of stock`;
+    let priceLabel = "—";
+    if (v.priceMinor !== null) {
+      priceLabel =
+        v.originalPriceMinor !== null
+          ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
+          : fmt(v.priceMinor, user.currency);
+    }
+    const label = v.stock > 0 ? `➕ ${v.name} — ${priceLabel}` : `❌ ${v.name} — out of stock`;
     if (v.stock > 0 && v.priceMinor !== null) kb.text(label, cb("crt", "add", v.id)).row();
     else kb.text(label, cb("mnu", "noop")).row();
   }

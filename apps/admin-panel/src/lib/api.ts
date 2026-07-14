@@ -144,3 +144,28 @@ export async function apiData<T>(path: string, options: RequestOptions = {}): Pr
   const result = await api<T>(path, options);
   return result.data;
 }
+
+
+/** Multipart upload helper (the JSON `api` wrapper can't send FormData). */
+export async function uploadFile<T>(path: string, file: File): Promise<T> {
+  const url = `${BASE_URL}${path}`;
+  const form = new FormData();
+  form.append("file", file);
+  const doFetch = (): Promise<Response> => {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    const token = authStore.getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return fetch(url, { method: "POST", credentials: "include", headers, body: form });
+  };
+  let res = await doFetch();
+  if (res.status === 401) {
+    const refreshed = await refreshSession();
+    if (refreshed) res = await doFetch();
+  }
+  const json = (await res.json().catch(() => null)) as Envelope | null;
+  if (!res.ok || !json || json.success === false) {
+    const err = json?.error;
+    throw new ApiError(err?.message ?? `Upload failed (${res.status})`, err?.code ?? "UPLOAD_ERROR", res.status, err?.details);
+  }
+  return json.data as T;
+}

@@ -1,5 +1,6 @@
 import type { Currency, Prisma } from "@gis/database";
 import { CoreError, decryptSecret } from "@gis/shared";
+import { effectivePriceMinor } from "../pricing.js";
 
 /**
  * Shared inventory-assignment primitives used by BOTH the wallet checkout and
@@ -58,7 +59,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
       activationGuide: v.product.activationGuide,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
-      unitPriceMinor: price.amountMinor,
+      unitPriceMinor: effectivePriceMinor(price.amountMinor, v.product),
       fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
     };
   });

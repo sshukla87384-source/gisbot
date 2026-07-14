@@ -1,6 +1,7 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
 import { cached } from "../redis.js";
+import { effectivePriceMinor, isSaleActive } from "../pricing.js";
 
 const CACHE_TTL = 60;
 
@@ -14,7 +15,9 @@ export interface CategoryNode {
 export interface ProductListItem {
   id: string;
   name: string;
+  iconEmoji: string | null;
   fromPriceMinor: number | null;
+  onSale: boolean;
   inStock: boolean;
 }
 
@@ -28,7 +31,8 @@ export interface Paged<T> {
 export interface VariantView {
   id: string;
   name: string;
-  priceMinor: number | null;
+  priceMinor: number | null; // effective (post-sale) price
+  originalPriceMinor: number | null; // pre-sale price when a sale is active
   stock: number;
 }
 
@@ -37,6 +41,10 @@ export interface ProductView {
   name: string;
   description: string | null;
   imageUrl: string | null;
+  iconEmoji: string | null;
+  onSale: boolean;
+  salePercentBp: number | null;
+  saleEndsAt: Date | null;
   type: string;
   fulfillmentMode: string;
   activationGuide: string | null;
@@ -102,7 +110,8 @@ export async function listProducts(opts: {
 
     const items: ProductListItem[] = [];
     for (const p of products) {
-      const priced = p.variants.flatMap((v) => v.prices.map((pr) => pr.amountMinor));
+      const onSale = isSaleActive(p);
+      const priced = p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
       let inStock = false;
       for (const v of p.variants) {
         if ((await variantStock(v.id, p.type)) > 0) {
@@ -113,7 +122,9 @@ export async function listProducts(opts: {
       items.push({
         id: p.id,
         name: p.name,
+        iconEmoji: p.iconEmoji,
         fromPriceMinor: priced.length > 0 ? Math.min(...priced) : null,
+        onSale,
         inStock,
       });
     }
@@ -134,12 +145,15 @@ export async function getProductView(productId: string, currency: Currency): Pro
   });
   if (!p) throw new CoreError("PRODUCT_NOT_FOUND");
 
+  const onSale = isSaleActive(p);
   const variants: VariantView[] = [];
   for (const v of p.variants) {
+    const base = v.prices[0]?.amountMinor ?? null;
     variants.push({
       id: v.id,
       name: v.name,
-      priceMinor: v.prices[0]?.amountMinor ?? null,
+      priceMinor: base === null ? null : effectivePriceMinor(base, p),
+      originalPriceMinor: onSale && base !== null ? base : null,
       stock: await variantStock(v.id, p.type),
     });
   }
@@ -148,6 +162,10 @@ export async function getProductView(productId: string, currency: Currency): Pro
     name: p.name,
     description: p.description,
     imageUrl: p.imageUrl,
+    iconEmoji: p.iconEmoji,
+    onSale,
+    salePercentBp: p.salePercentBp,
+    saleEndsAt: p.saleEndsAt,
     type: p.type,
     fulfillmentMode: p.fulfillmentMode,
     activationGuide: p.activationGuide,

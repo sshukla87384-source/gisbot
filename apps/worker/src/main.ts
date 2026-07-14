@@ -41,12 +41,20 @@ async function main(): Promise<void> {
     QUEUE_NAMES.outbox,
     async (job) => {
       try {
+        const reply_markup = job.data.buttons && job.data.buttons.length > 0
+          ? { inline_keyboard: [job.data.buttons.map((b) => ({ text: b.text, url: b.url }))] }
+          : undefined;
+        let msg;
         if (job.data.photo) {
           // Caption limit is 1024 chars; trim defensively.
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
-          await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML" });
+          msg = await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML", reply_markup });
         } else {
-          await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML" });
+          msg = await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML", reply_markup });
+        }
+        if (job.data.pin && msg?.message_id) {
+          // Pinning can fail (e.g. bot lacks rights in groups); never fail the job for it.
+          await telegram.pinChatMessage(job.data.telegramId, msg.message_id, { disable_notification: true }).catch(() => undefined);
         }
       } catch (e) {
         if (e instanceof GrammyError && e.error_code === 403) {

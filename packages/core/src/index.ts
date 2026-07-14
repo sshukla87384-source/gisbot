@@ -12,3 +12,4 @@ export * from "./orders/order.service.js";
 export * from "./support/ticket.service.js";
 export * from "./orders/manual-pay.service.js";
 export * from "./broadcast.service.js";
+export * from "./pricing.js";
