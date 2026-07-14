@@ -2,6 +2,8 @@ import { loadConfig } from "@gis/config";
 import {
   addLicenseKeys,
   adminCancelOrder,
+  enqueueTelegramMessage,
+  BOT_ADMIN_MEMBERS_KEY,
   adminDeleteProduct,
   createApiKey,
   listApiKeys,
@@ -31,7 +33,6 @@ import { InlineKeyboard } from "grammy";
 import type { Ctx } from "./ctx.js";
 import { escapeHtml, fmt } from "./ui.js";
 
-const SESSION_TTL_SEC = 2 * 60 * 60; // 2 hours
 const ATTEMPT_WINDOW_SEC = 15 * 60;
 const MAX_ATTEMPTS = 5;
 
@@ -91,9 +92,18 @@ export async function handleAdminPasscode(ctx: Ctx): Promise<void> {
   await ctx.deleteMessage().catch(() => undefined);
 
   if (cfg.BOT_ADMIN_PASSCODE && text === cfg.BOT_ADMIN_PASSCODE && idAllowed(tgId)) {
-    await redis.set(sessionKey(tgId), "1", "EX", SESSION_TTL_SEC);
+    // Notify any admins already logged in that a new sign-in happened.
+    const existing = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);
+    const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name ?? String(tgId));
+    for (const m of existing) {
+      if (m && m !== String(tgId)) {
+        await enqueueTelegramMessage(m, `⚠️ <b>New admin login</b>\n${escapeHtml(who)} (id <code>${tgId}</code>) just signed in to the admin panel.`);
+      }
+    }
+    await redis.set(sessionKey(tgId), "1"); // persistent — stays until logout
+    await redis.sadd(BOT_ADMIN_MEMBERS_KEY, String(tgId));
     await redis.del(attemptsKey);
-    await ctx.reply("✅ Admin access granted (2 h session).");
+    await ctx.reply("✅ Admin access granted. You’ll stay logged in until you tap 🚪 Logout.\nYou’ll also get order alerts here.");
     await sendPanel(ctx, false);
   } else {
     await ctx.reply("❌ Wrong passcode.");
@@ -264,7 +274,10 @@ async function apiKeysView(ctx: Ctx): Promise<void> {
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
-    if (tgId !== undefined) await getRedis().del(sessionKey(tgId));
+    if (tgId !== undefined) {
+      await getRedis().del(sessionKey(tgId));
+      await getRedis().srem(BOT_ADMIN_MEMBERS_KEY, String(tgId));
+    }
     await ctx.answerCallbackQuery({ text: "Logged out" }).catch(() => undefined);
     await show(ctx, "🚪 Logged out of the admin panel.", new InlineKeyboard(), true);
     return;

@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { getRedis } from "./redis.js";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 
@@ -99,8 +100,23 @@ export async function enqueueEmail(job: EmailJob): Promise<void> {
   await getQueue(QUEUE_NAMES.email).add("send", job);
 }
 
-/** Alert the admin channel if configured (best-effort). */
+/** Redis set of Telegram IDs currently logged in to the in-bot admin panel. */
+export const BOT_ADMIN_MEMBERS_KEY = "botadmin:members";
+
+/**
+ * Alert admins (best-effort): the configured ADMIN_ALERT_CHAT_ID plus every
+ * admin currently logged in to the in-bot panel, each de-duplicated.
+ */
 export async function enqueueAdminAlert(text: string): Promise<void> {
+  const sent = new Set<string>();
   const chatId = loadConfig().ADMIN_ALERT_CHAT_ID;
-  if (chatId) await enqueueTelegramMessage(chatId, text);
+  if (chatId) { await enqueueTelegramMessage(chatId, text); sent.add(String(chatId)); }
+  try {
+    const members = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY);
+    for (const m of members) {
+      if (m && !sent.has(m)) { await enqueueTelegramMessage(m, text); sent.add(m); }
+    }
+  } catch {
+    // Redis unavailable — the configured channel (if any) still got it.
+  }
 }
