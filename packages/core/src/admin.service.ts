@@ -107,6 +107,10 @@ export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
   return rows.map((p) => ({ id: p.id, name: p.name, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp }));
 }
 
+export async function adminDeleteProduct(id: string): Promise<void> {
+  await prisma.product.update({ where: { id }, data: { deletedAt: new Date(), status: "ARCHIVED" } });
+}
+
 export async function setProductStatus(productId: string, status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED"): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { status } });
 }
@@ -185,6 +189,15 @@ export async function createCategoryQuick(name: string): Promise<CategoryBrief> 
   return { id: c.id, name: c.name, emoji: c.emoji };
 }
 
+async function ensureUncategorized(): Promise<string> {
+  const c = await prisma.category.upsert({
+    where: { slug: "uncategorized" },
+    create: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 },
+    update: {},
+  });
+  return c.id;
+}
+
 /** Product types offered by the bot wizard. */
 export const WIZARD_TYPES: Record<string, { type: string; fulfillmentMode: "AUTOMATIC" | "MANUAL"; label: string }> = {
   key: { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC", label: "License Key" },
@@ -197,11 +210,12 @@ export async function createProductFull(input: {
   name: string;
   description?: string;
   typeKey: string;
-  categoryId: string;
+  categoryId?: string;
   priceInrMinor: number;
   priceUsdMinor?: number;
 }): Promise<{ productId: string }> {
   const spec = WIZARD_TYPES[input.typeKey] ?? { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC" as const, label: "License Key" };
+  const categoryId = input.categoryId || (await ensureUncategorized());
   const slug = await uniqueSlug(slugify(input.name));
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
 
@@ -213,7 +227,7 @@ export async function createProductFull(input: {
         description: input.description?.slice(0, 4000) || null,
         type: spec.type as never,
         status: "DRAFT",
-        categoryId: input.categoryId,
+        categoryId,
         fulfillmentMode: spec.fulfillmentMode,
       },
     });

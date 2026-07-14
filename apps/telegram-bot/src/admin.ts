@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import {
   addLicenseKeys,
   adminCancelOrder,
+  adminDeleteProduct,
   createApiKey,
   listApiKeys,
   revokeApiKey,
@@ -199,6 +200,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
   kb.row().text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
   await show(ctx, text, kb, true);
@@ -229,6 +231,7 @@ async function categoryPickKb(): Promise<InlineKeyboard> {
   const kb = new InlineKeyboard();
   for (const c of cats) kb.text(`${c.emoji ? `${c.emoji} ` : ""}${c.name}`, cb("adm", "pcat", c.id)).row();
   kb.text("➕ New category", cb("adm", "pnewcat")).row();
+  kb.text("⏭ Skip (no category)", cb("adm", "pskip")).row();
   kb.text("✖️ Cancel", cb("adm", "home"));
   return kb;
 }
@@ -298,7 +301,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("🔎 Send the Binance <b>transaction ID</b> to verify this order:", { parse_mode: "HTML" });
       return;
     }
-    case "pactive": { await setProductStatus(id, "ACTIVE"); await ctx.reply("🟢 Activated. It will be announced to users."); return productView(ctx, id); }
+    case "pactive": {
+      await setProductStatus(id, "ACTIVE");
+      const ann = await announceProduct(id, { createdById: "bot-admin", force: true });
+      await ctx.reply(`🟢 Activated.${ann.announced ? ` 📣 Notified ${ann.targets ?? 0} users with a ⚡ Buy Now button.` : ""}`);
+      return productView(ctx, id);
+    }
     case "ppause": { await setProductStatus(id, "PAUSED"); await ctx.reply("⏸ Paused."); return productView(ctx, id); }
     case "announce": {
       const r = await announceProduct(id, { createdById: "bot-admin", force: true });
@@ -312,6 +320,18 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "saleoff": { await clearFlashSale(id); await ctx.reply("🔥 Sale ended."); return productView(ctx, id); }
+    case "pdel": {
+      const kb = new InlineKeyboard()
+        .text("🗑 Yes, delete", cb("adm", "pdely", id)).row()
+        .text("◀️ No, keep it", cb("adm", "prod", id));
+      await show(ctx, "⚠️ Delete this product? It will be removed from the shop.", kb, true);
+      return;
+    }
+    case "pdely": {
+      await adminDeleteProduct(id);
+      await ctx.reply("🗑 Product deleted.");
+      return productsView(ctx);
+    }
     case "keys": return variantsForKeys(ctx, id);
     case "kv": {
       ctx.session.awaiting = "admin_addkeys";
@@ -338,6 +358,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), categoryId: id };
       ctx.session.awaiting = "admin_p_priceinr";
       await askStep(ctx, "<b>New product · Step 5/6</b>\nSend the <b>price in INR</b> (₹), e.g. <code>499</code>:");
+      return;
+    }
+    case "pskip": {
+      ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), categoryId: undefined };
+      ctx.session.awaiting = "admin_p_priceinr";
+      await askStep(ctx, "<b>New product · Step 5/6</b>\n(No category — that's fine.)\nSend the <b>price in INR</b> (₹), e.g. <code>499</code>:");
       return;
     }
     case "pnewcat": {
@@ -481,7 +507,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   if (awaiting === "admin_p_priceusd") {
     const d = ctx.session.admDraft ?? {};
     const usdMinor = text === "-" ? undefined : (rupeesToMinor(text) ?? undefined);
-    if (!d.name || !d.type || !d.categoryId || !d.priceInrMinor) {
+    if (!d.name || !d.type || !d.priceInrMinor) {
       ctx.session.admDraft = undefined;
       await ctx.reply("⚠️ Something went wrong with the draft. Please start again from ➕ Add product.");
       await sendPanel(ctx, false);

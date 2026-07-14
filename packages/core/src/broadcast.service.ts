@@ -191,10 +191,10 @@ export async function announceProduct(
 
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "🆕 ";
   const title = `${icon}${p.name}`;
-  const lines = [p.description ?? "Just added to the store."];
+  const lines = ["🆕 Just added & in stock!", "", p.description ?? "Grab it now."];
   if (cheapest) lines.push(`\n${onSale ? "🔥 Flash sale — " : ""}from <b>${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
 
-  const buttonText = onSale ? "🔥 Grab the deal" : "🛍 View & buy";
+  const buttonText = onSale ? "⚡ Buy Now — 🔥 Deal" : "⚡ Buy Now";
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
 
   const res = await sendBroadcast({
