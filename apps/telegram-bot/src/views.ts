@@ -43,8 +43,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
     const stock = p.inStock ? "" : " · ❌ out of stock";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    const dot = p.inStock ? "🟢 " : "🔴 ";
-    kb.text(`${dot}${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id)).row();
+    kb.text(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().text("📂 All Categories", cb("shp", "root"));
@@ -75,7 +74,7 @@ export async function productListView(
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
-    const stock = p.inStock ? "🟢" : "🔴";
+    const stock = p.inStock ? "✅" : "❌";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
     kb.text(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
@@ -93,8 +92,7 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    const dot = p.inStock ? "🟢 " : "🔴 ";
-    kb.text(`${dot}${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
+    kb.text(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   backToMenuRow(kb);
@@ -144,10 +142,10 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
       // Primary one-tap purchase, plus an add-to-cart for multi-item orders.
-      kb.text(`🟢 ${icon}Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
-      kb.text(`🔵 Add ${v.name} to cart`, cb("crt", "add", v.id)).row();
+      kb.text(`⚡ ${icon}Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
+      kb.text(`🛒 Add ${v.name} to cart`, cb("crt", "add", v.id)).row();
     } else {
-      kb.text(`🔴 ${v.name} — out of stock`, cb("mnu", "noop")).row();
+      kb.text(`❌ ${v.name} — out of stock`, cb("mnu", "noop")).row();
     }
   }
   kb.text("🛒 View Cart", cb("crt", "view"));
