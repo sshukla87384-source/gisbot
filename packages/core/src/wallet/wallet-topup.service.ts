@@ -67,7 +67,7 @@ export async function verifyTopupByTxn(topupId: string, txnId: string): Promise<
   } catch {
     return { ok: false, reason: "NOT_FOUND" };
   }
-  const txn = txns.find((t) => String(t.transactionId) === clean);
+  const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
   if (!txn || txn.currency !== "USDT" || parseFloat(txn.amount) <= 0) return { ok: false, reason: "NOT_FOUND" };
   if (Math.abs(parseFloat(txn.amount) - parseFloat(topup.binanceAmount)) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
 

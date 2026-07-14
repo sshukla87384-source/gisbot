@@ -187,7 +187,7 @@ async function orderView(ctx: Ctx, orderId: string): Promise<void> {
   const kb = new InlineKeyboard();
   if (o.status === "PENDING_PAYMENT") {
     kb.text("✅ Confirm payment", cb("adm", "confirm", o.id)).row();
-    kb.text("🔎 Verify by Txn ID", cb("adm", "txn", o.id)).row();
+    kb.text("🔎 Verify by Order ID", cb("adm", "txn", o.id)).row();
     kb.text("✖️ Cancel order", cb("adm", "cancel", o.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "orders"));
@@ -338,7 +338,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "txn": {
       ctx.session.awaiting = "admin_txnid";
       ctx.session.admOrderId = id;
-      await ctx.reply("🔎 Send the Binance <b>transaction ID</b> to verify this order:", { parse_mode: "HTML" });
+      await ctx.reply("🔎 Send the Binance <b>Order ID</b> to verify this order:", { parse_mode: "HTML" });
       return;
     }
     case "pactive": {

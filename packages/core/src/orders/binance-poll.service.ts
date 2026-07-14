@@ -13,6 +13,7 @@ export interface PayTxn {
   amount: string; // signed decimal string; positive = incoming credit
   currency: string; // asset code, e.g. "USDT"
   orderType?: string;
+  orderId?: string; // Binance Pay "Order ID" shown to the customer
 }
 
 function sign(query: string, secret: string): string {
@@ -149,7 +150,7 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string): Prom
     return { ok: false, reason: "NOT_FOUND" };
   }
 
-  const txn = txns.find((t) => String(t.transactionId) === clean);
+  const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
   if (!txn || txn.currency !== "USDT" || Math.abs(parseFloat(txn.amount)) <= 0) return { ok: false, reason: "NOT_FOUND" };
 
   const want = parseFloat(order.binanceAmount ?? "0");

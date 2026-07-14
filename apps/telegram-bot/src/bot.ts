@@ -231,9 +231,9 @@ export function createBot(): Bot<Ctx> {
             `Send exactly: <b>${t.binanceAmount} ${t.binanceAsset}</b>`,
             `To Binance UID: <code>${t.binanceUid}</code>`,
             "",
-            "After sending, tap the button and paste your Transaction ID — your wallet is credited automatically.",
+            "After sending, tap the button and paste your Binance Order ID — your wallet is credited automatically.",
           ].join("\n"),
-          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I’ve paid — enter Transaction ID", "wal:topuptxn").row().text("🏠 Menu", "mnu:home") },
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I’ve paid — enter Order ID", "wal:topuptxn").row().text("🏠 Menu", "mnu:home") },
         );
       } catch (e) {
         return ctx.reply(isCoreError(e) ? (ERROR_COPY[e.code] ?? "Top-up unavailable right now.") : "Top-up unavailable right now.");
@@ -416,12 +416,12 @@ export function createBot(): Bot<Ctx> {
               `Send exactly: <b>${bz.binanceAmount} ${bz.binanceAsset}</b>`,
               `To Binance UID: <code>${bz.binanceUid}</code>`,
               "",
-              "After sending, tap the button below and paste your Binance <b>Transaction ID</b> — we verify it and deliver instantly.",
+              "After sending, tap the button below and paste your Binance <b>Order ID</b> (from the payment receipt) — we verify it and deliver instantly.",
             ].join("\n"),
             {
               parse_mode: "HTML",
               reply_markup: new InlineKeyboard()
-                .text("✅ I’ve paid — enter Transaction ID", "ord:binancetxn")
+                .text("✅ I’ve paid — enter Order ID", "ord:binancetxn")
                 .row()
                 .text("🏠 Menu", "mnu:home"),
             },
@@ -436,7 +436,7 @@ export function createBot(): Bot<Ctx> {
           }
           ctx.session.awaiting = "binance_txnid";
           await ctx.reply(
-            "🔎 Paste your Binance <b>Transaction ID</b> (open the payment in Binance → it’s the long ID on the receipt):",
+            "🔎 Paste your Binance <b>Order ID</b> (open the payment in Binance → it’s the ID on the receipt):",
             { parse_mode: "HTML" },
           );
           break;
@@ -538,7 +538,7 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery();
           if (!ctx.session.walletTopupId) { await ctx.reply("This top-up expired. Tap ➕ Top up again."); break; }
           ctx.session.awaiting = "wallet_topup_txn";
-          await ctx.reply("🔎 Paste your Binance <b>Transaction ID</b> to confirm the top-up:", { parse_mode: "HTML" });
+          await ctx.reply("🔎 Paste your Binance <b>Order ID</b> to confirm the top-up:", { parse_mode: "HTML" });
           break;
         case "api:home":
           await render(ctx, await views.apiKeysView(user), true);
