@@ -13,6 +13,11 @@ export interface SessionData {
     | "admin_flashsale"
     | "admin_addkeys"
     | "binance_txnid"
+    | "admin_p_name"
+    | "admin_p_desc"
+    | "admin_p_priceinr"
+    | "admin_p_priceusd"
+    | "admin_newcat"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -22,6 +27,14 @@ export interface SessionData {
   admVariantId?: string;
   /** Customer Binance order awaiting a transaction ID. */
   binanceOrderId?: string;
+  /** In-progress product being created via the admin wizard. */
+  admDraft?: {
+    name?: string;
+    description?: string;
+    type?: string;
+    categoryId?: string;
+    priceInrMinor?: number;
+  };
 }
 
 export type BotUser = User & { roleNames: string[] };

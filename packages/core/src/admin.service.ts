@@ -151,3 +151,84 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
   }
   return { added, skipped };
 }
+
+// ───────────── In-bot product-creation wizard helpers ─────────────
+
+export interface CategoryBrief { id: string; name: string; emoji: string | null }
+
+export async function listCategoriesBrief(): Promise<CategoryBrief[]> {
+  const rows = await prisma.category.findMany({
+    where: { deletedAt: null }, orderBy: { sortOrder: "asc" },
+  });
+  return rows.map((c) => ({ id: c.id, name: c.name, emoji: c.emoji }));
+}
+
+function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "item";
+}
+
+async function uniqueSlug(base: string): Promise<string> {
+  let slug = base;
+  for (let i = 0; i < 50; i++) {
+    const exists = await prisma.product.findUnique({ where: { slug } });
+    if (!exists) return slug;
+    slug = `${base}-${Math.floor(Math.random() * 9000 + 1000)}`;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+export async function createCategoryQuick(name: string): Promise<CategoryBrief> {
+  let slug = slugify(name);
+  const clash = await prisma.category.findUnique({ where: { slug } });
+  if (clash) slug = `${slug}-${Math.floor(Math.random() * 9000 + 1000)}`;
+  const c = await prisma.category.create({ data: { name: name.slice(0, 120), slug } });
+  return { id: c.id, name: c.name, emoji: c.emoji };
+}
+
+/** Product types offered by the bot wizard. */
+export const WIZARD_TYPES: Record<string, { type: string; fulfillmentMode: "AUTOMATIC" | "MANUAL"; label: string }> = {
+  key: { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC", label: "License Key" },
+  acct: { type: "DIGITAL_ACCOUNT", fulfillmentMode: "AUTOMATIC", label: "Account" },
+  other: { type: "MANUAL_SERVICE", fulfillmentMode: "MANUAL", label: "Manual service" },
+};
+
+/** Create a product with one "Standard" variant + prices, as a DRAFT. */
+export async function createProductFull(input: {
+  name: string;
+  description?: string;
+  typeKey: string;
+  categoryId: string;
+  priceInrMinor: number;
+  priceUsdMinor?: number;
+}): Promise<{ productId: string }> {
+  const spec = WIZARD_TYPES[input.typeKey] ?? { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC" as const, label: "License Key" };
+  const slug = await uniqueSlug(slugify(input.name));
+  const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
+
+  return prisma.$transaction(async (tx) => {
+    const product = await tx.product.create({
+      data: {
+        slug,
+        name: input.name.slice(0, 200),
+        description: input.description?.slice(0, 4000) || null,
+        type: spec.type as never,
+        status: "DRAFT",
+        categoryId: input.categoryId,
+        fulfillmentMode: spec.fulfillmentMode,
+      },
+    });
+    const variant = await tx.productVariant.create({
+      data: { productId: product.id, name: "Standard", sku: `${slug}-STD`.toUpperCase().slice(0, 120) },
+    });
+    const prices: Array<{ currency: "INR" | "USD"; amountMinor: number }> = [
+      { currency: "INR", amountMinor: input.priceInrMinor },
+    ];
+    if (input.priceUsdMinor && input.priceUsdMinor > 0) prices.push({ currency: "USD", amountMinor: input.priceUsdMinor });
+    for (const p of prices) {
+      await tx.variantPrice.create({
+        data: { variantId: variant.id, tierId: retail.id, currency: p.currency, amountMinor: p.amountMinor },
+      });
+    }
+    return { productId: product.id };
+  });
+}

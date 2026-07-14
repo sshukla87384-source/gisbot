@@ -5,17 +5,21 @@ import {
   announceProduct,
   clearFlashSale,
   confirmManualPayment,
+  createCategoryQuick,
+  createProductFull,
   getAdminOrder,
   getAdminStats,
   getRedis,
   listPendingPaymentOrders,
   listProductsBrief,
   listRecentOrders,
+  listCategoriesBrief,
   listVariantsBrief,
   sendBroadcast,
   setFlashSale,
   setProductStatus,
   verifyBinanceByTxnId,
+  WIZARD_TYPES,
 } from "@gis/core";
 import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
@@ -99,6 +103,7 @@ async function guard(ctx: Ctx): Promise<boolean> {
 
 function panelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
+    .text("➕ Add product", cb("adm", "addp")).row()
     .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("🚪 Logout", cb("adm", "logout")).row();
@@ -203,6 +208,36 @@ async function variantsForKeys(ctx: Ctx, productId: string): Promise<void> {
   await show(ctx, vs.length ? "🔑 Pick a variant to add keys to:" : "No variants on this product.", kb, true);
 }
 
+const cancelKb = (): InlineKeyboard => new InlineKeyboard().text("✖️ Cancel", cb("adm", "home"));
+
+async function askStep(ctx: Ctx, text: string): Promise<void> {
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: cancelKb() });
+}
+
+function rupeesToMinor(raw: string): number | null {
+  const n = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+
+async function categoryPickKb(): Promise<InlineKeyboard> {
+  const cats = await listCategoriesBrief();
+  const kb = new InlineKeyboard();
+  for (const c of cats) kb.text(`${c.emoji ? `${c.emoji} ` : ""}${c.name}`, cb("adm", "pcat", c.id)).row();
+  kb.text("➕ New category", cb("adm", "pnewcat")).row();
+  kb.text("✖️ Cancel", cb("adm", "home"));
+  return kb;
+}
+
+async function wizardTypeStep(ctx: Ctx): Promise<void> {
+  const kb = new InlineKeyboard()
+    .text("🔑 License Key", cb("adm", "ptype", "key")).row()
+    .text("👤 Account", cb("adm", "ptype", "acct")).row()
+    .text("📦 Manual service", cb("adm", "ptype", "other")).row()
+    .text("✖️ Cancel", cb("adm", "home"));
+  await ctx.reply("<b>New product · Step 3/6</b>\nWhat type is it?", { parse_mode: "HTML", reply_markup: kb });
+}
+
 /** Central callback dispatcher for the admin panel (ns === "adm"). */
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
@@ -266,6 +301,38 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("🔑 Paste the license keys, <b>one per line</b>. They'll be encrypted and added as stock.", { parse_mode: "HTML" });
       return;
     }
+    case "addp": {
+      ctx.session.admDraft = {};
+      ctx.session.awaiting = "admin_p_name";
+      await askStep(ctx, "🆕 <b>New product · Step 1/6</b>\nSend the product <b>name</b>:");
+      return;
+    }
+    case "ptype": {
+      const key = args[0] ?? "key";
+      ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), type: key };
+      await ctx.reply("<b>New product · Step 4/6</b>\nChoose a <b>category</b>:", {
+        parse_mode: "HTML",
+        reply_markup: await categoryPickKb(),
+      });
+      return;
+    }
+    case "pcat": {
+      ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), categoryId: id };
+      ctx.session.awaiting = "admin_p_priceinr";
+      await askStep(ctx, "<b>New product · Step 5/6</b>\nSend the <b>price in INR</b> (₹), e.g. <code>499</code>:");
+      return;
+    }
+    case "pnewcat": {
+      ctx.session.awaiting = "admin_newcat";
+      await askStep(ctx, "Send the <b>new category name</b> (e.g. <code>Streaming</code>):");
+      return;
+    }
+    case "actann": {
+      await setProductStatus(id, "ACTIVE");
+      const r = await announceProduct(id, { createdById: "bot-admin", force: true });
+      await ctx.reply(`🟢 Live!${r.announced ? ` 📣 Announced to ${r.targets ?? 0} users.` : ""}`);
+      return productView(ctx, id);
+    }
     case "bc": {
       ctx.session.awaiting = "admin_broadcast";
       await ctx.reply("📢 Send the message to broadcast to <b>all</b> users:", { parse_mode: "HTML" });
@@ -324,6 +391,68 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const r = await addLicenseKeys(variantId, keys);
     await ctx.reply(`🔑 Added ${r.added} key(s)${r.skipped ? `, skipped ${r.skipped} duplicate(s)` : ""}.`);
     await sendPanel(ctx, false);
+    return true;
+  }
+
+  if (awaiting === "admin_p_name") {
+    const name = text.slice(0, 200);
+    if (!name) { await askStep(ctx, "Please send a product name."); ctx.session.awaiting = "admin_p_name"; return true; }
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), name };
+    ctx.session.awaiting = "admin_p_desc";
+    await askStep(ctx, `<b>New product · Step 2/6</b>\nSend a <b>description</b> for “${name}” (or send <code>-</code> to skip):`);
+    return true;
+  }
+
+  if (awaiting === "admin_p_desc") {
+    const desc = text === "-" ? "" : text.slice(0, 4000);
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), description: desc };
+    await wizardTypeStep(ctx); // step 3 is button-driven
+    return true;
+  }
+
+  if (awaiting === "admin_newcat") {
+    const cat = await createCategoryQuick(text.slice(0, 120));
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), categoryId: cat.id };
+    ctx.session.awaiting = "admin_p_priceinr";
+    await askStep(ctx, `✅ Category “${cat.name}” created.\n<b>Step 5/6</b>\nSend the <b>price in INR</b> (₹), e.g. <code>499</code>:`);
+    return true;
+  }
+
+  if (awaiting === "admin_p_priceinr") {
+    const minor = rupeesToMinor(text);
+    if (minor === null || minor <= 0) { await askStep(ctx, "Please send a valid price, e.g. 499"); ctx.session.awaiting = "admin_p_priceinr"; return true; }
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), priceInrMinor: minor };
+    ctx.session.awaiting = "admin_p_priceusd";
+    await askStep(ctx, "<b>New product · Step 6/6</b>\nSend the <b>price in USD</b> ($), e.g. <code>5.99</code> — or send <code>-</code> to skip:");
+    return true;
+  }
+
+  if (awaiting === "admin_p_priceusd") {
+    const d = ctx.session.admDraft ?? {};
+    const usdMinor = text === "-" ? undefined : (rupeesToMinor(text) ?? undefined);
+    if (!d.name || !d.type || !d.categoryId || !d.priceInrMinor) {
+      ctx.session.admDraft = undefined;
+      await ctx.reply("⚠️ Something went wrong with the draft. Please start again from ➕ Add product.");
+      await sendPanel(ctx, false);
+      return true;
+    }
+    const { productId } = await createProductFull({
+      name: d.name,
+      description: d.description,
+      typeKey: d.type,
+      categoryId: d.categoryId,
+      priceInrMinor: d.priceInrMinor,
+      priceUsdMinor: usdMinor,
+    });
+    ctx.session.admDraft = undefined;
+    const kb = new InlineKeyboard()
+      .text("🟢 Activate & announce", cb("adm", "actann", productId)).row()
+      .text("🔑 Add stock keys", cb("adm", "keys", productId)).row()
+      .text("✅ Done / view", cb("adm", "prod", productId));
+    await ctx.reply(
+      `✅ <b>Product created</b> (as draft).\nAdd stock, then activate to put it live & announce it to users.`,
+      { parse_mode: "HTML", reply_markup: kb },
+    );
     return true;
   }
 
