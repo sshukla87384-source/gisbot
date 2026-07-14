@@ -7,6 +7,7 @@ import {
   listCategories,
   listOrders,
   listProducts,
+  listApiKeysByOwner,
   listTickets,
   listVault,
   type CartView,
@@ -250,13 +251,14 @@ export async function vaultView(user: BotUser, page: number): Promise<View> {
 
 export async function walletView(user: BotUser): Promise<View> {
   const wallet = await getWallet(user.id);
-  const kb = new InlineKeyboard().text("📜 History", cb("wal", "hist", 1)).row();
+  const kb = new InlineKeyboard()
+    .text("➕ Top up", cb("wal", "topup")).text("📜 History", cb("wal", "hist", 1)).row();
   backToMenuRow(kb);
   return {
     text: [
       `💳 <b>Wallet</b> — <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
       "",
-      "Wallet deposits via UPI/crypto arrive with the deposit phase — pay orders directly with UPI/crypto at checkout meanwhile.",
+      "Top up instantly with Binance (USDT) — tap ➕ Top up. You can also pay orders directly at checkout.",
     ].join("\n"),
     kb,
   };
@@ -346,4 +348,24 @@ export function helpView(): View {
     ].join("\n"),
     kb,
   };
+}
+
+export async function apiKeysView(user: BotUser): Promise<View> {
+  const keys = await listApiKeysByOwner(user.id);
+  const kb = new InlineKeyboard().text("➕ Create API key", cb("api", "new")).row();
+  const lines = [
+    "🧑‍💻 <b>Developer API</b>",
+    "",
+    "Create a personal, read-only key to access the public catalog API.",
+    "Docs & base URL are shown after you create a key.",
+    "",
+  ];
+  const active = keys.filter((k) => !k.revokedAt);
+  if (active.length === 0) lines.push("You have no active keys yet.");
+  for (const k of active.slice(0, 10)) {
+    lines.push(`• <b>${escapeHtml(k.name)}</b> — <code>${k.prefix}…</code> · ${k.callCount} calls`);
+    kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("api", "revoke", k.id)).row();
+  }
+  backToMenuRow(kb);
+  return { text: lines.join("\n"), kb };
 }

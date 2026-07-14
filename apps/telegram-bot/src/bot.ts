@@ -8,6 +8,10 @@ import {
   createGatewayCheckout,
   createBinanceManualCheckout,
   verifyBinanceByTxnId,
+  createWalletTopup,
+  verifyTopupByTxn,
+  createApiKey,
+  revokeApiKeyOwned,
   createTicket,
   getProductIdBySlug,
   getRedis,
@@ -168,6 +172,60 @@ export function createBot(): Bot<Ctx> {
             : "";
       return ctx.reply(
         `${note}We’ve logged your Transaction ID and our team will verify and deliver shortly. You’ll get a message here once it’s confirmed.`,
+      );
+    }
+    if (awaiting === "wallet_topup_amount") {
+      const rupees = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(rupees) || rupees <= 0) return ctx.reply("Please send a valid amount, e.g. 500");
+      try {
+        const t = await createWalletTopup(ctx.user.id, Math.round(rupees * 100));
+        ctx.session.walletTopupId = t.id;
+        return ctx.reply(
+          [
+            "💳 <b>Wallet Top-up</b>",
+            "",
+            `Amount: <b>${fmt(t.amountMinor, t.currency)}</b>`,
+            `Send exactly: <b>${t.binanceAmount} ${t.binanceAsset}</b>`,
+            `To Binance UID: <code>${t.binanceUid}</code>`,
+            "",
+            "After sending, tap the button and paste your Transaction ID — your wallet is credited automatically.",
+          ].join("\n"),
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I’ve paid — enter Transaction ID", "wal:topuptxn").row().text("🏠 Menu", "mnu:home") },
+        );
+      } catch (e) {
+        return ctx.reply(isCoreError(e) ? (ERROR_COPY[e.code] ?? "Top-up unavailable right now.") : "Top-up unavailable right now.");
+      }
+    }
+    if (awaiting === "wallet_topup_txn") {
+      const topupId = ctx.session.walletTopupId ?? "";
+      const txn = ctx.message.text.trim().slice(0, 128);
+      const r = await verifyTopupByTxn(topupId, txn);
+      if (r.ok) {
+        ctx.session.walletTopupId = undefined;
+        return ctx.reply(`✅ Wallet topped up by ${fmt(r.amountMinor, r.currency)}! New balance: <b>${fmt(r.newBalanceMinor, r.currency)}</b>.`, { parse_mode: "HTML" });
+      }
+      const note = r.reason === "AMOUNT_MISMATCH" ? "⚠️ That transaction’s amount doesn’t match. "
+        : r.reason === "ALREADY_USED" ? "⚠️ That transaction was already used. "
+        : r.reason === "NO_API" ? "⚠️ Auto-verify is off. " : "";
+      await createTicket(ctx.user.id, "PAYMENT_ISSUE", `Wallet top-up ${topupId}, txn ${txn} (${r.ok ? "ok" : r.reason}).`).catch(() => undefined);
+      return ctx.reply(`${note}We’ve logged your Transaction ID — our team will credit your wallet shortly.`);
+    }
+    if (awaiting === "api_key_name") {
+      const name = ctx.message.text.trim().slice(0, 120) || "my key";
+      const created = await createApiKey({ name, scopes: ["catalog:read"], ownerUserId: ctx.user.id });
+      const base = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "") + "/api/v1/developer";
+      return ctx.reply(
+        [
+          "✅ <b>API key created</b> — copy it now, it won’t be shown again:",
+          "",
+          `<code>${created.apiKey}</code>`,
+          "",
+          `Scope: catalog:read`,
+          `Base URL: <code>${base}</code>`,
+          `Docs: ${base}/docs`,
+          `Send it as the <code>X-API-Key</code> header.`,
+        ].join("\n"),
+        { parse_mode: "HTML" },
       );
     }
     if (awaiting === "search") {
@@ -363,6 +421,31 @@ export function createBot(): Bot<Ctx> {
         case "wal:hist":
           await render(ctx, await views.walletHistoryView(user, intArg(args, 0, 1)), true);
           break;
+        case "wal:topup":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "wallet_topup_amount";
+          await ctx.reply(`💳 How much do you want to add? Send an amount in ${user.currency} (e.g. <code>500</code>):`, { parse_mode: "HTML" });
+          break;
+        case "wal:topuptxn":
+          await ctx.answerCallbackQuery();
+          if (!ctx.session.walletTopupId) { await ctx.reply("This top-up expired. Tap ➕ Top up again."); break; }
+          ctx.session.awaiting = "wallet_topup_txn";
+          await ctx.reply("🔎 Paste your Binance <b>Transaction ID</b> to confirm the top-up:", { parse_mode: "HTML" });
+          break;
+        case "api:home":
+          await render(ctx, await views.apiKeysView(user), true);
+          break;
+        case "api:new":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "api_key_name";
+          await ctx.reply("🧑‍💻 Send a <b>name</b> for your API key (e.g. <code>my app</code>):", { parse_mode: "HTML" });
+          break;
+        case "api:revoke": {
+          const done = await revokeApiKeyOwned(args[0] ?? "", user.id);
+          await ctx.answerCallbackQuery({ text: done ? "Revoked" : "Not found" });
+          await render(ctx, await views.apiKeysView(user), true);
+          break;
+        }
 
         case "ref:view":
           await render(ctx, await views.referralView(user, ctx.me.username), true);

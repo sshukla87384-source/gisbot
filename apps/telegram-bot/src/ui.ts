@@ -34,7 +34,9 @@ export function mainMenuKeyboard(user: BotUser): InlineKeyboard {
     .text("👤 Profile", cb("prf", "view"))
     .row()
     .text("⚙ Settings", cb("set", "view"))
-    .text("❓ Help", cb("mnu", "help"));
+    .text("❓ Help", cb("mnu", "help"))
+    .row()
+    .text("🧑\u200d💻 Developer API", cb("api", "home"));
   if (user.roleNames.includes("RESELLER")) {
     kb.row().text("🏪 Reseller Hub", cb("rsl", "home"));
   }

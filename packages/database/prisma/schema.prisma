@@ -345,6 +345,23 @@ model Session {
   @@index([userId])
 }
 
+model WalletTopup {
+  id           String   @id @default(cuid())
+  userId       String
+  amountMinor  Int      // amount to credit, in the user's currency
+  currency     Currency
+  binanceAsset String   // "USDT"
+  binanceAmount String  // exact USDT the user must send
+  binanceTxnId String?  // settling Binance transaction (dedupe)
+  status       String   @default("PENDING") // PENDING | CREDITED | EXPIRED | CANCELLED
+  creditedAt   DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([status, binanceAsset])
+  @@index([userId, createdAt])
+}
+
 model ApiKey {
   id        String    @id @default(cuid())
   name      String

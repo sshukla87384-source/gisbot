@@ -86,3 +86,24 @@ export async function listApiKeys(): Promise<
 export async function revokeApiKey(id: string): Promise<void> {
   await prisma.apiKey.update({ where: { id }, data: { revokedAt: new Date() } });
 }
+
+// ───────────── Self-service (per-user) keys ─────────────
+
+export async function listApiKeysByOwner(ownerUserId: string): Promise<
+  Array<{ id: string; name: string; prefix: string; scopes: string[]; callCount: number; revokedAt: Date | null; createdAt: Date }>
+> {
+  return prisma.apiKey.findMany({
+    where: { ownerUserId },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, name: true, prefix: true, scopes: true, callCount: true, revokedAt: true, createdAt: true },
+  });
+}
+
+/** Revoke a key only if it belongs to this owner. Returns true if revoked. */
+export async function revokeApiKeyOwned(id: string, ownerUserId: string): Promise<boolean> {
+  const res = await prisma.apiKey.updateMany({
+    where: { id, ownerUserId, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  return res.count > 0;
+}

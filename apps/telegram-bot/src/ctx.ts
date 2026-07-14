@@ -19,6 +19,9 @@ export interface SessionData {
     | "admin_p_priceusd"
     | "admin_newcat"
     | "admin_api_name"
+    | "wallet_topup_amount"
+    | "wallet_topup_txn"
+    | "api_key_name"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -38,6 +41,8 @@ export interface SessionData {
   };
   /** Name for an API key being created via the bot admin. */
   admApiName?: string;
+  /** Pending customer wallet top-up awaiting a transaction ID. */
+  walletTopupId?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

@@ -6,7 +6,7 @@ import { confirmManualPayment } from "./manual-pay.service.js";
 
 const BINANCE_BASE = "https://api.binance.com";
 
-interface PayTxn {
+export interface PayTxn {
   transactionId: string;
   transactionTime: number;
   amount: string; // signed decimal string; positive = incoming credit
@@ -19,7 +19,7 @@ function sign(query: string, secret: string): string {
 }
 
 /** Signed GET of the account's Binance Pay transaction history (read-only). */
-async function fetchPayTransactions(apiKey: string, apiSecret: string): Promise<PayTxn[]> {
+export async function fetchPayTransactions(apiKey: string, apiSecret: string): Promise<PayTxn[]> {
   const query = new URLSearchParams({
     timestamp: Date.now().toString(),
     recvWindow: "5000",
