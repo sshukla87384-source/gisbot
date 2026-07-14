@@ -35,7 +35,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, session } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
-import { adminCommand, handleAdminCallback, handleAdminText, isBotAdmin, setProductImageFromFileId } from "./admin.js";
+import { adminCommand, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { t } from "./i18n.js";
 import * as views from "./views.js";
@@ -194,12 +194,15 @@ export function createBot(): Bot<Ctx> {
         ctx.session.binanceOrderId = undefined;
         return ctx.reply("✅ Payment verified! Your order has been delivered. Check 📦 My Orders.");
       }
-      // Not auto-verified → keep it simple for the buyer, hand to support with the ID.
-      await createTicket(
-        ctx.user.id,
-        "PAYMENT_ISSUE",
-        `Binance payment — order ${orderId}, transaction ID: ${txn} (auto-verify: ${r.ok ? "ok" : r.reason}).`,
-      ).catch(() => undefined);
+      // Not auto-verified → send admins an instant approve/reject card (fallback: ticket).
+      const notified = await notifyAdminsForApproval(ctx, orderId, "Binance", txn);
+      if (notified === 0) {
+        await createTicket(
+          ctx.user.id,
+          "PAYMENT_ISSUE",
+          `Binance payment — order ${orderId}, Order ID: ${txn} (auto-verify: ${r.ok ? "ok" : r.reason}).`,
+        ).catch(() => undefined);
+      }
       const note =
         r.reason === "AMOUNT_MISMATCH"
           ? "⚠️ That transaction’s amount doesn’t match your order. "
@@ -214,8 +217,9 @@ export function createBot(): Bot<Ctx> {
       const orderId = ctx.session.upiOrderId ?? "";
       ctx.session.upiOrderId = undefined;
       const ref = ctx.message.text.trim().slice(0, 64);
-      await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR/ref: ${ref}. Please verify and confirm.`).catch(() => undefined);
-      return ctx.reply("✅ Thanks! We've logged your UPI reference. Your order will be delivered right after we verify the payment.");
+      const notified = await notifyAdminsForApproval(ctx, orderId, "UPI", ref);
+      if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref}.`).catch(() => undefined);
+      return ctx.reply("✅ Thanks! We've received your UPI reference. Your order will be delivered right after we verify — usually within minutes.");
     }
     if (awaiting === "wallet_topup_amount") {
       const rupees = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));

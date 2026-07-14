@@ -1,6 +1,7 @@
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
+import { enqueueTelegramMessage } from "./queues.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -96,6 +97,23 @@ export async function adminCancelOrder(orderId: string): Promise<void> {
     where: { id: orderId, status: { in: ["PENDING_PAYMENT"] } },
     data: { status: "CANCELLED", cancelledAt: new Date() },
   });
+}
+
+/** Reject a pending manual order and notify the buyer. */
+export async function rejectManualOrder(orderId: string): Promise<{ ok: boolean; orderNumber?: string }> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { user: { select: { telegramId: true } } },
+  });
+  if (!order || order.status !== "PENDING_PAYMENT") return { ok: false };
+  await prisma.order.update({ where: { id: orderId }, data: { status: "CANCELLED", cancelledAt: new Date() } });
+  if (order.user.telegramId !== null) {
+    await enqueueTelegramMessage(
+      order.user.telegramId,
+      `❌ Payment for order <b>${order.orderNumber}</b> could not be verified and was rejected. If you did pay, contact 🎫 Support with your reference.`,
+    );
+  }
+  return { ok: true, orderNumber: order.orderNumber };
 }
 
 export interface ProductBrief { id: string; name: string; status: string; iconEmoji: string | null; onSalePct: number | null }

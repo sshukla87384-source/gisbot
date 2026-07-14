@@ -16,6 +16,7 @@ import {
   createProductFull,
   getAdminOrder,
   getAdminStats,
+  rejectManualOrder,
   getRedis,
   listPendingPaymentOrders,
   listProductsBrief,
@@ -330,6 +331,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       }
       return orderView(ctx, id);
     }
+    case "approve": {
+      try {
+        const r = await confirmManualPayment(id);
+        await ctx.editMessageText(`✅ <b>Approved & delivered</b> ${r.delivered} item(s).`, { parse_mode: "HTML" }).catch(() => undefined);
+      } catch {
+        await ctx.reply("⚠️ Could not approve (already processed or no stock).");
+      }
+      return;
+    }
+    case "reject": {
+      const r = await rejectManualOrder(id);
+      await ctx.editMessageText(r.ok ? `❌ <b>Rejected</b> — ${r.orderNumber}. Buyer notified.` : "Order not found or already handled.", { parse_mode: "HTML" }).catch(() => undefined);
+      return;
+    }
     case "cancel": {
       await adminCancelOrder(id);
       await ctx.reply("✖️ Order cancelled.");
@@ -632,4 +647,24 @@ export async function setProductImageFromFileId(ctx: Ctx, fileId: string): Promi
   if (!productId) { await ctx.reply("No product selected. Open the product and tap 🖼 Set image again."); return; }
   await setProductImage(productId, fileId);
   await ctx.reply("🖼 Image updated from your photo. ✅");
+}
+
+/** DM every logged-in admin an approve/reject card for a manual payment. Returns count notified. */
+export async function notifyAdminsForApproval(ctx: Ctx, orderId: string, method: string, reference: string): Promise<number> {
+  const ids = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY);
+  if (ids.length === 0) return 0;
+  const o = await getAdminOrder(orderId);
+  const head = o
+    ? `🧾 <b>${method} payment to review</b>\nOrder <b>${o.orderNumber}</b> — ${fmt(o.totalMinor, o.currency)}\nBuyer: ${escapeHtml(o.userLabel)}`
+    : `🧾 <b>${method} payment to review</b> (order ${orderId})`;
+  const text = `${head}\nRef: <code>${escapeHtml(reference)}</code>`;
+  const markup = { inline_keyboard: [[
+    { text: "✅ Approve & deliver", callback_data: cb("adm", "approve", orderId) },
+    { text: "❌ Reject", callback_data: cb("adm", "reject", orderId) },
+  ]] };
+  let sent = 0;
+  for (const id of ids) {
+    try { await ctx.api.sendMessage(Number(id), text, { parse_mode: "HTML", reply_markup: markup }); sent++; } catch { /* skip */ }
+  }
+  return sent;
 }
