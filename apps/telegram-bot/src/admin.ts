@@ -21,6 +21,7 @@ import {
   listVariantsBrief,
   sendBroadcast,
   setFlashSale,
+  setProductImage,
   setProductStatus,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
@@ -199,7 +200,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("📣 Announce", cb("adm", "announce", p.id)).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
-  kb.row().text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.row().text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
@@ -331,6 +332,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await adminDeleteProduct(id);
       await ctx.reply("🗑 Product deleted.");
       return productsView(ctx);
+    }
+    case "pimg": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_image";
+      await askStep(ctx, "🖼 <b>Set product image</b>\nSend a <b>photo</b> now, or paste an <b>image URL</b>:");
+      return;
     }
     case "keys": return variantsForKeys(ctx, id);
     case "kv": {
@@ -544,6 +551,16 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_p_image") {
+    const productId = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    if (!/^https?:\/\//i.test(text)) { await ctx.reply("Please paste a valid http(s) image URL, or send a photo."); return true; }
+    await setProductImage(productId, text.trim());
+    await ctx.reply("🖼 Image updated.");
+    await sendPanel(ctx, false);
+    return true;
+  }
+
   if (awaiting === "admin_broadcast") {
     const res = await sendBroadcast({ title: "", body: text.slice(0, 3500), segment: "all", createdById: "bot-admin" });
     await ctx.reply(`📢 Broadcast queued to ${res.targets} users.`);
@@ -552,4 +569,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
 
   return false;
+}
+
+/** Store a Telegram photo file_id as the product image (from an admin photo upload). */
+export async function setProductImageFromFileId(ctx: Ctx, fileId: string): Promise<void> {
+  const productId = ctx.session.admProductId ?? "";
+  ctx.session.admProductId = undefined;
+  ctx.session.awaiting = null;
+  if (!productId) { await ctx.reply("No product selected. Open the product and tap 🖼 Set image again."); return; }
+  await setProductImage(productId, fileId);
+  await ctx.reply("🖼 Image updated from your photo. ✅");
 }

@@ -18,6 +18,7 @@ export interface SessionData {
     | "admin_p_priceinr"
     | "admin_p_priceusd"
     | "admin_newcat"
+    | "admin_p_image"
     | "admin_api_name"
     | "wallet_topup_amount"
     | "wallet_topup_txn"

@@ -33,7 +33,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, session } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
-import { adminCommand, handleAdminCallback, handleAdminText } from "./admin.js";
+import { adminCommand, handleAdminCallback, handleAdminText, isBotAdmin, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { t } from "./i18n.js";
 import * as views from "./views.js";
@@ -145,6 +145,15 @@ export function createBot(): Bot<Ctx> {
       return ctx.reply(`✅ Balance: ${fmt(balance, ctx.user.currency)}`);
     });
   }
+
+  // ── Admin sends a photo to set a product image ──
+  bot.on("message:photo", async (ctx) => {
+    if (ctx.session.awaiting !== "admin_p_image") return;
+    if (!(await isBotAdmin(ctx.from?.id))) return;
+    const photos = ctx.message.photo;
+    const fileId = photos[photos.length - 1]?.file_id;
+    if (fileId) await setProductImageFromFileId(ctx, fileId);
+  });
 
   // ── Free-text conversations (search / ticket) ──
   bot.on("message:text", async (ctx) => {

@@ -111,6 +111,10 @@ export async function adminDeleteProduct(id: string): Promise<void> {
   await prisma.product.update({ where: { id }, data: { deletedAt: new Date(), status: "ARCHIVED" } });
 }
 
+export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { imageUrl } });
+}
+
 export async function setProductStatus(productId: string, status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED"): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { status } });
 }
