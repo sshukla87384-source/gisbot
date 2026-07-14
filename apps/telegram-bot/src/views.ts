@@ -132,6 +132,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     p.isPlatform ? "🏬 Sold by Get It Sasta" : "🏪 Sold by a verified reseller",
   ].filter((l) => l !== "");
 
+  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
   const kb = new InlineKeyboard();
   for (const v of p.variants) {
     if (v.stock > 0 && v.priceMinor !== null) {
@@ -140,7 +141,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
       // Primary one-tap purchase, plus an add-to-cart for multi-item orders.
-      kb.text(`⚡ Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
+      kb.text(`⚡ ${icon}Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
       kb.text(`🛒 Add ${v.name} to cart`, cb("crt", "add", v.id)).row();
     } else {
       kb.text(`❌ ${v.name} — out of stock`, cb("mnu", "noop")).row();

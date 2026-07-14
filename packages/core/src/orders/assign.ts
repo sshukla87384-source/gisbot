@@ -161,13 +161,13 @@ export function buildDeliveryText(
   activationGuide?: string | null,
 ): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const lines = [`📦 <b>${esc(productName)}</b> · ${esc(variantName)}`, ""];
+  const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b> · ${esc(variantName)}`, ""];
   if (payload.key) lines.push(`🔑 <code>${esc(payload.key)}</code>`);
   if (payload.username) lines.push(`👤 Login: <code>${esc(payload.username)}</code>`);
   if (payload.password) lines.push(`🔒 Password: <tg-spoiler>${esc(payload.password)}</tg-spoiler>`);
   if (payload.username) lines.push("", "⚠️ Please do not change the account password.");
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${esc(activationGuide)}`);
-  lines.push("", "Saved in 🔑 My Licenses. Problem? Open a 🎫 Support ticket.");
+  lines.push("", "💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
   return lines.join("\n");
 }

@@ -170,7 +170,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
   if (outcome.kind === "skip") return { status: "already_processed", delivered: 0 };
 
   if (outcome.telegramId !== null) {
-    await enqueueTelegramMessage(outcome.telegramId, `✅ Payment confirmed! Order <b>${outcome.orderNumber}</b> — ${formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode)}.`);
+    await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode)}. Delivering now… 🚀`);
     for (const d of outcome.deliveries) await enqueueTelegramMessage(d.telegramId, d.text);
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🕐 ${outcome.pendingManual} item(s) are being prepared (~12 h).`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);

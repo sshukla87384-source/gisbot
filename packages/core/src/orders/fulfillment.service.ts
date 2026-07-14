@@ -276,7 +276,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
     if (outcome.telegramId !== null) {
       await enqueueTelegramMessage(
         outcome.telegramId,
-        `✅ Payment received! Order <b>${outcome.orderNumber}</b> — ${money}.`,
+        `🎉 <b>Payment received!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${money}. Delivering now… 🚀`,
       );
       for (const d of outcome.deliveries) await enqueueTelegramMessage(d.telegramId, d.text);
       if (outcome.pendingManual > 0) {
