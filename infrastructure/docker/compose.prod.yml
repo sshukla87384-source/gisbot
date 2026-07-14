@@ -147,6 +147,19 @@ services:
         condition: service_healthy
 
   # ── Applications ───────────────────────────────────────────────────────────
+  # Ensures the media volume is writable by the non-root "node" user (uid 1000)
+  # on every deploy. Fixes uploads failing with EACCES on a fresh root-owned volume.
+  media-init:
+    <<: *defaults
+    image: alpine:3.20
+    profiles: ["full"]
+    volumes:
+      - media_data:/data/media
+    command: sh -c "mkdir -p /data/media && chown -R 1000:1000 /data/media"
+    restart: "no"
+    healthcheck:
+      disable: true
+
   api:
     <<: *defaults
     # Activates when the app ships: docker compose --profile full up -d
@@ -175,6 +188,8 @@ services:
       redis:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      media-init:
         condition: service_completed_successfully
     deploy:
       resources:

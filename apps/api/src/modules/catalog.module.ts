@@ -217,7 +217,11 @@ export class CatalogController {
         uploadedById: req.user?.id,
       },
     });
-    const base = (cfg.PUBLIC_API_URL ?? "").replace(/\/$/, "");
+    // Prefer PUBLIC_API_URL; otherwise derive from the incoming request so the
+    // link is always absolute and correct even if the env var is unset.
+    const proto = ((req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0] ?? req.protocol ?? "https").trim();
+    const host = req.headers.host;
+    const base = (cfg.PUBLIC_API_URL || (host ? `${proto}://${host}` : "")).replace(/\/$/, "");
     return { url: `${base}/media/${name}`, fileName: name };
   }
 

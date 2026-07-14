@@ -85,7 +85,7 @@ export default function ProductDetail() {
           <div className="md:col-span-2"><Label>Description</Label><Textarea rows={3} value={fields.description} onChange={(e) => setFields({ ...fields, description: e.target.value })} /></div>
 
           <div className="md:col-span-2">
-            <Label>Product image</Label>
+            <Label>Product image (optional)</Label>
             <div className="flex items-center gap-2">
               <Input value={fields.imageUrl} onChange={(e) => setFields({ ...fields, imageUrl: e.target.value })} placeholder="Upload or paste an image URL" />
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload.mutate(f); }} />
