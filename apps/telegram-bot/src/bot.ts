@@ -707,14 +707,54 @@ function renderDeliveryChunk(items: DeliveredSecret[]): string {
   return lines.join("\n");
 }
 
-/** Deliver all items in as few messages as possible (max 15 items per message). */
+/** Plain-text version of a delivery (for the downloadable .txt when there are many items). */
+function renderDeliveryPlainText(items: DeliveredSecret[]): string {
+  const lines: string[] = [`THE CRAZY STORE — Your order (${items.length} items)`, ""];
+  items.forEach((d, idx) => {
+    const variant = d.variantName && d.variantName.toLowerCase() !== "standard" ? ` - ${d.variantName}` : "";
+    lines.push(`${idx + 1}. ${d.productName}${variant}`);
+    if (d.secret.key) lines.push(`   Key: ${d.secret.key}`);
+    if (d.secret.username) lines.push(`   Login: ${d.secret.username}`);
+    if (d.secret.password) lines.push(`   Password: ${d.secret.password}`);
+    if (d.secret.expiresAt) lines.push(`   Valid until: ${d.secret.expiresAt.slice(0, 10)}`);
+    if (d.activationGuide) lines.push(`   Note: ${d.activationGuide}`);
+    lines.push("");
+  });
+  lines.push(
+    "==============================",
+    `Thank you for purchasing from ${STORE_NAME}!`,
+    "Your items are also saved in My Orders inside the bot.",
+    "",
+    "Terms & Conditions: Digital items are non-refundable once delivered.",
+    "Please don't change any account passwords. Not working? Use 'Request replacement' in My Orders or open a Support ticket.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Deliver all items. Up to 15 → one formatted chat message; more than 15 → a
+ * single downloadable .txt file so nothing is lost in a wall of messages.
+ */
 async function sendDeliveryBatch(ctx: Ctx, deliveries: DeliveredSecret[]): Promise<void> {
   if (deliveries.length === 0) return;
   const menuKb = new InlineKeyboard().text("🧾 My Orders", "lic:list:1").text("🏠 Menu", "mnu:home");
-  for (let i = 0; i < deliveries.length; i += MAX_PER_MESSAGE) {
-    const chunk = deliveries.slice(i, i + MAX_PER_MESSAGE);
-    await ctx.reply(renderDeliveryChunk(chunk), { parse_mode: "HTML", reply_markup: menuKb });
+
+  if (deliveries.length <= MAX_PER_MESSAGE) {
+    await ctx.reply(renderDeliveryChunk(deliveries), { parse_mode: "HTML", reply_markup: menuKb });
+    return;
   }
+
+  const file = new InputFile(Buffer.from(renderDeliveryPlainText(deliveries), "utf8"), `the-crazy-store-order-${Date.now()}.txt`);
+  await ctx.replyWithDocument(file, {
+    caption: [
+      `🎉🎊 <b>Your order is delivered!</b> 🥳`,
+      `📦 <b>${deliveries.length} items</b> are in the file above — tap to download &amp; save them.`,
+      "",
+      `🛍 <b>Thank you for purchasing from ${STORE_NAME}!</b> 💛 Also saved in 🧾 My Orders.`,
+    ].join("\n"),
+    parse_mode: "HTML",
+    reply_markup: menuKb,
+  });
 }
 
 async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
