@@ -294,8 +294,8 @@ async function ensureUncategorized(): Promise<string> {
 /** Product types offered by the bot wizard. */
 export const WIZARD_TYPES: Record<string, { type: string; fulfillmentMode: "AUTOMATIC" | "MANUAL"; label: string }> = {
   key: { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC", label: "License Key" },
+  coupon: { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC", label: "Coupon" },
   acct: { type: "DIGITAL_ACCOUNT", fulfillmentMode: "AUTOMATIC", label: "Account" },
-  other: { type: "MANUAL_SERVICE", fulfillmentMode: "MANUAL", label: "Manual service" },
 };
 
 /** Create a product with one "Standard" variant + prices, as a DRAFT. */

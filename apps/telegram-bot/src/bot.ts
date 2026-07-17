@@ -368,7 +368,7 @@ export function createBot(): Bot<Ctx> {
         case "crt:buynow":
           await addToCart(user.id, args[0] ?? "");
           ctx.session.couponCode = undefined;
-          await ctx.answerCallbackQuery({ text: "⚡ Taking you to checkout…" });
+          await ctx.answerCallbackQuery({ text: "⚡✨ Boom! Locking in your order…" });
           await render(ctx, await views.checkoutSummaryView(user), true);
           break;
         case "crt:qty":
@@ -381,7 +381,7 @@ export function createBot(): Bot<Ctx> {
           await clearCart(user.id);
           await addToCart(user.id, variantId, qty);
           ctx.session.couponCode = undefined;
-          await ctx.answerCallbackQuery({ text: "⚡ Taking you to checkout…" });
+          await ctx.answerCallbackQuery({ text: "⚡✨ Boom! Locking in your order…" });
           await render(ctx, await views.checkoutSummaryView(user), true);
           break;
         }
@@ -429,7 +429,7 @@ export function createBot(): Bot<Ctx> {
             `✅ Payment received! Order <b>${result.orderNumber}</b> — ${fmt(result.totalMinor, result.currency)}.`,
             { parse_mode: "HTML" },
           );
-          for (const d of result.deliveries) await sendDelivery(ctx, d);
+          await sendDeliveryBatch(ctx, result.deliveries);
           if (result.pendingManualItems > 0) {
             await ctx.reply(
               `🕐 ${result.pendingManualItems} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
@@ -573,8 +573,22 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.vaultView(user, intArg(args, 0, 1)), true);
           break;
         case "lic:view": {
-          const revealed = await revealDelivery(user.id, args[0] ?? "");
-          await sendRevealed(ctx, revealed.productName, revealed.variantName, revealed.payload);
+          const oid = args[0] ?? "";
+          const revealed = await revealDelivery(user.id, oid);
+          await sendRevealed(ctx, revealed.productName, revealed.variantName, revealed.payload, undefined, oid);
+          break;
+        }
+        case "lic:replace": {
+          await ctx.answerCallbackQuery({ text: "Opening a replacement request…" });
+          const ticket = await createTicket(
+            user.id,
+            "DELIVERY_ISSUE",
+            `🔁 Replacement requested for delivered item ${args[0] ?? ""}. Customer reports it isn't working.`,
+          );
+          await ctx.reply(
+            `🔁 <b>Replacement requested</b> — ticket <b>#${ticket.ticketNumber}</b>.\nOur team will review and reply here shortly. Sorry for the trouble!`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🧾 My Orders", "lic:list:1").text("🏠 Menu", "mnu:home") },
+          );
           break;
         }
 
@@ -665,6 +679,44 @@ export function createBot(): Bot<Ctx> {
   return bot;
 }
 
+const STORE_NAME = "THE CRAZY STORE";
+const MAX_PER_MESSAGE = 15;
+
+/** Render up to MAX_PER_MESSAGE delivered items into ONE message with a thank-you + T&C footer. */
+function renderDeliveryChunk(items: DeliveredSecret[]): string {
+  const lines: string[] = ["🎉🎊 <b>Your order is delivered!</b> 🥳", ""];
+  const many = items.length > 1;
+  items.forEach((d, idx) => {
+    const head = many ? `<b>${idx + 1}.</b> ` : "";
+    const variant = d.variantName && d.variantName.toLowerCase() !== "standard" ? ` · ${escapeHtml(d.variantName)}` : "";
+    lines.push(`${head}📦 <b>${escapeHtml(d.productName)}</b>${variant}`);
+    if (d.secret.key) lines.push(`🔑 <code>${escapeHtml(d.secret.key)}</code>`);
+    if (d.secret.username) lines.push(`👤 <code>${escapeHtml(d.secret.username)}</code>`);
+    if (d.secret.password) lines.push(`🔒 <tg-spoiler>${escapeHtml(d.secret.password)}</tg-spoiler>`);
+    if (d.secret.expiresAt) lines.push(`⏳ Valid until: ${d.secret.expiresAt.slice(0, 10)}`);
+    if (d.activationGuide) lines.push(`📄 ${escapeHtml(d.activationGuide)}`);
+    lines.push("");
+  });
+  lines.push(
+    "━━━━━━━━━━━━━━",
+    `🛍 <b>Thank you for purchasing from ${STORE_NAME}!</b> 💛`,
+    "We truly appreciate your order. Everything above is saved in 🧾 My Orders.",
+    "",
+    "📌 <b>Terms &amp; Conditions:</b> Digital items are non-refundable once delivered. Please don't change any account passwords. If something doesn't work, use 🔁 Request replacement in My Orders or open a 🎫 Support ticket and we'll make it right.",
+  );
+  return lines.join("\n");
+}
+
+/** Deliver all items in as few messages as possible (max 15 items per message). */
+async function sendDeliveryBatch(ctx: Ctx, deliveries: DeliveredSecret[]): Promise<void> {
+  if (deliveries.length === 0) return;
+  const menuKb = new InlineKeyboard().text("🧾 My Orders", "lic:list:1").text("🏠 Menu", "mnu:home");
+  for (let i = 0; i < deliveries.length; i += MAX_PER_MESSAGE) {
+    const chunk = deliveries.slice(i, i + MAX_PER_MESSAGE);
+    await ctx.reply(renderDeliveryChunk(chunk), { parse_mode: "HTML", reply_markup: menuKb });
+  }
+}
+
 async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
   await sendRevealed(ctx, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide);
 }
@@ -675,6 +727,7 @@ async function sendRevealed(
   variantName: string,
   payload: { kind: string; key?: string; username?: string; password?: string; expiresAt?: string },
   activationGuide?: string | null,
+  orderItemId?: string,
 ): Promise<void> {
   const lines = [`📦 <b>${escapeHtml(productName)}</b> · ${escapeHtml(variantName)}`, ""];
   if (payload.key) lines.push(`🔑 <code>${escapeHtml(payload.key)}</code>`);
@@ -683,7 +736,9 @@ async function sendRevealed(
   if (payload.username) lines.push("", "⚠️ Please do not change the account password.");
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
-  lines.push("", "Saved in 🔑 My Licenses. Problem? Open a 🎫 Support ticket.");
-  const kb = new InlineKeyboard().text("🏠 Menu", "mnu:home");
+  lines.push("", "Saved in 🧾 My Orders. Not working? Tap 🔁 Request replacement below.");
+  const kb = new InlineKeyboard();
+  if (orderItemId) kb.text("🔁 Request replacement", cb("lic", "replace", orderItemId)).row();
+  kb.text("🏠 Menu", "mnu:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }

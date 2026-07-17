@@ -300,8 +300,8 @@ async function categoryPickKb(): Promise<InlineKeyboard> {
 async function wizardTypeStep(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard()
     .text("🔑 License Key", cb("adm", "ptype", "key")).row()
+    .text("🎟 Coupon", cb("adm", "ptype", "coupon")).row()
     .text("👤 Account", cb("adm", "ptype", "acct")).row()
-    .text("📦 Manual service", cb("adm", "ptype", "other")).row()
     .text("✖️ Cancel", cb("adm", "home"));
   await ctx.reply("<b>New product · Step 3/6</b>\nWhat type is it?", { parse_mode: "HTML", reply_markup: kb });
 }

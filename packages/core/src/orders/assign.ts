@@ -168,6 +168,12 @@ export function buildDeliveryText(
   if (payload.username) lines.push("", "⚠️ Please do not change the account password.");
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${esc(activationGuide)}`);
-  lines.push("", "💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
+  lines.push(
+    "",
+    "━━━━━━━━━━━━━━",
+    "🛍 <b>Thank you for purchasing from THE CRAZY STORE!</b> 💛",
+    "Saved in 🧾 My Orders · Enjoy! 🚀",
+    "📌 Digital items are non-refundable once delivered. Not working? Use 🔁 Request replacement in My Orders.",
+  );
   return lines.join("\n");
 }

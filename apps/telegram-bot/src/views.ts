@@ -139,6 +139,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
   ].filter((l) => l !== "");
 
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+  const singleVariant = p.variants.length === 1;
   const kb = new InlineKeyboard();
   // When there's a highlight teaser AND a longer description, offer to expand it.
   if (hasHighlight && hasFullDesc) {
@@ -150,9 +151,11 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
         v.originalPriceMinor !== null
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
-      // One tap → choose quantity → buy (no cart).
+      // One tap → choose quantity → buy (no cart). Hide a lone/"Standard" variant name.
       const left = v.stock >= Number.MAX_SAFE_INTEGER ? "" : ` · ${v.stock} left`;
-      kb.text(`⚡ ${icon}Buy ${v.name} — ${priceLabel}${left}`, cb("crt", "qty", v.id, 1)).row();
+      const named = !singleVariant && v.name.toLowerCase() !== "standard";
+      const buyLabel = named ? `Buy ${v.name}` : "Buy";
+      kb.text(`⚡ ${icon}${buyLabel} — ${priceLabel}${left}`, cb("crt", "qty", v.id, 1)).row();
     } else {
       kb.text(`❌ ${v.name} — out of stock`, cb("mnu", "noop")).row();
     }
@@ -177,12 +180,12 @@ export async function quantitySelectView(user: BotUser, variantId: string, qty: 
         : fmt(total, user.currency);
   const lines = [
     `🛍 <b>${icon}${escapeHtml(v.productName)}</b>`,
-    `Variant: <b>${escapeHtml(v.variantName)}</b>`,
+    v.variantName.toLowerCase() !== "standard" ? `Variant: <b>${escapeHtml(v.variantName)}</b>` : "",
     unlimited ? "In stock" : v.stock > 0 ? `In stock: <b>${v.stock}</b>` : "❌ Out of stock",
     "",
     `Quantity: <b>${q}</b>`,
     `Total: <b>${totalLabel}</b>`,
-  ];
+  ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
   kb.text("➖", cb("crt", "qty", variantId, Math.max(1, q - 1)))
     .text(`${q}`, cb("mnu", "noop"))
