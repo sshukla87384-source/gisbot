@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
+import { invalidate } from "./redis.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -127,14 +128,81 @@ export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
 
 export async function adminDeleteProduct(id: string): Promise<void> {
   await prisma.product.update({ where: { id }, data: { deletedAt: new Date(), status: "ARCHIVED" } });
+  await invalidate("cat:*");
 }
 
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { imageUrl } });
+  await invalidate("cat:*");
 }
 
 export async function setProductStatus(productId: string, status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED"): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { status } });
+  await invalidate("cat:*");
+}
+
+export interface ProductBasics { id: string; name: string; description: string | null; highlight: string | null; iconEmoji: string | null }
+
+/** Current editable metadata for a product (used to prefill the bot's edit view). */
+export async function getProductBasics(productId: string): Promise<ProductBasics | null> {
+  const p = await prisma.product.findFirst({ where: { id: productId, deletedAt: null } });
+  if (!p) return null;
+  return { id: p.id, name: p.name, description: p.description, highlight: p.highlight, iconEmoji: p.iconEmoji };
+}
+
+/**
+ * Update a product's editable metadata. Only the fields provided are touched —
+ * pass `description`/`highlight`/`iconEmoji` as `null` to clear them, or omit to leave unchanged.
+ */
+export async function updateProductBasics(
+  productId: string,
+  fields: { name?: string; description?: string | null; highlight?: string | null; iconEmoji?: string | null },
+): Promise<void> {
+  const data: Record<string, unknown> = {};
+  if (fields.name !== undefined) data.name = fields.name.slice(0, 200);
+  if (fields.description !== undefined) data.description = fields.description ? fields.description.slice(0, 4000) : null;
+  if (fields.highlight !== undefined) data.highlight = fields.highlight ? fields.highlight.slice(0, 300) : null;
+  if (fields.iconEmoji !== undefined) data.iconEmoji = fields.iconEmoji ? fields.iconEmoji.slice(0, 16) : null;
+  if (Object.keys(data).length === 0) return;
+  await prisma.product.update({ where: { id: productId }, data });
+  await invalidate("cat:*");
+}
+
+export interface VariantPriceBrief { id: string; name: string; sku: string; inrMinor: number | null; usdMinor: number | null }
+
+/** List a product's variants with their current RETAIL INR/USD prices (for the bot price editor). */
+export async function listVariantsWithPrices(productId: string): Promise<VariantPriceBrief[]> {
+  const rows = await prisma.productVariant.findMany({
+    where: { productId, deletedAt: null },
+    orderBy: { sortOrder: "asc" },
+    include: { prices: { where: { tier: { name: "RETAIL" } } } },
+  });
+  return rows.map((v) => ({
+    id: v.id,
+    name: v.name,
+    sku: v.sku,
+    inrMinor: v.prices.find((p) => p.currency === "INR")?.amountMinor ?? null,
+    usdMinor: v.prices.find((p) => p.currency === "USD")?.amountMinor ?? null,
+  }));
+}
+
+/** Upsert a variant's RETAIL price for one or both currencies (minor units). */
+export async function setVariantPrices(
+  variantId: string,
+  prices: { inrMinor?: number; usdMinor?: number },
+): Promise<void> {
+  const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
+  const pairs: Array<{ currency: "INR" | "USD"; amountMinor: number }> = [];
+  if (prices.inrMinor !== undefined) pairs.push({ currency: "INR", amountMinor: prices.inrMinor });
+  if (prices.usdMinor !== undefined) pairs.push({ currency: "USD", amountMinor: prices.usdMinor });
+  for (const p of pairs) {
+    await prisma.variantPrice.upsert({
+      where: { variantId_tierId_currency: { variantId, tierId: retail.id, currency: p.currency } },
+      create: { variantId, tierId: retail.id, currency: p.currency, amountMinor: p.amountMinor },
+      update: { amountMinor: p.amountMinor },
+    });
+  }
+  await invalidate("cat:*");
 }
 
 export async function setFlashSale(productId: string, percent: number, endsAt: Date | null): Promise<void> {
@@ -143,6 +211,7 @@ export async function setFlashSale(productId: string, percent: number, endsAt: D
     where: { id: productId },
     data: { salePercentBp: bp, saleStartsAt: new Date(), saleEndsAt: endsAt },
   });
+  await invalidate("cat:*");
 }
 
 export async function clearFlashSale(productId: string): Promise<void> {
@@ -150,6 +219,7 @@ export async function clearFlashSale(productId: string): Promise<void> {
     where: { id: productId },
     data: { salePercentBp: null, saleStartsAt: null, saleEndsAt: null },
   });
+  await invalidate("cat:*");
 }
 
 export interface VariantBrief { id: string; name: string; sku: string }
@@ -175,6 +245,7 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
     });
     added++;
   }
+  await invalidate("cat:*");
   return { added, skipped };
 }
 
@@ -241,7 +312,7 @@ export async function createProductFull(input: {
   const slug = await uniqueSlug(slugify(input.name));
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const product = await tx.product.create({
       data: {
         slug,
@@ -274,4 +345,6 @@ export async function createProductFull(input: {
     }
     return { productId: product.id };
   });
+  await invalidate("cat:*");
+  return result;
 }

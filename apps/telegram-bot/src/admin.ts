@@ -14,6 +14,13 @@ import {
   confirmManualPayment,
   createCategoryQuick,
   createProductFull,
+  getProductBasics,
+  updateProductBasics,
+  listVariantsWithPrices,
+  setVariantPrices,
+  adjustWallet,
+  getWallet,
+  findUserByTelegramRef,
   getAdminOrder,
   getAdminStats,
   rejectManualOrder,
@@ -128,6 +135,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
+    .text("💰 Wallet adjust", cb("adm", "wal")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .text("🚪 Logout", cb("adm", "logout")).row();
 }
@@ -218,11 +226,45 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
   kb.row().text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.text("✏️ Edit details", cb("adm", "pedit", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
   await show(ctx, text, kb, true);
+}
+
+async function productEditView(ctx: Ctx, productId: string): Promise<void> {
+  const p = await getProductBasics(productId);
+  if (!p) { await productsView(ctx); return; }
+  const kb = new InlineKeyboard()
+    .text("📝 Edit name", cb("adm", "pename", p.id)).row()
+    .text("✨ Edit highlight", cb("adm", "pehi", p.id)).row()
+    .text("🧾 Edit description", cb("adm", "pedesc", p.id)).row()
+    .text("😀 Edit emoji", cb("adm", "peemoji", p.id)).row()
+    .text("💲 Edit prices", cb("adm", "pprice", p.id)).row()
+    .text("◀️ Back", cb("adm", "prod", p.id));
+  const text = [
+    "✏️ <b>Edit product</b>",
+    "",
+    `<b>Name:</b> ${escapeHtml(p.name)}`,
+    `<b>Emoji:</b> ${p.iconEmoji ? escapeHtml(p.iconEmoji) : "—"}`,
+    `<b>Highlight:</b> ${p.highlight ? escapeHtml(p.highlight) : "—"}`,
+    `<b>Description:</b>\n${p.description ? escapeHtml(p.description) : "—"}`,
+  ].join("\n");
+  await show(ctx, text, kb, true);
+}
+
+async function priceVariantsView(ctx: Ctx, productId: string): Promise<void> {
+  const vs = await listVariantsWithPrices(productId);
+  const kb = new InlineKeyboard();
+  for (const v of vs) {
+    const inr = v.inrMinor !== null ? `₹${(v.inrMinor / 100).toFixed(2)}` : "—";
+    const usd = v.usdMinor !== null ? `$${(v.usdMinor / 100).toFixed(2)}` : "—";
+    kb.text(`${v.name}: ${inr} / ${usd}`, cb("adm", "pv", v.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "pedit", productId));
+  await show(ctx, vs.length ? "💲 <b>Edit prices</b>\nTap a variant to set its INR &amp; USD price." : "No variants on this product.", kb, true);
 }
 
 async function variantsForKeys(ctx: Ctx, productId: string): Promise<void> {
@@ -321,6 +363,41 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "ord": return orderView(ctx, id);
     case "prods": return productsView(ctx);
     case "prod": return productView(ctx, id);
+    case "pedit": return productEditView(ctx, id);
+    case "pename": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_edit_name";
+      await askStep(ctx, "📝 Send the <b>new product name</b>:");
+      return;
+    }
+    case "pedesc": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_edit_desc";
+      await askStep(ctx, "🧾 Send the <b>new description</b> (or send <code>-</code> to clear it):");
+      return;
+    }
+    case "peemoji": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_edit_emoji";
+      await askStep(ctx, "😀 Send a single <b>emoji</b> to show next to the name (or <code>-</code> to remove):");
+      return;
+    }
+    case "pehi": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_edit_highlight";
+      await askStep(ctx, "✨ Send a short <b>highlight</b> (1–2 lines shown on the product card, max 300 chars) — or <code>-</code> to clear:");
+      return;
+    }
+    case "pprice": {
+      ctx.session.admProductId = id;
+      return priceVariantsView(ctx, id);
+    }
+    case "pv": {
+      ctx.session.admVariantId = id;
+      ctx.session.awaiting = "admin_p_price_inr";
+      await askStep(ctx, "💲 Send the new <b>INR price</b> (₹), e.g. <code>499</code> — or <code>-</code> to leave INR unchanged:");
+      return;
+    }
 
     case "confirm": {
       try {
@@ -489,6 +566,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("📢 Send the message to broadcast to <b>all</b> users:", { parse_mode: "HTML" });
       return;
     }
+    case "wal": {
+      ctx.session.admWalletUserId = undefined;
+      ctx.session.awaiting = "admin_wallet_user";
+      await askStep(ctx, "💰 <b>Wallet adjust</b>\nSend the customer's <b>Telegram ID</b> or <b>@username</b>:");
+      return;
+    }
     default:
       return sendPanel(ctx, true);
   }
@@ -629,9 +712,148 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_p_edit_name") {
+    const productId = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    if (!productId) { await ctx.reply("No product selected — open the product again."); await sendPanel(ctx, false); return true; }
+    const name = text.slice(0, 200);
+    if (!name) { ctx.session.admProductId = productId; ctx.session.awaiting = "admin_p_edit_name"; await ctx.reply("Please send a non-empty name."); return true; }
+    await updateProductBasics(productId, { name });
+    await ctx.reply(`✅ Name updated to “${name}”.`);
+    await productEditView(ctx, productId);
+    return true;
+  }
+
+  if (awaiting === "admin_p_edit_desc") {
+    const productId = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    if (!productId) { await ctx.reply("No product selected — open the product again."); await sendPanel(ctx, false); return true; }
+    const description = text === "-" ? null : text.slice(0, 4000);
+    await updateProductBasics(productId, { description });
+    await ctx.reply(description === null ? "✅ Description cleared." : "✅ Description updated.");
+    await productEditView(ctx, productId);
+    return true;
+  }
+
+  if (awaiting === "admin_p_edit_emoji") {
+    const productId = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    if (!productId) { await ctx.reply("No product selected — open the product again."); await sendPanel(ctx, false); return true; }
+    const iconEmoji = text === "-" ? null : text.slice(0, 16);
+    await updateProductBasics(productId, { iconEmoji });
+    await ctx.reply(iconEmoji === null ? "✅ Emoji removed." : `✅ Emoji set to ${iconEmoji}.`);
+    await productEditView(ctx, productId);
+    return true;
+  }
+
+  if (awaiting === "admin_p_edit_highlight") {
+    const productId = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    if (!productId) { await ctx.reply("No product selected — open the product again."); await sendPanel(ctx, false); return true; }
+    const highlight = text === "-" ? null : text.slice(0, 300);
+    await updateProductBasics(productId, { highlight });
+    await ctx.reply(highlight === null ? "✅ Highlight cleared." : "✅ Highlight updated.");
+    await productEditView(ctx, productId);
+    return true;
+  }
+
+  if (awaiting === "admin_p_price_inr") {
+    const variantId = ctx.session.admVariantId ?? "";
+    if (!variantId) { await ctx.reply("No variant selected — open Edit prices again."); await sendPanel(ctx, false); return true; }
+    if (text === "-") {
+      ctx.session.admPriceInrMinor = undefined;
+    } else {
+      const minor = rupeesToMinor(text);
+      if (minor === null || minor <= 0) { ctx.session.awaiting = "admin_p_price_inr"; await ctx.reply("Please send a valid INR price, e.g. 499 (or - to skip)."); return true; }
+      ctx.session.admPriceInrMinor = minor;
+    }
+    ctx.session.awaiting = "admin_p_price_usd";
+    await ctx.reply("💲 Now send the new <b>USD price</b> ($), e.g. <code>5.99</code> — or <code>-</code> to leave USD unchanged:", { parse_mode: "HTML", reply_markup: cancelKb() });
+    return true;
+  }
+
+  if (awaiting === "admin_p_price_usd") {
+    const variantId = ctx.session.admVariantId ?? "";
+    const productId = ctx.session.admProductId ?? "";
+    const inrMinor = ctx.session.admPriceInrMinor;
+    ctx.session.admVariantId = undefined;
+    ctx.session.admPriceInrMinor = undefined;
+    if (!variantId) { await ctx.reply("No variant selected — open Edit prices again."); await sendPanel(ctx, false); return true; }
+    let usdMinor: number | undefined;
+    if (text !== "-") {
+      const minor = rupeesToMinor(text);
+      if (minor === null || minor <= 0) { ctx.session.admVariantId = variantId; ctx.session.admPriceInrMinor = inrMinor; ctx.session.awaiting = "admin_p_price_usd"; await ctx.reply("Please send a valid USD price, e.g. 5.99 (or - to skip)."); return true; }
+      usdMinor = minor;
+    }
+    if (inrMinor === undefined && usdMinor === undefined) {
+      await ctx.reply("Nothing changed — you skipped both currencies.");
+    } else {
+      await setVariantPrices(variantId, { inrMinor, usdMinor });
+      await ctx.reply("✅ Prices updated.");
+    }
+    if (productId) await priceVariantsView(ctx, productId);
+    else await sendPanel(ctx, false);
+    return true;
+  }
+
   if (awaiting === "admin_broadcast") {
     const res = await sendBroadcast({ title: "", body: text.slice(0, 3500), segment: "all", createdById: "bot-admin" });
     await ctx.reply(`📢 Broadcast queued to ${res.targets} users.`);
+    await sendPanel(ctx, false);
+    return true;
+  }
+
+  if (awaiting === "admin_wallet_user") {
+    const found = await findUserByTelegramRef(text);
+    if (!found) {
+      await ctx.reply("❌ No user found with that ID/username. They must have opened the bot at least once.");
+      await sendPanel(ctx, false);
+      return true;
+    }
+    ctx.session.admWalletUserId = found.id;
+    const w = await getWallet(found.id);
+    ctx.session.awaiting = "admin_wallet_amount";
+    await ctx.reply(
+      [
+        `👤 <b>${escapeHtml(found.label)}</b>`,
+        `Current balance: <b>${fmt(w.balanceMinor, w.currency)}</b>`,
+        "",
+        "Send an amount to apply — <code>100</code> or <code>+100</code> to credit, <code>-50</code> to deduct:",
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: cancelKb() },
+    );
+    return true;
+  }
+
+  if (awaiting === "admin_wallet_amount") {
+    const userId = ctx.session.admWalletUserId ?? "";
+    ctx.session.admWalletUserId = undefined;
+    if (!userId) { await ctx.reply("Session lost — open 💰 Wallet adjust again."); await sendPanel(ctx, false); return true; }
+    const value = Number.parseFloat(text.trim().replace(/[, ]/g, ""));
+    if (!Number.isFinite(value) || value === 0) {
+      await ctx.reply("❌ Send a non-zero number, e.g. +100 or -50.");
+      await sendPanel(ctx, false);
+      return true;
+    }
+    const deltaMinor = Math.round(value * 100);
+    const w = await getWallet(userId);
+    if (deltaMinor < 0 && w.balanceMinor + BigInt(deltaMinor) < 0n) {
+      await ctx.reply(`❌ Can't deduct more than the balance (${fmt(w.balanceMinor, w.currency)}).`);
+      await sendPanel(ctx, false);
+      return true;
+    }
+    const adminId = ctx.from?.id ? String(ctx.from.id) : undefined;
+    const newBalance = await adjustWallet({
+      userId,
+      amountMinor: BigInt(deltaMinor),
+      type: "ADJUSTMENT",
+      note: `Admin ${deltaMinor >= 0 ? "credit" : "debit"} via bot`,
+      actorId: adminId,
+    });
+    await ctx.reply(
+      `✅ ${deltaMinor >= 0 ? "Credited" : "Deducted"} ${fmt(BigInt(Math.abs(deltaMinor)), w.currency)}. New balance: <b>${fmt(newBalance, w.currency)}</b>.`,
+      { parse_mode: "HTML" },
+    );
     await sendPanel(ctx, false);
     return true;
   }

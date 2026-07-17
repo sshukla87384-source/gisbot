@@ -19,10 +19,19 @@ export interface SessionData {
     | "admin_p_priceusd"
     | "admin_newcat"
     | "admin_p_image"
+    | "admin_p_edit_name"
+    | "admin_p_edit_desc"
+    | "admin_p_edit_emoji"
+    | "admin_p_edit_highlight"
+    | "admin_p_price_inr"
+    | "admin_p_price_usd"
+    | "admin_wallet_user"
+    | "admin_wallet_amount"
     | "admin_api_name"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "api_key_name"
+    | "coupon_code"
     | "upi_ref"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
@@ -31,6 +40,10 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** INR price captured in step 1 of the two-step variant price editor. */
+  admPriceInrMinor?: number;
+  /** Target user for the admin wallet-adjust flow. */
+  admWalletUserId?: string;
   /** Customer Binance order awaiting a transaction ID. */
   binanceOrderId?: string;
   /** In-progress product being created via the admin wizard. */
@@ -47,6 +60,8 @@ export interface SessionData {
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */
   upiOrderId?: string;
+  /** Coupon code the customer applied at checkout (validated at pay time). */
+  couponCode?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

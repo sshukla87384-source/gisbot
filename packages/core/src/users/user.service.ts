@@ -15,11 +15,10 @@ export interface ResolvedUser {
   isNew: boolean;
 }
 
-function defaultCurrencyForLocale(locale?: string): Currency {
-  // India-first default (PRD §6.2); USD for clearly non-Indian locales.
-  if (!locale) return "INR";
-  const l = locale.toLowerCase();
-  return l === "hi" || l.endsWith("-in") || l === "en" ? "INR" : "USD";
+function defaultCurrencyForLocale(_locale?: string): Currency {
+  // USD is the preferred default for all new users; they can switch to INR
+  // from the currency button at the bottom of the main menu.
+  return "USD";
 }
 
 async function withRoleNames(user: User): Promise<User & { roleNames: string[] }> {
@@ -92,6 +91,27 @@ export async function setUserLocale(userId: string, locale: string): Promise<voi
 
 export async function setUserCurrency(userId: string, currency: Currency): Promise<void> {
   await prisma.user.update({ where: { id: userId }, data: { currency } });
+}
+
+export interface UserRef { id: string; label: string; currency: Currency }
+
+/** Look up an existing user by numeric Telegram ID or @handle (admin tools). */
+export async function findUserByTelegramRef(ref: string): Promise<UserRef | null> {
+  const trimmed = ref.trim().replace(/^@/, "");
+  if (!trimmed) return null;
+  let user = null;
+  if (/^\d+$/.test(trimmed)) {
+    user = await prisma.user.findUnique({ where: { telegramId: BigInt(trimmed) } });
+  }
+  if (!user) {
+    user = await prisma.user.findFirst({ where: { telegramHandle: { equals: trimmed, mode: "insensitive" } } });
+  }
+  if (!user) return null;
+  return {
+    id: user.id,
+    label: user.telegramHandle ? `@${user.telegramHandle}` : user.firstName ?? user.id,
+    currency: user.currency,
+  };
 }
 
 export async function getReferralStats(userId: string): Promise<{

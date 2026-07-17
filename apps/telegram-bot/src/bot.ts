@@ -21,6 +21,7 @@ import {
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
+  previewCoupon,
   registerPostTarget,
   removePostTargetByChat,
   type DeliveredSecret,
@@ -277,6 +278,18 @@ export function createBot(): Bot<Ctx> {
         { parse_mode: "HTML" },
       );
     }
+    if (awaiting === "coupon_code") {
+      const code = ctx.message.text.trim().slice(0, 40);
+      try {
+        const pv = await previewCoupon(ctx.user.id, code);
+        ctx.session.couponCode = pv.code;
+        await ctx.reply(`✅ Coupon <b>${pv.code}</b> applied — you save ${fmt(pv.discountMinor, pv.currency)}.`, { parse_mode: "HTML" });
+      } catch (e) {
+        ctx.session.couponCode = undefined;
+        await ctx.reply(`❌ ${e instanceof Error ? e.message : "That coupon can't be applied."}`);
+      }
+      return render(ctx, await views.checkoutSummaryView(ctx.user, ctx.session.couponCode), false);
+    }
     if (awaiting === "search") {
       const q = ctx.message.text.trim().slice(0, 64);
       ctx.session.lastSearch = q;
@@ -337,6 +350,9 @@ export function createBot(): Bot<Ctx> {
         case "shp:prod":
           await render(ctx, await views.productView(user, args[0] ?? ""), true);
           break;
+        case "shp:desc":
+          await render(ctx, await views.productDescriptionView(user, args[0] ?? ""), true);
+          break;
 
         case "src:pg": {
           const q = ctx.session.lastSearch ?? "";
@@ -351,9 +367,24 @@ export function createBot(): Bot<Ctx> {
           break;
         case "crt:buynow":
           await addToCart(user.id, args[0] ?? "");
+          ctx.session.couponCode = undefined;
           await ctx.answerCallbackQuery({ text: "⚡ Taking you to checkout…" });
           await render(ctx, await views.checkoutSummaryView(user), true);
           break;
+        case "crt:qty":
+          await render(ctx, await views.quantitySelectView(user, args[0] ?? "", intArg(args, 1, 1)), true);
+          break;
+        case "crt:buyqty": {
+          const variantId = args[0] ?? "";
+          const qty = Math.max(1, intArg(args, 1, 1));
+          // Buy-now with quantity: replace any stale cart with just this line, then checkout.
+          await clearCart(user.id);
+          await addToCart(user.id, variantId, qty);
+          ctx.session.couponCode = undefined;
+          await ctx.answerCallbackQuery({ text: "⚡ Taking you to checkout…" });
+          await render(ctx, await views.checkoutSummaryView(user), true);
+          break;
+        }
         case "crt:view":
           await render(ctx, await views.cartViewKb(user), true);
           break;
@@ -374,12 +405,26 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.cartViewKb(user), true);
           break;
         case "crt:checkout":
-          await render(ctx, await views.checkoutSummaryView(user), true);
+          await render(ctx, await views.checkoutSummaryView(user, ctx.session.couponCode), true);
           break;
+
+        case "ord:coupon": {
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "coupon_code";
+          await ctx.reply("🏷 Send your <b>coupon code</b>:", { parse_mode: "HTML" });
+          break;
+        }
+        case "ord:couponclear": {
+          ctx.session.couponCode = undefined;
+          await ctx.answerCallbackQuery({ text: "Coupon removed" });
+          await render(ctx, await views.checkoutSummaryView(user, undefined), true);
+          break;
+        }
 
         case "ord:paywallet": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
-          const result = await checkoutWithWallet(user.id);
+          const result = await checkoutWithWallet(user.id, ctx.session.couponCode);
+          ctx.session.couponCode = undefined;
           await ctx.editMessageText(
             `✅ Payment received! Order <b>${result.orderNumber}</b> — ${fmt(result.totalMinor, result.currency)}.`,
             { parse_mode: "HTML" },
@@ -395,11 +440,12 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:paygw": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating payment link…" });
-          const gw = await createGatewayCheckout(user.id, args[0] ?? "");
+          const gw = await createGatewayCheckout(user.id, args[0] ?? "", ctx.session.couponCode);
+          ctx.session.couponCode = undefined;
           const payKb = new InlineKeyboard()
             .url(`🔗 Pay ${fmt(gw.totalMinor, gw.currency)}`, gw.url)
             .row()
-            .text("🛒 Back to Cart", "crt:view");
+            .text("🏠 Menu", "mnu:home");
           await ctx.editMessageText(
             [
               `🧾 Order <b>${gw.orderNumber}</b> created — ${fmt(gw.totalMinor, gw.currency)}.`,
@@ -413,7 +459,8 @@ export function createBot(): Bot<Ctx> {
         case "ord:paybinance": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
           if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
-          const bz = await createBinanceManualCheckout(user.id);
+          const bz = await createBinanceManualCheckout(user.id, ctx.session.couponCode);
+          ctx.session.couponCode = undefined;
           ctx.session.binanceOrderId = bz.orderId;
           await ctx.editMessageText(
             [
@@ -482,7 +529,8 @@ export function createBot(): Bot<Ctx> {
         case "ord:payupi": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating UPI order…" });
           if (user.currency !== "INR") { await setUserCurrency(user.id, "INR"); user.currency = "INR"; }
-          const up = await createUpiManualCheckout(user.id);
+          const up = await createUpiManualCheckout(user.id, ctx.session.couponCode);
+          ctx.session.couponCode = undefined;
           ctx.session.upiOrderId = up.orderId;
           // Build a UPI deep link for the EXACT amount and render it as a QR.
           const amountRupees = (up.totalMinor / 100).toFixed(2);

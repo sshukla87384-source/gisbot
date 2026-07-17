@@ -19,6 +19,7 @@ export interface ProductListItem {
   fromPriceMinor: number | null;
   onSale: boolean;
   inStock: boolean;
+  totalStock: number | null; // units available across variants; null = unlimited (downloads/manual)
 }
 
 export interface Paged<T> {
@@ -40,6 +41,7 @@ export interface ProductView {
   id: string;
   name: string;
   description: string | null;
+  highlight: string | null;
   imageUrl: string | null;
   iconEmoji: string | null;
   onSale: boolean;
@@ -113,12 +115,14 @@ export async function listProducts(opts: {
       const onSale = isSaleActive(p);
       const priced = p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
       let inStock = false;
+      let totalStock = 0;
+      let unlimited = false;
       for (const v of p.variants) {
-        if ((await variantStock(v.id, p.type)) > 0) {
-          inStock = true;
-          break;
-        }
+        const s = await variantStock(v.id, p.type);
+        if (s >= Number.MAX_SAFE_INTEGER) unlimited = true;
+        else totalStock += s;
       }
+      inStock = unlimited || totalStock > 0;
       items.push({
         id: p.id,
         name: p.name,
@@ -126,6 +130,7 @@ export async function listProducts(opts: {
         fromPriceMinor: priced.length > 0 ? Math.min(...priced) : null,
         onSale,
         inStock,
+        totalStock: unlimited ? null : totalStock,
       });
     }
     return { items, page, pages, total };
@@ -161,6 +166,7 @@ export async function getProductView(productId: string, currency: Currency): Pro
     id: p.id,
     name: p.name,
     description: p.description,
+    highlight: p.highlight,
     imageUrl: p.imageUrl,
     iconEmoji: p.iconEmoji,
     onSale,
@@ -171,6 +177,43 @@ export async function getProductView(productId: string, currency: Currency): Pro
     activationGuide: p.activationGuide,
     isPlatform: p.resellerId === null,
     variants,
+  };
+}
+
+export interface VariantPurchaseInfo {
+  productId: string;
+  productName: string;
+  iconEmoji: string | null;
+  variantId: string;
+  variantName: string;
+  unitPriceMinor: number | null;
+  originalPriceMinor: number | null;
+  onSale: boolean;
+  stock: number;
+  currency: Currency;
+}
+
+/** Everything needed to render the quantity picker / buy-now flow for one variant. */
+export async function getVariantForPurchase(variantId: string, currency: Currency): Promise<VariantPurchaseInfo> {
+  const v = await prisma.productVariant.findFirst({
+    where: { id: variantId, isActive: true, deletedAt: null },
+    include: { product: true, prices: { where: { currency, tier: { name: "RETAIL" } } } },
+  });
+  if (!v || v.product.status !== "ACTIVE" || v.product.deletedAt !== null) throw new CoreError("VARIANT_NOT_FOUND");
+  const p = v.product;
+  const onSale = isSaleActive(p);
+  const base = v.prices[0]?.amountMinor ?? null;
+  return {
+    productId: p.id,
+    productName: p.name,
+    iconEmoji: p.iconEmoji,
+    variantId: v.id,
+    variantName: v.name,
+    unitPriceMinor: base === null ? null : effectivePriceMinor(base, p),
+    originalPriceMinor: onSale && base !== null ? base : null,
+    onSale,
+    stock: await variantStock(v.id, p.type),
+    currency,
   };
 }
 

@@ -3,6 +3,7 @@ import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, priceCart } from "./assign.js";
+import { evaluateCoupon, recordCouponUse } from "./coupon.service.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -45,7 +46,7 @@ export interface UpiCheckoutResult {
  * Manual UPI checkout (INR). Customer pays to the configured UPI ID and submits
  * a reference; the admin confirms in the panel/bot (same fulfilment path).
  */
-export async function createUpiManualCheckout(userId: string): Promise<UpiCheckoutResult> {
+export async function createUpiManualCheckout(userId: string, couponCode?: string): Promise<UpiCheckoutResult> {
   const cfg = loadConfig();
   const upiId = cfg.UPI_ID;
   if (!upiId) throw new CoreError("VALIDATION_FAILED", "UPI is not configured");
@@ -59,10 +60,25 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
     });
     const lines = await priceCart(tx, userId, user.currency);
     const totalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
+    let discountMinor = 0;
+    let couponId: string | undefined;
+    if (couponCode) {
+      const applied = await evaluateCoupon(tx, {
+        code: couponCode,
+        userId,
+        subtotalMinor: totalMinor,
+        currency: user.currency,
+        productIds: [...new Set(lines.map((l) => l.productId))],
+      });
+      discountMinor = applied.discountMinor;
+      couponId = applied.couponId;
+    }
+    const payableMinor = totalMinor - discountMinor;
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
-      data: { orderNumber, userId, status: "PENDING_PAYMENT", currency: user.currency, subtotalMinor: totalMinor, totalMinor, expiresAt },
+      data: { orderNumber, userId, status: "PENDING_PAYMENT", currency: user.currency, subtotalMinor: totalMinor, discountMinor, couponId, totalMinor: payableMinor, expiresAt },
     });
+    if (couponId) await recordCouponUse(tx, { couponId, userId, orderId: order.id, discountMinor });
     for (const line of lines) {
       const isUnitStocked = line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT";
       const unitCount = isUnitStocked ? line.quantity : 1;
@@ -78,7 +94,7 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
         });
       }
     }
-    return { orderId: order.id, orderNumber, totalMinor };
+    return { orderId: order.id, orderNumber, totalMinor: payableMinor };
   });
   await enqueueAdminAlert(
     `🇮🇳 New UPI order ${created.orderNumber} — ${formatMinor(created.totalMinor, user.currency as CurrencyCode)}. Verify payment to ${upiId}, then confirm in the panel.`,
@@ -86,7 +102,7 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
   return { ...created, currency: user.currency, upiId, payeeName: cfg.UPI_PAYEE_NAME ?? null };
 }
 
-export async function createBinanceManualCheckout(userId: string): Promise<BinanceCheckoutResult> {
+export async function createBinanceManualCheckout(userId: string, couponCode?: string): Promise<BinanceCheckoutResult> {
   const cfg = loadConfig();
   const uid = cfg.BINANCE_PAY_UID;
   if (!uid) throw new CoreError("VALIDATION_FAILED", "Binance Pay is not configured");
@@ -101,7 +117,21 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
     });
     const lines = await priceCart(tx, userId, user.currency);
     const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-    const usdt = toUsdtAmount(totalMinor, user.currency);
+    let discountMinor = 0;
+    let couponId: string | undefined;
+    if (couponCode) {
+      const applied = await evaluateCoupon(tx, {
+        code: couponCode,
+        userId,
+        subtotalMinor: totalMinor,
+        currency: user.currency,
+        productIds: [...new Set(lines.map((l) => l.productId))],
+      });
+      discountMinor = applied.discountMinor;
+      couponId = applied.couponId;
+    }
+    const payableMinor = totalMinor - discountMinor;
+    const usdt = toUsdtAmount(payableMinor, user.currency);
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
       data: {
@@ -110,12 +140,15 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
         status: "PENDING_PAYMENT",
         currency: user.currency,
         subtotalMinor: totalMinor,
-        totalMinor,
+        discountMinor,
+        couponId,
+        totalMinor: payableMinor,
         expiresAt,
         binanceAsset: "USDT",
         binanceAmount: usdt,
       },
     });
+    if (couponId) await recordCouponUse(tx, { couponId, userId, orderId: order.id, discountMinor });
     for (const line of lines) {
       const isUnitStocked = line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT";
       const unitCount = isUnitStocked ? line.quantity : 1;
@@ -145,7 +178,7 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
         after: { orderNumber, totalMinor, currency: user.currency },
       },
     });
-    return { orderId: order.id, orderNumber, totalMinor, binanceAmount: usdt };
+    return { orderId: order.id, orderNumber, totalMinor: payableMinor, binanceAmount: usdt };
   });
 
   await enqueueAdminAlert(

@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret } from "@gis/shared";
 import { assignAccountSlot, assignLicenseKey, priceCart } from "./assign.js";
+import { evaluateCoupon, recordCouponUse } from "./coupon.service.js";
 
 /**
  * Wallet-funded checkout with automatic fulfillment (PRD §6.1, Security doc §5).
@@ -34,7 +35,7 @@ export interface CheckoutResult {
   pendingManualItems: number;
 }
 
-export async function checkoutWithWallet(userId: string): Promise<CheckoutResult> {
+export async function checkoutWithWallet(userId: string, couponCode?: string): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
 
   return prisma.$transaction(
@@ -48,7 +49,23 @@ export async function checkoutWithWallet(userId: string): Promise<CheckoutResult
       // 2) Re-price cart from live rows in the wallet currency.
       const lines = await priceCart(tx, userId, wallet.currency);
       const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-      if (wallet.balanceMinor < BigInt(totalMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
+
+      // 2b) Optional coupon → discount applied to the payable amount.
+      let discountMinor = 0;
+      let couponId: string | undefined;
+      if (couponCode) {
+        const applied = await evaluateCoupon(tx, {
+          code: couponCode,
+          userId,
+          subtotalMinor: totalMinor,
+          currency: wallet.currency,
+          productIds: [...new Set(lines.map((l) => l.productId))],
+        });
+        discountMinor = applied.discountMinor;
+        couponId = applied.couponId;
+      }
+      const payableMinor = totalMinor - discountMinor;
+      if (wallet.balanceMinor < BigInt(payableMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
 
       // 3) Create order.
       const orderNumber = await nextOrderNumber(tx);
@@ -59,11 +76,14 @@ export async function checkoutWithWallet(userId: string): Promise<CheckoutResult
           status: "PAID",
           currency: wallet.currency,
           subtotalMinor: totalMinor,
-          walletUsedMinor: totalMinor,
+          discountMinor,
+          couponId,
+          walletUsedMinor: payableMinor,
           totalMinor: 0, // nothing owed via gateway
           paidAt: new Date(),
         },
       });
+      if (couponId) await recordCouponUse(tx, { couponId, userId, orderId: order.id, discountMinor });
 
       // 4) Items — inventory-backed quantities expand to unit items so the
       //    1:1 unique inventory↔item constraint can do its job.
@@ -145,12 +165,12 @@ export async function checkoutWithWallet(userId: string): Promise<CheckoutResult
       }
 
       // 5) Wallet debit (append-only ledger + cached balance).
-      const newBalance = wallet.balanceMinor - BigInt(totalMinor);
+      const newBalance = wallet.balanceMinor - BigInt(payableMinor);
       await tx.walletTransaction.create({
         data: {
           walletId: wallet.id,
           type: "PURCHASE",
-          amountMinor: -BigInt(totalMinor),
+          amountMinor: -BigInt(payableMinor),
           balanceAfterMinor: newBalance,
           currency: wallet.currency,
           orderId: order.id,
@@ -192,7 +212,7 @@ export async function checkoutWithWallet(userId: string): Promise<CheckoutResult
       return {
         orderId: order.id,
         orderNumber,
-        totalMinor,
+        totalMinor: payableMinor,
         currency: wallet.currency,
         status: finalStatus,
         deliveries,

@@ -1,6 +1,6 @@
 "use client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button, Card, Input, Label, Select, Textarea } from "@/components/ui";
 import { Dialog } from "@/components/ui/dialog";
@@ -25,6 +25,7 @@ const toIso = (local: string) => (local ? new Date(local).toISOString() : "");
 
 export default function ProductDetail() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const qc = useQueryClient();
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -70,6 +71,12 @@ export default function ProductDetail() {
     onError: (e) => toast(errorMessage(e), "error"),
   });
 
+  const del = useMutation({
+    mutationFn: () => apiData(`/products/${id}`, { method: "DELETE" }),
+    onSuccess: () => { toast("Product deleted"); void qc.invalidateQueries({ queryKey: ["products"] }); router.push("/products"); },
+    onError: (e) => toast(errorMessage(e), "error"),
+  });
+
   if (isLoading || !data) return <p className="text-slate-400">Loading…</p>;
 
   return (
@@ -98,6 +105,7 @@ export default function ProductDetail() {
           <Button onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>
           <Button variant="secondary" onClick={() => { if (data.status !== "ACTIVE") { toast("Set status ACTIVE and Save first", "error"); return; } if (confirm("Announce this product to all bot users?")) announce.mutate(false); }} disabled={announce.isPending}>📣 Announce now</Button>
           <Button variant="secondary" onClick={() => { if (data.status !== "ACTIVE") { toast("Set status ACTIVE and Save first", "error"); return; } if (confirm("Announce AND pin the post in every chat?")) announce.mutate(true); }} disabled={announce.isPending}>📌 Announce &amp; pin</Button>
+          <Button variant="danger" className="ml-auto" onClick={() => { if (confirm("Delete this product? It will be archived and hidden from the shop.")) del.mutate(); }} disabled={del.isPending}>🗑 Delete</Button>
         </div>
       </Card>
 

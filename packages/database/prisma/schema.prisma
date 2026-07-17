@@ -231,7 +231,7 @@ model User {
   firstName      String?
   lastName       String?
   locale         String     @default("en")
-  currency       Currency   @default(INR)
+  currency       Currency   @default(USD)
   status         UserStatus @default(ACTIVE)
   notifiable     Boolean    @default(true) // false if bot blocked
   marketingOptIn Boolean    @default(true)
@@ -445,6 +445,7 @@ model Product {
   slug            String          @unique
   name            String
   description     String?
+  highlight       String? // short teaser shown on the product card; full description behind a button
   type            ProductType
   status          ProductStatus   @default(DRAFT)
   categoryId      String

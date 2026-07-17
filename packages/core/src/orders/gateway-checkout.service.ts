@@ -2,6 +2,7 @@ import { nextOrderNumber, prisma, type Currency, type PaymentProvider as Payment
 import { getProvider, type PaymentProviderId } from "@gis/payments";
 import { CoreError } from "@gis/shared";
 import { priceCart } from "./assign.js";
+import { evaluateCoupon, recordCouponUse } from "./coupon.service.js";
 
 /**
  * Gateway checkout (PRD §6.1 steps 1-2): creates a PENDING_PAYMENT order with a
@@ -29,6 +30,7 @@ export interface GatewayCheckoutResult {
 export async function createGatewayCheckout(
   userId: string,
   providerId: string,
+  couponCode?: string,
 ): Promise<GatewayCheckoutResult> {
   const provider = getProvider(providerId);
   if (!provider) throw new CoreError("VALIDATION_FAILED", "This payment method is not available");
@@ -52,6 +54,21 @@ export async function createGatewayCheckout(
       const lines = await priceCart(tx, userId, user.currency);
       const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
 
+      let discountMinor = 0;
+      let couponId: string | undefined;
+      if (couponCode) {
+        const applied = await evaluateCoupon(tx, {
+          code: couponCode,
+          userId,
+          subtotalMinor: totalMinor,
+          currency: user.currency,
+          productIds: [...new Set(lines.map((l) => l.productId))],
+        });
+        discountMinor = applied.discountMinor;
+        couponId = applied.couponId;
+      }
+      const payableMinor = totalMinor - discountMinor;
+
       const orderNumber = await nextOrderNumber(tx);
       const order = await tx.order.create({
         data: {
@@ -60,10 +77,13 @@ export async function createGatewayCheckout(
           status: "PENDING_PAYMENT",
           currency: user.currency,
           subtotalMinor: totalMinor,
-          totalMinor,
+          discountMinor,
+          couponId,
+          totalMinor: payableMinor,
           expiresAt,
         },
       });
+      if (couponId) await recordCouponUse(tx, { couponId, userId, orderId: order.id, discountMinor });
 
       for (const line of lines) {
         const isUnitStocked = line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT";
@@ -112,7 +132,7 @@ export async function createGatewayCheckout(
           provider: PROVIDER_ENUM[provider.id],
           status: "CREATED",
           currency: user.currency,
-          amountMinor: totalMinor,
+          amountMinor: payableMinor,
           idempotencyKey: `gw:${order.id}`,
         },
       });
@@ -128,7 +148,7 @@ export async function createGatewayCheckout(
         },
       });
 
-      return { orderId: order.id, orderNumber, totalMinor };
+      return { orderId: order.id, orderNumber, totalMinor: payableMinor };
     },
     { timeout: 15_000 },
   );

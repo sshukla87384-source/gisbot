@@ -26,16 +26,11 @@ export function mainMenuKeyboard(user: BotUser): InlineKeyboard {
     .text(t(loc, "b_categories"), cb("shp", "root"))
     .text(t(loc, "b_search"), cb("mnu", "search"))
     .row()
-    .text(t(loc, "b_cart"), cb("crt", "view"))
-    .text(t(loc, "b_orders"), cb("ord", "list", 1))
-    .row()
     .text(t(loc, "b_licenses"), cb("lic", "list", 1))
     .text(t(loc, "b_wallet"), cb("wal", "view"))
     .row()
+    .text(t(loc, "b_orders"), cb("ord", "list", 1))
     .text(t(loc, "b_referral"), cb("ref", "view"))
-    .row()
-    .text(t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"))
-    .text(t(loc, "b_language"), cb("lang", "home"))
     .row()
     .text(t(loc, "b_support"), cb("sup", "home"))
     .text(t(loc, "b_help"), cb("mnu", "help"))
@@ -44,6 +39,10 @@ export function mainMenuKeyboard(user: BotUser): InlineKeyboard {
   if (user.roleNames.includes("RESELLER")) {
     kb.row().text(t(loc, "b_reseller"), cb("rsl", "home"));
   }
+  // Currency + language pinned to the bottom of the menu.
+  kb.row()
+    .text(t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"))
+    .text(t(loc, "b_language"), cb("lang", "home"));
   return kb;
 }
 
