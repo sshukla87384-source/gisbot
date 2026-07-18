@@ -215,6 +215,21 @@ export function createBot(): Bot<Ctx> {
         `${note}We’ve logged your Transaction ID and our team will verify and deliver shortly. You’ll get a message here once it’s confirmed.`,
       );
     }
+    if (awaiting === "buy_qty") {
+      const variantId = ctx.session.buyVariantId ?? "";
+      ctx.session.buyVariantId = undefined;
+      let qty = Number.parseInt(ctx.message.text.replace(/[^0-9]/g, ""), 10);
+      if (!Number.isFinite(qty) || qty < 1) qty = 1;
+      if (qty > 99) qty = 99;
+      if (!variantId) return ctx.reply("That item expired — open the product again.");
+      try {
+        await clearCart(ctx.user.id);
+        await addToCart(ctx.user.id, variantId, qty);
+        return render(ctx, await views.checkoutSummaryView(ctx.user), false);
+      } catch (e) {
+        return ctx.reply(isCoreError(e) ? (ERROR_COPY[e.code] ?? "Could not start checkout.") : "Could not start checkout.");
+      }
+    }
     if (awaiting === "upi_ref") {
       const orderId = ctx.session.upiOrderId ?? "";
       ctx.session.upiOrderId = undefined;
@@ -350,9 +365,10 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.cartViewKb(user), true);
           break;
         case "crt:buynow":
-          await addToCart(user.id, args[0] ?? "");
-          await ctx.answerCallbackQuery({ text: "⚡ Taking you to checkout…" });
-          await render(ctx, await views.checkoutSummaryView(user), true);
+          await ctx.answerCallbackQuery();
+          ctx.session.buyVariantId = args[0] ?? "";
+          ctx.session.awaiting = "buy_qty";
+          await ctx.reply("🔢 How many do you want? Send a number (e.g. <b>1</b>):", { parse_mode: "HTML" });
           break;
         case "crt:view":
           await render(ctx, await views.cartViewKb(user), true);
@@ -455,6 +471,9 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:list":
           await render(ctx, await views.ordersView(user, intArg(args, 0, 1)), true);
+          break;
+        case "ord:view":
+          await render(ctx, await views.orderDetailView(user, args[0] ?? ""), true);
           break;
 
         case "lang:home":

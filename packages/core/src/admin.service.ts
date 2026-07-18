@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
+import { invalidate } from "./redis.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -127,6 +128,16 @@ export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
 
 export async function adminDeleteProduct(id: string): Promise<void> {
   await prisma.product.update({ where: { id }, data: { deletedAt: new Date(), status: "ARCHIVED" } });
+}
+
+export async function setProductName(productId: string, name: string): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { name: name.slice(0, 200) } });
+  await invalidate("cat:*");
+}
+
+export async function setProductDescription(productId: string, description: string): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { description: description.slice(0, 4000) } });
+  await invalidate("cat:*");
 }
 
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {

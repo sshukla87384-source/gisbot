@@ -19,11 +19,14 @@ export interface SessionData {
     | "admin_p_priceusd"
     | "admin_newcat"
     | "admin_p_image"
+    | "admin_p_editname"
+    | "admin_p_editdesc"
     | "admin_api_name"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "api_key_name"
     | "upi_ref"
+    | "buy_qty"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -47,6 +50,8 @@ export interface SessionData {
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */
   upiOrderId?: string;
+  /** Variant the user is buying; awaiting quantity. */
+  buyVariantId?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

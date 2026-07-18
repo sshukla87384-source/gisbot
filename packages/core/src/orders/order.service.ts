@@ -72,6 +72,16 @@ export async function listVault(userId: string, page: number, pageSize = 6): Pro
   };
 }
 
+export async function listOrderItems(userId: string, orderId: string): Promise<VaultItem[]> {
+  const rows = await prisma.orderItem.findMany({
+    where: { orderId, order: { userId }, fulfilledAt: { not: null }, deliveryPayloadEncrypted: { not: null } },
+    orderBy: { fulfilledAt: "desc" },
+  });
+  return rows.map((r) => ({
+    orderItemId: r.id, productName: r.productNameSnap, variantName: r.variantNameSnap, fulfilledAt: r.fulfilledAt as Date,
+  }));
+}
+
 export interface RevealedDelivery {
   productName: string;
   variantName: string;

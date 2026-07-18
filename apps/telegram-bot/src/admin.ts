@@ -29,6 +29,8 @@ import {
   sendBroadcast,
   setFlashSale,
   setProductImage,
+  setProductName,
+  setProductDescription,
   setProductStatus,
   testBinanceApi,
   verifyBinanceByTxnId,
@@ -217,7 +219,8 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("📣 Announce", cb("adm", "announce", p.id)).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
-  kb.row().text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
+  kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
@@ -391,6 +394,18 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_image";
       await askStep(ctx, "🖼 <b>Set product image</b>\nSend a <b>photo</b> now, or paste an <b>image URL</b>:");
+      return;
+    }
+    case "pname": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_editname";
+      await askStep(ctx, "✏️ Send the new <b>product name</b>:");
+      return;
+    }
+    case "pdesc": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_editdesc";
+      await askStep(ctx, "✏️ Send the new <b>description</b> (one feature per line looks best):");
       return;
     }
     case "keys": return variantsForKeys(ctx, id);
@@ -619,6 +634,21 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_p_editname") {
+    const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
+    if (!text) { await ctx.reply("Please send a name."); return true; }
+    await setProductName(pid, text);
+    await ctx.reply("✅ Name updated.");
+    await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_p_editdesc") {
+    const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
+    await setProductDescription(pid, text);
+    await ctx.reply("✅ Description updated.");
+    await productView(ctx, pid);
+    return true;
+  }
   if (awaiting === "admin_p_image") {
     const productId = ctx.session.admProductId ?? "";
     ctx.session.admProductId = undefined;

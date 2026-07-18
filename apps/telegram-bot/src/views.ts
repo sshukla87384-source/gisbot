@@ -6,6 +6,7 @@ import {
   getWallet,
   listCategories,
   listOrders,
+  listOrderItems,
   listProducts,
   listApiKeysByOwner,
   listTickets,
@@ -123,11 +124,17 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     p.onSale && p.salePercentBp
       ? `🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>${p.saleEndsAt ? ` · ⏳ ${timeLeft(p.saleEndsAt)}` : ""}`
       : "";
+  const UNLIMITED = 1_000_000;
+  const stockLines = p.variants
+    .filter((v) => v.priceMinor !== null)
+    .map((v) => (v.stock >= UNLIMITED ? `📦 ${escapeHtml(v.name)}: available` : `📦 ${escapeHtml(v.name)}: <b>${v.stock}</b> left`));
   const lines = [
     `<b>${title}</b>`,
     saleBadge,
     "",
     p.description ? escapeHtml(p.description) : "",
+    "",
+    ...stockLines,
     "",
     p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant delivery" : "🕐 Manual delivery (~12 h)",
     p.isPlatform ? "🏬 Sold by Get It Sasta" : "🏪 Sold by a verified reseller",
@@ -141,14 +148,12 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
         v.originalPriceMinor !== null
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
-      // Primary one-tap purchase, plus an add-to-cart for multi-item orders.
+      // Direct buy: tapping asks the quantity, then goes straight to payment.
       kb.text(`⚡ ${icon}Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
-      kb.text(`🛒 Add ${v.name} to cart`, cb("crt", "add", v.id)).row();
     } else {
       kb.text(`❌ ${v.name} — out of stock`, cb("mnu", "noop")).row();
     }
   }
-  kb.text("🛒 View Cart", cb("crt", "view"));
   backToMenuRow(kb);
   return { text: lines.join("\n"), kb, photo: p.imageUrl || undefined };
 }
@@ -212,7 +217,6 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       kb.text("🪙 Pay via Binance (USD)", cb("ord", "paybinance")).row();
     }
   }
-  kb.text("◀️ Back to Cart", cb("crt", "view"));
   backToMenuRow(kb);
   return { text: lines.join("\n"), kb };
 }
@@ -232,12 +236,12 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
   for (const o of result.items) {
     kb.text(
       `${statusEmoji[o.status] ?? "•"} ${o.orderNumber} · ${fmt(o.totalPaidMinor, o.currency)}`,
-      cb("mnu", "noop"),
+      cb("ord", "view", o.id),
     ).row();
   }
   paginationRow(kb, "ord", "list", result.page, result.pages);
   backToMenuRow(kb);
-  return { text: result.items.length > 0 ? "📦 <b>Your Orders</b>" : "📦 No orders yet.", kb };
+  return { text: result.items.length > 0 ? "📦 <b>Your Orders</b>\nTap an order to view your delivered items." : "📦 No orders yet.", kb };
 }
 
 export async function vaultView(user: BotUser, page: number): Promise<View> {
@@ -310,7 +314,18 @@ export async function supportHomeView(user: BotUser): Promise<View> {
     kb.text(`#${t.ticketNumber} · ${t.status} · ${t.subject.slice(0, 20)}`, cb("mnu", "noop")).row();
   }
   backToMenuRow(kb);
-  return { text: "🎫 <b>Support</b>", kb };
+  return {
+    text: [
+      "🎫 <b>Help & Support</b>",
+      "",
+      "• Tap 🛍 Shop, open a product, tap ⚡ Buy, choose quantity, and pay.",
+      "• Your delivered items live in 📦 My Orders — tap an order to view them.",
+      "• Pay with UPI, Binance (USDT) or your wallet.",
+      "",
+      "Need a human? Tap 🆕 New Ticket below.",
+    ].join("\n"),
+    kb,
+  };
 }
 
 export function profileView(user: BotUser): View {
@@ -389,4 +404,18 @@ export function currencyView(user: BotUser): View {
     .row();
   backToMenuRow(kb);
   return { text: t(user.locale, "cur_title"), kb };
+}
+
+export async function orderDetailView(user: BotUser, orderId: string): Promise<View> {
+  const items = await listOrderItems(user.id, orderId);
+  const kb = new InlineKeyboard();
+  for (const it of items) {
+    kb.text(`🔑 ${it.productName} · ${it.variantName}`, cb("lic", "view", it.orderItemId)).row();
+  }
+  kb.text("◀️ Orders", cb("ord", "list", 1));
+  backToMenuRow(kb);
+  return {
+    text: items.length > 0 ? "📦 <b>Order items</b>\nTap to view your delivered details:" : "No delivered items in this order yet.",
+    kb,
+  };
 }
