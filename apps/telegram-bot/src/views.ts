@@ -407,6 +407,27 @@ export async function supportHomeView(user: BotUser): Promise<View> {
   return { text: "🎫 <b>Support</b>", kb };
 }
 
+/** Combined Help & Support: how-it-works plus open/see tickets in one place. */
+export async function helpSupportView(user: BotUser): Promise<View> {
+  const tickets = await listTickets(user.id, 1);
+  const kb = new InlineKeyboard().text("🆕 New Support Ticket", cb("sup", "new")).row();
+  for (const t of tickets.items.slice(0, 5)) {
+    kb.text(`#${t.ticketNumber} · ${t.status} · ${t.subject.slice(0, 20)}`, cb("mnu", "noop")).row();
+  }
+  backToMenuRow(kb);
+  return {
+    text: [
+      "🆘 <b>Help &amp; Support</b>",
+      "",
+      "• Tap 🛍 <b>Browse Products</b>, pick an item, choose a quantity, and pay.",
+      "• Pay by UPI, crypto, or wallet — instant items arrive in seconds.",
+      "• Everything you buy is saved in 🧾 <b>My Orders</b> (use 🔁 Request replacement if a key fails).",
+      "• Still stuck? Open a ticket below — a human replies right here in chat.",
+    ].join("\n"),
+    kb,
+  };
+}
+
 export function profileView(user: BotUser): View {
   const kb = new InlineKeyboard();
   backToMenuRow(kb);

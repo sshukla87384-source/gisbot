@@ -149,11 +149,12 @@ export function createBot(): Bot<Ctx> {
   });
   bot.command("menu", async (ctx) => render(ctx, await views.menuView(ctx.user), false));
   bot.command("shop", async (ctx) => render(ctx, await views.shopHomeView(ctx.user, 1), false));
+  bot.command("browse", async (ctx) => render(ctx, await views.shopHomeView(ctx.user, 1), false));
   bot.command("cart", async (ctx) => render(ctx, await views.cartViewKb(ctx.user), false));
   bot.command("orders", async (ctx) => render(ctx, await views.ordersView(ctx.user, 1), false));
   bot.command("wallet", async (ctx) => render(ctx, await views.walletView(ctx.user), false));
-  bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
-  bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
+  bot.command("support", async (ctx) => render(ctx, await views.helpSupportView(ctx.user), false));
+  bot.command("help", async (ctx) => render(ctx, await views.helpSupportView(ctx.user), false));
   bot.command("admin", async (ctx) => adminCommand(ctx));
 
   if (isDev()) {
@@ -327,7 +328,7 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.menuView(user), true);
           break;
         case "mnu:help":
-          await render(ctx, views.helpView(), true);
+          await render(ctx, await views.helpSupportView(ctx.user), true);
           break;
         case "mnu:noop":
           break;
@@ -648,7 +649,7 @@ export function createBot(): Bot<Ctx> {
           break;
 
         case "sup:home":
-          await render(ctx, await views.supportHomeView(user), true);
+          await render(ctx, await views.helpSupportView(user), true);
           break;
         case "sup:new":
           ctx.session.awaiting = "ticket";

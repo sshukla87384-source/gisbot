@@ -11,14 +11,10 @@ async function main(): Promise<void> {
 
   const bot = createBot();
   await bot.api.setMyCommands([
-    { command: "start", description: "Open Get It Sasta" },
+    { command: "start", description: "Open THE CRAZY STORE" },
+    { command: "browse", description: "Browse products" },
     { command: "menu", description: "Main menu" },
-    { command: "shop", description: "Browse products" },
-    { command: "cart", description: "Your cart" },
-    { command: "orders", description: "Order history" },
-    { command: "wallet", description: "Wallet & balance" },
-    { command: "support", description: "Get help" },
-    { command: "help", description: "How it works" },
+    { command: "help", description: "Help & support" },
   ]);
 
   if (config.BOT_MODE === "webhook") {
