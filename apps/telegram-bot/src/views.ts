@@ -254,7 +254,8 @@ export async function vaultView(user: BotUser, page: number): Promise<View> {
   const result = await listVault(user.id, page);
   const kb = new InlineKeyboard();
   for (const item of result.items) {
-    kb.text(`🔑 ${item.productName} · ${item.variantName}`, cb("lic", "view", item.orderItemId)).row();
+    const vn = item.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${item.variantName}`;
+    kb.text(`🔑 ${item.productName}${vn}`, cb("lic", "view", item.orderItemId)).row();
   }
   paginationRow(kb, "lic", "list", result.page, result.pages);
   backToMenuRow(kb);

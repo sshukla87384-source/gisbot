@@ -676,7 +676,8 @@ async function sendRevealed(
   payload: { kind: string; key?: string; username?: string; password?: string; expiresAt?: string },
   activationGuide?: string | null,
 ): Promise<void> {
-  const lines = [`📦 <b>${escapeHtml(productName)}</b> · ${escapeHtml(variantName)}`, ""];
+  const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(variantName)}`;
+  const lines = [`📦 <b>${escapeHtml(productName)}</b>${vn}`, ""];
   if (payload.key) lines.push(`🔑 <code>${escapeHtml(payload.key)}</code>`);
   if (payload.username) lines.push(`👤 Login: <code>${escapeHtml(payload.username)}</code>`);
   if (payload.password) lines.push(`🔒 Password: <tg-spoiler>${escapeHtml(payload.password)}</tg-spoiler>`);
