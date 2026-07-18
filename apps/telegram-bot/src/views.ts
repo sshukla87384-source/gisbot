@@ -126,8 +126,9 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       : "";
   const UNLIMITED = 1_000_000;
   const priced = p.variants.filter((v) => v.priceMinor !== null);
+  const vlabel = (name: string) => (name.trim().toLowerCase() === "standard" ? "In stock" : escapeHtml(name));
   const stockLines = priced.map((v) =>
-    v.stock >= UNLIMITED ? `📦 ${escapeHtml(v.name)}: ✅ available` : `📦 ${escapeHtml(v.name)}: <b>${v.stock}</b> left`,
+    v.stock >= UNLIMITED ? `📦 ${vlabel(v.name)}: ✅ available` : `📦 ${vlabel(v.name)}: <b>${v.stock}</b> left`,
   );
   // Stock shown at the TOP so it's always visible even in truncated photo captions.
   const lines = [
@@ -151,9 +152,11 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
       // Direct buy: tapping asks the quantity, then goes straight to payment.
-      kb.text(`⚡ ${icon}Buy ${v.name} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
+      const bl = v.name.trim().toLowerCase() === "standard" ? "" : ` ${v.name}`;
+      kb.text(`⚡ ${icon}Buy${bl} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
     } else {
-      kb.text(`❌ ${v.name} — out of stock`, cb("mnu", "noop")).row();
+      const bl = v.name.trim().toLowerCase() === "standard" ? "this" : v.name;
+      kb.text(`❌ ${bl} — out of stock`, cb("mnu", "noop")).row();
     }
   }
   backToMenuRow(kb);
@@ -165,7 +168,8 @@ export function cartText(view: CartView): string {
   const rows = view.lines.map((l, i) => {
     const price = l.lineTotalMinor === null ? "—" : fmt(l.lineTotalMinor, view.currency);
     const warn = l.available ? "" : " ⚠️ unavailable";
-    return `${i + 1}. ${escapeHtml(l.productName)} · ${escapeHtml(l.variantName)} ×${l.quantity} — ${price}${warn}`;
+    const vn = l.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(l.variantName)}`;
+    return `${i + 1}. ${escapeHtml(l.productName)}${vn} ×${l.quantity} — ${price}${warn}`;
   });
   return ["🛒 <b>Cart</b>", "", ...rows, "", `Subtotal: <b>${fmt(view.subtotalMinor, view.currency)}</b>`].join("\n");
 }
@@ -412,7 +416,8 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
   const items = await listOrderItems(user.id, orderId);
   const kb = new InlineKeyboard();
   for (const it of items) {
-    kb.text(`🔑 ${it.productName} · ${it.variantName}`, cb("lic", "view", it.orderItemId)).row();
+    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
+    kb.text(`🔑 ${it.productName}${vn}`, cb("lic", "view", it.orderItemId)).row();
   }
   kb.text("◀️ Orders", cb("ord", "list", 1));
   backToMenuRow(kb);

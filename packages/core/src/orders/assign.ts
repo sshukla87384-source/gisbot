@@ -161,7 +161,8 @@ export function buildDeliveryText(
   activationGuide?: string | null,
 ): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b> · ${esc(variantName)}`, ""];
+  const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(variantName)}`;
+  const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b>${vn}`, ""];
   if (payload.key) lines.push(`🔑 <code>${esc(payload.key)}</code>`);
   if (payload.username) lines.push(`👤 Login: <code>${esc(payload.username)}</code>`);
   if (payload.password) lines.push(`🔒 Password: <tg-spoiler>${esc(payload.password)}</tg-spoiler>`);
