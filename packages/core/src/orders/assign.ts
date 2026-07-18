@@ -1,6 +1,6 @@
 import type { Currency, Prisma } from "@gis/database";
 import { CoreError, decryptSecret } from "@gis/shared";
-import { effectivePriceMinor } from "../pricing.js";
+import { effectivePriceMinor, priceInCurrency } from "../pricing.js";
 
 /**
  * Shared inventory-assignment primitives used by BOTH the wallet checkout and
@@ -34,7 +34,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
           variant: {
             include: {
               product: true,
-              prices: { where: { currency, tier: { name: "RETAIL" } } },
+              prices: { where: { tier: { name: "RETAIL" } } },
             },
           },
         },
@@ -48,8 +48,8 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
     if (!v.isActive || v.deletedAt !== null || v.product.status !== "ACTIVE" || v.product.deletedAt !== null) {
       throw new CoreError("CART_ITEM_UNAVAILABLE", `${v.product.name} is no longer available`);
     }
-    const price = v.prices[0];
-    if (!price) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no ${currency} price`);
+    const amountMinor = priceInCurrency(v.prices, currency);
+    if (amountMinor === null) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no price set`);
     return {
       variantId: v.id,
       productId: v.productId,
@@ -59,7 +59,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
       activationGuide: v.product.activationGuide,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
-      unitPriceMinor: effectivePriceMinor(price.amountMinor, v.product),
+      unitPriceMinor: effectivePriceMinor(amountMinor, v.product),
       fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
     };
   });

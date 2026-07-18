@@ -1,5 +1,6 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
+import { priceInCurrency } from "../pricing.js";
 
 export interface CartLine {
   itemId: string;
@@ -71,7 +72,7 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
           variant: {
             include: {
               product: { select: { name: true, status: true, type: true, deletedAt: true } },
-              prices: { where: { currency, tier: { name: "RETAIL" } } },
+              prices: { where: { tier: { name: "RETAIL" } } },
             },
           },
         },
@@ -80,7 +81,7 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
   });
 
   const lines: CartLine[] = (cart?.items ?? []).map((item) => {
-    const price = item.variant.prices[0]?.amountMinor ?? null;
+    const price = priceInCurrency(item.variant.prices, currency);
     const available =
       item.variant.isActive &&
       item.variant.deletedAt === null &&

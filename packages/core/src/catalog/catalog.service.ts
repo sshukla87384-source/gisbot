@@ -1,7 +1,7 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
 import { cached } from "../redis.js";
-import { effectivePriceMinor, isSaleActive } from "../pricing.js";
+import { effectivePriceMinor, isSaleActive, priceInCurrency } from "../pricing.js";
 
 const CACHE_TTL = 60;
 
@@ -105,7 +105,7 @@ export async function listProducts(opts: {
       include: {
         variants: {
           where: { isActive: true, deletedAt: null },
-          include: { prices: { where: { currency, tier: { name: "RETAIL" } } } },
+          include: { prices: { where: { tier: { name: "RETAIL" } } } },
         },
       },
     });
@@ -113,7 +113,11 @@ export async function listProducts(opts: {
     const items: ProductListItem[] = [];
     for (const p of products) {
       const onSale = isSaleActive(p);
-      const priced = p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
+      const priced: number[] = [];
+      for (const v of p.variants) {
+        const base = priceInCurrency(v.prices, currency);
+        if (base !== null) priced.push(effectivePriceMinor(base, p));
+      }
       let inStock = false;
       let totalStock = 0;
       let unlimited = false;
@@ -144,7 +148,7 @@ export async function getProductView(productId: string, currency: Currency): Pro
       variants: {
         where: { isActive: true, deletedAt: null },
         orderBy: { sortOrder: "asc" },
-        include: { prices: { where: { currency, tier: { name: "RETAIL" } } } },
+        include: { prices: { where: { tier: { name: "RETAIL" } } } },
       },
     },
   });
@@ -153,7 +157,7 @@ export async function getProductView(productId: string, currency: Currency): Pro
   const onSale = isSaleActive(p);
   const variants: VariantView[] = [];
   for (const v of p.variants) {
-    const base = v.prices[0]?.amountMinor ?? null;
+    const base = priceInCurrency(v.prices, currency);
     variants.push({
       id: v.id,
       name: v.name,
@@ -197,12 +201,12 @@ export interface VariantPurchaseInfo {
 export async function getVariantForPurchase(variantId: string, currency: Currency): Promise<VariantPurchaseInfo> {
   const v = await prisma.productVariant.findFirst({
     where: { id: variantId, isActive: true, deletedAt: null },
-    include: { product: true, prices: { where: { currency, tier: { name: "RETAIL" } } } },
+    include: { product: true, prices: { where: { tier: { name: "RETAIL" } } } },
   });
   if (!v || v.product.status !== "ACTIVE" || v.product.deletedAt !== null) throw new CoreError("VARIANT_NOT_FOUND");
   const p = v.product;
   const onSale = isSaleActive(p);
-  const base = v.prices[0]?.amountMinor ?? null;
+  const base = priceInCurrency(v.prices, currency);
   return {
     productId: p.id,
     productName: p.name,
