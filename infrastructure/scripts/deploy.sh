@@ -41,6 +41,11 @@ for svc in $BUILD_SVCS; do
 done
 echo "==> Applying stack"; $COMPOSE up -d --remove-orphans
 
+# Reclaim space: drop old images + build cache left by previous builds (safe — never touches volumes).
+echo "==> Pruning old images & build cache"
+docker image prune -af >/dev/null 2>&1 || true
+docker builder prune -af >/dev/null 2>&1 || true
+
 echo "==> Waiting for bot health"
 for i in $(seq 1 30); do
   if $COMPOSE ps bot --format '{{.Health}}' 2>/dev/null | grep -q healthy; then
