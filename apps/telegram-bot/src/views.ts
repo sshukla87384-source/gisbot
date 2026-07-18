@@ -37,7 +37,7 @@ export async function menuView(user: BotUser): Promise<View> {
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
-  const result = await listProducts({ currency: user.currency as Currency, page });
+  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 10 });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -418,4 +418,19 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
     text: items.length > 0 ? "📦 <b>Order items</b>\nTap to view your delivered details:" : "No delivered items in this order yet.",
     kb,
   };
+}
+
+export function quantityPickerView(variantId: string, stock: number): View {
+  const presets = [1, 2, 5, 10, 20, 50].filter((q) => q <= stock);
+  if (presets.length === 0) presets.push(1);
+  const kb = new InlineKeyboard();
+  presets.forEach((q, i) => {
+    kb.text(`${q}`, cb("crt", "qty", variantId, q));
+    if ((i + 1) % 3 === 0) kb.row();
+  });
+  kb.row();
+  kb.text("✏️ Custom amount", cb("crt", "qtycustom", variantId)).row();
+  backToMenuRow(kb);
+  const cap = stock >= 1_000_000 ? "" : ` (max ${stock} available)`;
+  return { text: `🔢 <b>How many do you want?</b>${cap}`, kb };
 }

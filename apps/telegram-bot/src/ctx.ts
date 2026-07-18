@@ -52,6 +52,7 @@ export interface SessionData {
   upiOrderId?: string;
   /** Variant the user is buying; awaiting quantity. */
   buyVariantId?: string;
+  buyMaxQty?: number;
 }
 
 export type BotUser = User & { roleNames: string[] };

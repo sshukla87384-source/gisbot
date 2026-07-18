@@ -76,15 +76,26 @@ export async function listCategories(parentId: string | null): Promise<CategoryN
   });
 }
 
+export async function getVariantAvailable(variantId: string): Promise<number> {
+  const v = await prisma.productVariant.findUnique({
+    where: { id: variantId },
+    include: { product: { select: { type: true } } },
+  });
+  if (!v) return 0;
+  return variantStock(variantId, v.product.type);
+}
+
 export async function listProducts(opts: {
   categoryId?: string;
   search?: string;
   featuredOnly?: boolean;
   currency: Currency;
   page: number;
+  pageSize?: number;
 }): Promise<Paged<ProductListItem>> {
   const { categoryId, search, featuredOnly, currency, page } = opts;
-  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}`;
+  const size = opts.pageSize ?? PAGE_SIZE;
+  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
@@ -94,12 +105,12 @@ export async function listProducts(opts: {
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
     };
     const total = await prisma.product.count({ where });
-    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    const pages = Math.max(1, Math.ceil(total / size));
     const products = await prisma.product.findMany({
       where,
       orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
-      skip: (page - 1) * PAGE_SIZE,
-      take: PAGE_SIZE,
+      skip: (page - 1) * size,
+      take: size,
       include: {
         variants: {
           where: { isActive: true, deletedAt: null },

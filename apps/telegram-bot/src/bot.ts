@@ -21,6 +21,7 @@ import {
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
+  getVariantAvailable,
   registerPostTarget,
   removePostTargetByChat,
   type DeliveredSecret,
@@ -217,14 +218,19 @@ export function createBot(): Bot<Ctx> {
     }
     if (awaiting === "buy_qty") {
       const variantId = ctx.session.buyVariantId ?? "";
+      const maxQty = ctx.session.buyMaxQty ?? 99;
       ctx.session.buyVariantId = undefined;
+      ctx.session.buyMaxQty = undefined;
+      if (!variantId) return ctx.reply("That item expired — open the product again.");
       let qty = Number.parseInt(ctx.message.text.replace(/[^0-9]/g, ""), 10);
       if (!Number.isFinite(qty) || qty < 1) qty = 1;
+      let note = "";
+      if (maxQty < 1_000_000 && qty > maxQty) { qty = maxQty; note = `Only ${maxQty} available — setting quantity to ${maxQty}. `; }
       if (qty > 99) qty = 99;
-      if (!variantId) return ctx.reply("That item expired — open the product again.");
       try {
         await clearCart(ctx.user.id);
         await addToCart(ctx.user.id, variantId, qty);
+        if (note) await ctx.reply(note);
         return render(ctx, await views.checkoutSummaryView(ctx.user), false);
       } catch (e) {
         return ctx.reply(isCoreError(e) ? (ERROR_COPY[e.code] ?? "Could not start checkout.") : "Could not start checkout.");
@@ -364,12 +370,35 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery({ text: "✅ Added to cart" });
           await render(ctx, await views.cartViewKb(user), true);
           break;
-        case "crt:buynow":
+        case "crt:buynow": {
           await ctx.answerCallbackQuery();
-          ctx.session.buyVariantId = args[0] ?? "";
-          ctx.session.awaiting = "buy_qty";
-          await ctx.reply("🔢 How many do you want? Send a number (e.g. <b>1</b>):", { parse_mode: "HTML" });
+          const vId = args[0] ?? "";
+          const stock = await getVariantAvailable(vId);
+          await render(ctx, views.quantityPickerView(vId, stock), true);
           break;
+        }
+        case "crt:qty": {
+          const vId = args[0] ?? "";
+          const stock = await getVariantAvailable(vId);
+          let qty = intArg(args, 1, 1);
+          if (qty < 1) qty = 1;
+          if (stock < 1_000_000 && qty > stock) qty = stock;
+          await clearCart(user.id);
+          await addToCart(user.id, vId, qty);
+          await ctx.answerCallbackQuery({ text: `Quantity: ${qty}` });
+          await render(ctx, await views.checkoutSummaryView(user), true);
+          break;
+        }
+        case "crt:qtycustom": {
+          const vId = args[0] ?? "";
+          ctx.session.buyVariantId = vId;
+          ctx.session.buyMaxQty = await getVariantAvailable(vId);
+          ctx.session.awaiting = "buy_qty";
+          await ctx.answerCallbackQuery();
+          const cap = ctx.session.buyMaxQty >= 1_000_000 ? "" : ` (max ${ctx.session.buyMaxQty})`;
+          await ctx.reply(`🔢 Send the quantity you want${cap}:`);
+          break;
+        }
         case "crt:view":
           await render(ctx, await views.cartViewKb(user), true);
           break;
