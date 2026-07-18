@@ -54,6 +54,8 @@ export interface SessionData {
   /** Variant the user is buying; awaiting quantity. */
   buyVariantId?: string;
   buyMaxQty?: number;
+  /** True on the update where the user was just created. */
+  isNewUser?: boolean;
 }
 
 export type BotUser = User & { roleNames: string[] };

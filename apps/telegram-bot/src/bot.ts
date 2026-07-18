@@ -93,7 +93,7 @@ export function createBot(): Bot<Ctx> {
   bot.use(async (ctx, next) => {
     if (ctx.chat?.type !== "private" || !ctx.from) return;
     const payload = ctx.message?.text?.startsWith("/start") ? ctx.message.text.split(" ")[1] : undefined;
-    const { user } = await resolveTelegramUser({
+    const { user, isNew } = await resolveTelegramUser({
       telegramId: BigInt(ctx.from.id),
       firstName: ctx.from.first_name,
       lastName: ctx.from.last_name,
@@ -102,6 +102,7 @@ export function createBot(): Bot<Ctx> {
       startPayload: payload,
     });
     ctx.user = user;
+    ctx.session.isNewUser = isNew;
     await next();
   });
 
@@ -144,6 +145,11 @@ export function createBot(): Bot<Ctx> {
       `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend"), store: config.STORE_NAME })}\n${t(ctx.user.locale, "tagline")}`,
       { parse_mode: "HTML" },
     );
+    // First-time users: let them pick their preferred currency (defaults to USD).
+    if (ctx.session.isNewUser) {
+      ctx.session.isNewUser = false;
+      return render(ctx, views.currencyView(ctx.user), false);
+    }
     return render(ctx, await views.menuView(ctx.user), false);
   });
   bot.command("menu", async (ctx) => render(ctx, await views.menuView(ctx.user), false));

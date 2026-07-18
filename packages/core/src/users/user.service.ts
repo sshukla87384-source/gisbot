@@ -62,7 +62,7 @@ export async function resolveTelegramUser(input: TelegramIdentity): Promise<Reso
     if (referrer && referrer.telegramId !== input.telegramId) referredById = referrer.id;
   }
 
-  const currency = defaultCurrencyForLocale(input.locale);
+  const currency = "USD" as Currency; // new users default to USD (changeable in menu)
   const customerRole = await prisma.role.findUnique({ where: { name: "CUSTOMER" } });
 
   const user = await prisma.user.create({
