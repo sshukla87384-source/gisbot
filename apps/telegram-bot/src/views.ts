@@ -5,6 +5,7 @@ import {
   getVariantForPurchase,
   getReferralStats,
   getWallet,
+  getBnplLimit,
   previewCoupon,
   listCategories,
   listOrders,
@@ -265,6 +266,11 @@ export async function checkoutSummaryView(user: BotUser, couponCode?: string): P
   const payableMinor = Math.max(0, view.subtotalMinor - discountMinor);
   const enough = wallet.balanceMinor >= BigInt(payableMinor);
 
+  // BNPL: available when the customer has a credit line that covers the shortfall.
+  const bnplLimit = view.lines.length > 0 ? await getBnplLimit(user.id) : 0;
+  const canBnpl = bnplLimit > 0 && !enough && BigInt(payableMinor) <= wallet.balanceMinor + BigInt(bnplLimit);
+  const oweMinor = payableMinor - Math.max(0, Number(wallet.balanceMinor));
+
   const lines = [
     "🧾 <b>Checkout</b>",
     "",
@@ -274,7 +280,8 @@ export async function checkoutSummaryView(user: BotUser, couponCode?: string): P
     appliedCode ? `Payable: <b>${fmt(payableMinor, view.currency)}</b>` : "",
     couponNote,
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>`,
-    gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
+    canBnpl ? `🕒 You can pay later — you'd owe <b>${fmt(oweMinor, view.currency)}</b> (limit ${fmt(bnplLimit, view.currency)}).` : "",
+    gateways.length === 0 && !enough && !canBnpl ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");
 
   const kb = new InlineKeyboard();
@@ -284,6 +291,9 @@ export async function checkoutSummaryView(user: BotUser, couponCode?: string): P
   }
   if (view.allAvailable && enough) {
     kb.text(`💰 Pay ${fmt(payableMinor, view.currency)} from Wallet`, cb("ord", "paywallet")).row();
+  }
+  if (view.allAvailable && canBnpl) {
+    kb.text(`🕒 Buy now, pay later (owe ${fmt(oweMinor, view.currency)})`, cb("ord", "paylater")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {

@@ -21,6 +21,8 @@ import {
   adjustWallet,
   getWallet,
   findUserByTelegramRef,
+  setBnplLimit,
+  getBnplLimit,
   getAdminOrder,
   getAdminStats,
   rejectManualOrder,
@@ -136,6 +138,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
     .text("💰 Wallet adjust", cb("adm", "wal")).row()
+    .text("💳 BNPL limit", cb("adm", "bnpl")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .text("🚪 Logout", cb("adm", "logout")).row();
 }
@@ -572,6 +575,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "💰 <b>Wallet adjust</b>\nSend the customer's <b>Telegram ID</b> or <b>@username</b>:");
       return;
     }
+    case "bnpl": {
+      ctx.session.admBnplUserId = undefined;
+      ctx.session.awaiting = "admin_bnpl_user";
+      await askStep(ctx, "💳 <b>BNPL limit</b>\nSend the customer's <b>Telegram ID</b> or <b>@username</b>:");
+      return;
+    }
     default:
       return sendPanel(ctx, true);
   }
@@ -852,6 +861,52 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     });
     await ctx.reply(
       `✅ ${deltaMinor >= 0 ? "Credited" : "Deducted"} ${fmt(BigInt(Math.abs(deltaMinor)), w.currency)}. New balance: <b>${fmt(newBalance, w.currency)}</b>.`,
+      { parse_mode: "HTML" },
+    );
+    await sendPanel(ctx, false);
+    return true;
+  }
+
+  if (awaiting === "admin_bnpl_user") {
+    const found = await findUserByTelegramRef(text);
+    if (!found) {
+      await ctx.reply("❌ No user found with that ID/username. They must have opened the bot at least once.");
+      await sendPanel(ctx, false);
+      return true;
+    }
+    ctx.session.admBnplUserId = found.id;
+    const [w, limit] = await Promise.all([getWallet(found.id), getBnplLimit(found.id)]);
+    ctx.session.awaiting = "admin_bnpl_limit";
+    await ctx.reply(
+      [
+        `👤 <b>${escapeHtml(found.label)}</b>`,
+        `Wallet balance: <b>${fmt(w.balanceMinor, w.currency)}</b>`,
+        `Current BNPL limit: <b>${fmt(limit, w.currency)}</b>`,
+        "",
+        "Send the <b>new credit limit</b> (e.g. <code>500</code>), or <code>0</code> to disable pay-later:",
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: cancelKb() },
+    );
+    return true;
+  }
+
+  if (awaiting === "admin_bnpl_limit") {
+    const userId = ctx.session.admBnplUserId ?? "";
+    ctx.session.admBnplUserId = undefined;
+    if (!userId) { await ctx.reply("Session lost — open 💳 BNPL limit again."); await sendPanel(ctx, false); return true; }
+    const value = Number.parseFloat(text.trim().replace(/[, ]/g, ""));
+    if (!Number.isFinite(value) || value < 0) {
+      await ctx.reply("❌ Send a non-negative number, e.g. 500 (or 0 to disable).");
+      await sendPanel(ctx, false);
+      return true;
+    }
+    const limitMinor = Math.round(value * 100);
+    await setBnplLimit(userId, limitMinor);
+    const w = await getWallet(userId);
+    await ctx.reply(
+      limitMinor === 0
+        ? "✅ Pay-later disabled for this user."
+        : `✅ BNPL limit set to <b>${fmt(limitMinor, w.currency)}</b>. The user can now Buy-now-pay-later up to that amount.`,
       { parse_mode: "HTML" },
     );
     await sendPanel(ctx, false);

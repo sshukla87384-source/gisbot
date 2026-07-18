@@ -243,6 +243,7 @@ model User {
   referredBy     User?    @relation("Referrals", fields: [referredById], references: [id])
   referrals      User[]   @relation("Referrals")
   firstPurchaseAt DateTime?
+  bnplLimitMinor  Int       @default(0) // Buy-now-pay-later credit line granted by an admin (minor units)
 
   roles           UserRole[]
   wallet          Wallet?

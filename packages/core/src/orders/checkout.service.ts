@@ -35,7 +35,11 @@ export interface CheckoutResult {
   pendingManualItems: number;
 }
 
-export async function checkoutWithWallet(userId: string, couponCode?: string): Promise<CheckoutResult> {
+export async function checkoutWithWallet(
+  userId: string,
+  couponCode?: string,
+  opts?: { useCredit?: boolean },
+): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
 
   return prisma.$transaction(
@@ -65,7 +69,11 @@ export async function checkoutWithWallet(userId: string, couponCode?: string): P
         couponId = applied.couponId;
       }
       const payableMinor = totalMinor - discountMinor;
-      if (wallet.balanceMinor < BigInt(payableMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
+      // BNPL: allow the wallet to go negative up to the user's granted credit line.
+      const creditMinor = opts?.useCredit
+        ? (await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { bnplLimitMinor: true } })).bnplLimitMinor
+        : 0;
+      if (wallet.balanceMinor + BigInt(creditMinor) < BigInt(payableMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
 
       // 3) Create order.
       const orderNumber = await nextOrderNumber(tx);

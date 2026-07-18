@@ -93,6 +93,17 @@ export async function setUserCurrency(userId: string, currency: Currency): Promi
   await prisma.user.update({ where: { id: userId }, data: { currency } });
 }
 
+/** Read a user's BNPL (buy-now-pay-later) credit limit in minor units. */
+export async function getBnplLimit(userId: string): Promise<number> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { bnplLimitMinor: true } });
+  return u?.bnplLimitMinor ?? 0;
+}
+
+/** Admin: grant/adjust a user's BNPL credit limit (minor units; 0 disables it). */
+export async function setBnplLimit(userId: string, limitMinor: number): Promise<void> {
+  await prisma.user.update({ where: { id: userId }, data: { bnplLimitMinor: Math.max(0, Math.round(limitMinor)) } });
+}
+
 export interface UserRef { id: string; label: string; currency: Currency }
 
 /** Look up an existing user by numeric Telegram ID or @handle (admin tools). */

@@ -22,6 +22,7 @@ import {
   setUserLocale,
   createUpiManualCheckout,
   previewCoupon,
+  getWallet,
   registerPostTarget,
   removePostTargetByChat,
   type DeliveredSecret,
@@ -427,6 +428,24 @@ export function createBot(): Bot<Ctx> {
           ctx.session.couponCode = undefined;
           await ctx.editMessageText(
             `✅ Payment received! Order <b>${result.orderNumber}</b> — ${fmt(result.totalMinor, result.currency)}.`,
+            { parse_mode: "HTML" },
+          );
+          await sendDeliveryBatch(ctx, result.deliveries);
+          if (result.pendingManualItems > 0) {
+            await ctx.reply(
+              `🕐 ${result.pendingManualItems} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
+            );
+          }
+          await render(ctx, await views.menuView(user), false);
+          break;
+        }
+        case "ord:paylater": {
+          await ctx.answerCallbackQuery({ text: "🕒 Placing your order on credit…" });
+          const result = await checkoutWithWallet(user.id, ctx.session.couponCode, { useCredit: true });
+          ctx.session.couponCode = undefined;
+          const owed = await getWallet(user.id);
+          await ctx.editMessageText(
+            `✅ Order <b>${result.orderNumber}</b> placed on <b>Pay Later</b>.\n${owed.balanceMinor < 0n ? `You owe <b>${fmt(-owed.balanceMinor, owed.currency)}</b> — top up your 💳 Wallet anytime to clear it.` : ""}`,
             { parse_mode: "HTML" },
           );
           await sendDeliveryBatch(ctx, result.deliveries);

@@ -27,6 +27,8 @@ export interface SessionData {
     | "admin_p_price_usd"
     | "admin_wallet_user"
     | "admin_wallet_amount"
+    | "admin_bnpl_user"
+    | "admin_bnpl_limit"
     | "admin_api_name"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
@@ -44,6 +46,8 @@ export interface SessionData {
   admPriceInrMinor?: number;
   /** Target user for the admin wallet-adjust flow. */
   admWalletUserId?: string;
+  /** Target user for the admin BNPL-limit flow. */
+  admBnplUserId?: string;
   /** Customer Binance order awaiting a transaction ID. */
   binanceOrderId?: string;
   /** In-progress product being created via the admin wizard. */
