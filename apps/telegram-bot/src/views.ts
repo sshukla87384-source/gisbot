@@ -125,19 +125,21 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       ? `🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>${p.saleEndsAt ? ` · ⏳ ${timeLeft(p.saleEndsAt)}` : ""}`
       : "";
   const UNLIMITED = 1_000_000;
-  const stockLines = p.variants
-    .filter((v) => v.priceMinor !== null)
-    .map((v) => (v.stock >= UNLIMITED ? `📦 ${escapeHtml(v.name)}: available` : `📦 ${escapeHtml(v.name)}: <b>${v.stock}</b> left`));
+  const priced = p.variants.filter((v) => v.priceMinor !== null);
+  const stockLines = priced.map((v) =>
+    v.stock >= UNLIMITED ? `📦 ${escapeHtml(v.name)}: ✅ available` : `📦 ${escapeHtml(v.name)}: <b>${v.stock}</b> left`,
+  );
+  // Stock shown at the TOP so it's always visible even in truncated photo captions.
   const lines = [
     `<b>${title}</b>`,
     saleBadge,
-    "",
-    p.description ? escapeHtml(p.description) : "",
     "",
     ...stockLines,
     "",
     p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant delivery" : "🕐 Manual delivery (~12 h)",
     p.isPlatform ? "🏬 Sold by Get It Sasta" : "🏪 Sold by a verified reseller",
+    "",
+    p.description ? escapeHtml(p.description) : "",
   ].filter((l) => l !== "");
 
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
