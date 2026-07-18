@@ -22,6 +22,7 @@ export interface SessionData {
     | "admin_p_editname"
     | "admin_p_editdesc"
     | "admin_api_name"
+    | "admin_wallet_adj"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "api_key_name"

@@ -5,6 +5,7 @@ import {
   enqueueTelegramMessage,
   BOT_ADMIN_MEMBERS_KEY,
   adminDeleteProduct,
+  adjustUserWallet,
   createApiKey,
   listApiKeys,
   revokeApiKey,
@@ -130,6 +131,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
+    .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .text("🚪 Logout", cb("adm", "logout")).row();
 }
@@ -453,6 +455,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(`🟢 Live!${r.announced ? ` 📣 Announced to ${r.targets ?? 0} users.` : ""}`);
       return productView(ctx, id);
     }
+    case "walletadj": {
+      ctx.session.awaiting = "admin_wallet_adj";
+      await askStep(ctx, "💰 <b>Adjust a wallet</b>\nSend: <code>&lt;telegram id or @username&gt; &lt;amount&gt;</code>\nUse a negative amount to deduct.\nExample: <code>123456789 500</code> or <code>@john -200</code>");
+      return;
+    }
     case "groups": return groupsView(ctx);
     case "grpdel": { await removePostTarget(id); await ctx.reply("🗑 Removed."); return groupsView(ctx); }
     case "gpost": {
@@ -655,6 +662,21 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (!/^https?:\/\//i.test(text)) { await ctx.reply("Please paste a valid http(s) image URL, or send a photo."); return true; }
     await setProductImage(productId, text.trim());
     await ctx.reply("🖼 Image updated.");
+    await sendPanel(ctx, false);
+    return true;
+  }
+
+  if (awaiting === "admin_wallet_adj") {
+    const parts = text.split(/\s+/);
+    const identifier = parts[0] ?? "";
+    const amt = Number.parseFloat(parts[1] ?? "");
+    if (!identifier || !Number.isFinite(amt) || amt === 0) {
+      await ctx.reply("Format: <id or @user> <amount>. Example: 123456789 500");
+      return true;
+    }
+    const res = await adjustUserWallet(identifier, Math.round(amt * 100));
+    if (!res.ok) await ctx.reply("❌ User not found. Use their Telegram numeric ID or @username (they must have used the bot).");
+    else await ctx.reply(`✅ ${amt >= 0 ? "Credited" : "Debited"} ${res.label}. New balance: <b>${(Number(res.newBalanceMinor) / 100).toFixed(2)} ${res.currency}</b>.`, { parse_mode: "HTML" });
     await sendPanel(ctx, false);
     return true;
   }

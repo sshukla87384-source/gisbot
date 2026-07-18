@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
+import { adjustWallet } from "./wallet/wallet.service.js";
 import { invalidate } from "./redis.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
@@ -115,6 +116,41 @@ export async function rejectManualOrder(orderId: string): Promise<{ ok: boolean;
     );
   }
   return { ok: true, orderNumber: order.orderNumber };
+}
+
+/** Admin: credit (+) or debit (-) a user's wallet. Identify by telegram id or @handle. */
+export async function adjustUserWallet(
+  identifier: string,
+  amountMinor: number,
+  actorId?: string,
+): Promise<{ ok: boolean; label?: string; newBalanceMinor?: bigint; currency?: string; reason?: string }> {
+  const id = identifier.trim().replace(/^@/, "");
+  const user = /^\d+$/.test(id)
+    ? await prisma.user.findUnique({ where: { telegramId: BigInt(id) } })
+    : await prisma.user.findFirst({ where: { telegramHandle: id } });
+  if (!user) return { ok: false, reason: "USER_NOT_FOUND" };
+  const newBalanceMinor = await adjustWallet({
+    userId: user.id,
+    amountMinor: BigInt(amountMinor),
+    type: "ADJUSTMENT",
+    note: "admin adjustment (bot)",
+    actorId,
+  });
+  const w = await prisma.wallet.findUnique({ where: { userId: user.id } });
+  const currency = w?.currency ?? user.currency;
+  if (user.telegramId !== null) {
+    const sign = amountMinor >= 0 ? "credited" : "debited";
+    await enqueueTelegramMessage(
+      user.telegramId,
+      `💳 Your wallet was ${sign} by an admin. New balance: <b>${(Number(newBalanceMinor) / 100).toFixed(2)} ${currency}</b>.`,
+    );
+  }
+  return {
+    ok: true,
+    label: user.telegramHandle ? `@${user.telegramHandle}` : (user.firstName ?? String(user.telegramId)),
+    newBalanceMinor,
+    currency,
+  };
 }
 
 export interface ProductBrief { id: string; name: string; status: string; iconEmoji: string | null; onSalePct: number | null }

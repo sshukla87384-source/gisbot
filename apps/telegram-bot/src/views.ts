@@ -424,6 +424,8 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
 
 export function quantityPickerView(variantId: string, stock: number): View {
   const presets = [1, 2, 5, 10, 20, 50].filter((q) => q <= stock);
+  if (stock < 1_000_000 && stock > 0 && !presets.includes(stock)) presets.push(stock); // exact max
+  presets.sort((a, b) => a - b);
   if (presets.length === 0) presets.push(1);
   const kb = new InlineKeyboard();
   presets.forEach((q, i) => {
