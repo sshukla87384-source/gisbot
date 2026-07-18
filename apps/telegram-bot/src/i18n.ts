@@ -12,7 +12,7 @@ type Dict = Record<string, string>;
 const en: Dict = {
   tagline: "Digital products · instant delivery · best prices",
   hint: "👉 Tap 🛍 Shop, pick an item, then ⚡ Buy — that's it.",
-  welcome: "👋 Welcome to Get It Sasta, {name}!",
+  welcome: "👋 Welcome to {store}, {name}!",
   b_shopnow: "✨🛍 SHOP NOW 🛍✨",
   b_shop: "🛍 Shop", b_categories: "📂 Categories", b_search: "🔍 Search", b_cart: "🛒 Cart",
   b_orders: "📦 Orders", b_licenses: "🔑 My Licenses", b_wallet: "💳 Wallet", b_referral: "👥 Referral",
@@ -26,7 +26,7 @@ const en: Dict = {
 const hi: Dict = {
   tagline: "डिजिटल प्रोडक्ट्स · तुरंत डिलीवरी · बेहतरीन दाम",
   hint: "👉 🛍 शॉप पर टैप करें, आइटम चुनें, फिर ⚡ खरीदें — बस!",
-  welcome: "👋 Get It Sasta में आपका स्वागत है, {name}!",
+  welcome: "👋 {store} में आपका स्वागत है, {name}!",
   b_shopnow: "✨🛍 अभी खरीदें ✨",
   b_shop: "🛍 शॉप", b_categories: "📂 श्रेणियाँ", b_search: "🔍 खोजें", b_cart: "🛒 कार्ट",
   b_orders: "📦 ऑर्डर", b_licenses: "🔑 मेरी लाइसेंस", b_wallet: "💳 वॉलेट", b_referral: "👥 रेफरल",
@@ -40,7 +40,7 @@ const hi: Dict = {
 const ar: Dict = {
   tagline: "منتجات رقمية · تسليم فوري · أفضل الأسعار",
   hint: "👉 اضغط 🛍 المتجر، اختر منتجًا، ثم ⚡ اشترِ — هذا كل شيء.",
-  welcome: "👋 مرحبًا بك في Get It Sasta، {name}!",
+  welcome: "👋 مرحبًا بك في {store}، {name}!",
   b_shopnow: "✨🛍 تسوّق الآن ✨",
   b_shop: "🛍 المتجر", b_categories: "📂 الفئات", b_search: "🔍 بحث", b_cart: "🛒 السلة",
   b_orders: "📦 الطلبات", b_licenses: "🔑 تراخيصي", b_wallet: "💳 المحفظة", b_referral: "👥 الإحالة",
@@ -54,7 +54,7 @@ const ar: Dict = {
 const zh: Dict = {
   tagline: "数字商品 · 即时交付 · 最优价格",
   hint: "👉 点击 🛍 商店，选择商品，然后 ⚡ 购买 — 就这么简单。",
-  welcome: "👋 欢迎来到 Get It Sasta，{name}！",
+  welcome: "👋 欢迎来到 {store}，{name}！",
   b_shopnow: "✨🛍 立即购物 ✨",
   b_shop: "🛍 商店", b_categories: "📂 分类", b_search: "🔍 搜索", b_cart: "🛒 购物车",
   b_orders: "📦 订单", b_licenses: "🔑 我的许可", b_wallet: "💳 钱包", b_referral: "👥 推荐",

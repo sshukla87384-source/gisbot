@@ -138,7 +138,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     ...stockLines,
     "",
     p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant delivery" : "🕐 Manual delivery (~12 h)",
-    p.isPlatform ? "🏬 Sold by Get It Sasta" : "🏪 Sold by a verified reseller",
+    p.isPlatform ? `🏬 Sold by ${loadConfig().STORE_NAME}` : "🏪 Sold by a verified reseller",
     "",
     p.description ? escapeHtml(p.description) : "",
   ].filter((l) => l !== "");

@@ -1,6 +1,7 @@
 import { nextOrderNumber, prisma, type Currency, type PaymentProvider as PaymentProviderEnum } from "@gis/database";
 import { getProvider, type PaymentProviderId } from "@gis/payments";
 import { CoreError } from "@gis/shared";
+import { loadConfig } from "@gis/config";
 import { priceCart } from "./assign.js";
 
 /**
@@ -140,7 +141,7 @@ export async function createGatewayCheckout(
       orderNumber: created.orderNumber,
       amountMinor: created.totalMinor,
       currency: user.currency as "INR" | "USD",
-      description: `Get It Sasta order ${created.orderNumber}`,
+      description: `${loadConfig().STORE_NAME} order ${created.orderNumber}`,
       customerEmail: user.email ?? undefined,
     });
     await prisma.payment.update({

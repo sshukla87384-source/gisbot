@@ -1,4 +1,5 @@
 import { formatMinor, cb, type CurrencyCode } from "@gis/shared";
+import { loadConfig } from "@gis/config";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { t } from "./i18n.js";
@@ -9,7 +10,7 @@ export const fmt = (minor: number | bigint, currency: string): string =>
 export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: number): string {
   const loc = user.locale;
   return [
-    "🏠 <b>Get It Sasta</b>",
+    `🏠 <b>${loadConfig().STORE_NAME}</b>`,
     `<b>${t(loc, "tagline")}</b>`,
     "",
     `<b>${t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: orderCount })}</b>`,

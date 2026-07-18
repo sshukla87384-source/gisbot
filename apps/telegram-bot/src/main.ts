@@ -11,7 +11,7 @@ async function main(): Promise<void> {
 
   const bot = createBot();
   await bot.api.setMyCommands([
-    { command: "start", description: "Open Get It Sasta" },
+    { command: "start", description: "Open the store" },
     { command: "shop", description: "Browse products" },
     { command: "menu", description: "Main menu" },
     { command: "help", description: "Help & support" },

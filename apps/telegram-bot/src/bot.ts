@@ -141,7 +141,7 @@ export function createBot(): Bot<Ctx> {
       if (productId) return render(ctx, await views.productView(ctx.user, productId), false);
     }
     await ctx.reply(
-      `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend") })}\n${t(ctx.user.locale, "tagline")}`,
+      `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend"), store: config.STORE_NAME })}\n${t(ctx.user.locale, "tagline")}`,
       { parse_mode: "HTML" },
     );
     return render(ctx, await views.menuView(ctx.user), false);
@@ -534,7 +534,7 @@ export function createBot(): Bot<Ctx> {
           ctx.session.upiOrderId = up.orderId;
           // Build a UPI deep link for the EXACT amount and render it as a QR.
           const amountRupees = (up.totalMinor / 100).toFixed(2);
-          const payee = up.payeeName || "Get It Sasta";
+          const payee = up.payeeName || config.STORE_NAME;
           const upiUri =
             `upi://pay?pa=${encodeURIComponent(up.upiId)}&pn=${encodeURIComponent(payee)}` +
             `&am=${amountRupees}&cu=INR&tn=${encodeURIComponent(up.orderNumber)}`;

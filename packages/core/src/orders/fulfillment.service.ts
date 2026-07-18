@@ -295,7 +295,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
     if (outcome.email && loadConfig().RESEND_API_KEY) {
       await enqueueEmail({
         to: outcome.email,
-        subject: `Get It Sasta — payment received (${outcome.orderNumber})`,
+        subject: `${loadConfig().STORE_NAME} — payment received (${outcome.orderNumber})`,
         html: `<p>We received your payment of <b>${money}</b> for order <b>${outcome.orderNumber}</b>. Your items are delivered in the Telegram chat and stored in “My Licenses”.</p>`,
       });
     }
