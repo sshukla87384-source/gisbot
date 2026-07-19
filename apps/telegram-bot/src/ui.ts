@@ -4,6 +4,7 @@ import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { t } from "./i18n.js";
 import { num, header, bold, e } from "./premium.js";
+import { sbtn } from "./keyboard.js";
 
 export const fmt = (minor: number | bigint, currency: string): string =>
   num(formatMinor(minor, currency as CurrencyCode));
@@ -24,18 +25,15 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
 export function mainMenuKeyboard(user: BotUser): InlineKeyboard {
   const loc = user.locale;
   const kb = new InlineKeyboard()
-    .text(t(loc, "b_shopnow"), cb("shp", "home", 1))
+    .add(sbtn(t(loc, "b_shopnow"), cb("shp", "home", 1), "success"))
     .row()
-    .text(t(loc, "b_orders"), cb("ord", "list", 1))
-    .text(t(loc, "b_wallet"), cb("wal", "view"))
+    .add(sbtn(t(loc, "b_orders"), cb("ord", "list", 1), "primary"), sbtn(t(loc, "b_wallet"), cb("wal", "view"), "primary"))
     .row()
-    .text(t(loc, "b_helpsupport"), cb("sup", "home"))
-    .text(t(loc, "b_referral"), cb("ref", "view"))
+    .add(sbtn(t(loc, "b_helpsupport"), cb("sup", "home"), "primary"), sbtn(t(loc, "b_referral"), cb("ref", "view"), "primary"))
     .row()
-    .text(t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"))
-    .text(t(loc, "b_language"), cb("lang", "home"))
+    .add(sbtn(t(loc, "b_currency", { cur: user.currency }), cb("cur", "home"), "primary"), sbtn(t(loc, "b_language"), cb("lang", "home"), "primary"))
     .row()
-    .text(t(loc, "b_developer"), cb("api", "home"));
+    .add(sbtn(t(loc, "b_developer"), cb("api", "home"), "primary"));
   if (user.roleNames.includes("RESELLER")) {
     kb.row().text(t(loc, "b_reseller"), cb("rsl", "home"));
   }

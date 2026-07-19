@@ -22,6 +22,7 @@ import type { BotUser } from "./ctx.js";
 import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
 import { LOCALES, t } from "./i18n.js";
 import { header, bold, num, HR, e } from "./premium.js";
+import { sbtn } from "./keyboard.js";
 
 export interface View {
   text: string;
@@ -163,7 +164,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
           : fmt(v.priceMinor, user.currency);
       // Direct buy: tapping asks the quantity, then goes straight to payment.
       const bl = v.name.trim().toLowerCase() === "standard" ? "" : ` ${v.name}`;
-      kb.text(`⚡ ${icon}Buy${bl} — ${priceLabel}`, cb("crt", "buynow", v.id)).row();
+      kb.add(sbtn(`⚡ ${icon}Buy${bl} — ${priceLabel}`, cb("crt", "buynow", v.id), "success")).row();
     } else {
       const bl = v.name.trim().toLowerCase() === "standard" ? "this" : v.name;
       kb.text(`❌ ${bl} — out of stock`, cb("mnu", "noop")).row();
@@ -220,17 +221,17 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
   if (view.allAvailable && enough) {
-    kb.text(`💰 Pay ${fmt(view.subtotalMinor, view.currency)} from Wallet`, cb("ord", "paywallet")).row();
+    kb.add(sbtn(`💰 Pay ${fmt(view.subtotalMinor, view.currency)} from Wallet`, cb("ord", "paywallet"), "success")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
     }
     if (loadConfig().BINANCE_PAY_UID) {
-      kb.text("🪙 Pay via Binance (USD)", cb("ord", "paybinance")).row();
+      kb.add(sbtn("🪙 Pay via Binance (USD)", cb("ord", "paybinance"), "success")).row();
     }
     if (loadConfig().UPI_ID) {
-      kb.text("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi")).row();
+      kb.add(sbtn("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi"), "success")).row();
     }
   }
   backToMenuRow(kb);

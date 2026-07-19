@@ -41,6 +41,7 @@ import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { Ctx } from "./ctx.js";
 import { escapeHtml, fmt } from "./ui.js";
+import { sbtn } from "./keyboard.js";
 
 const ATTEMPT_WINDOW_SEC = 15 * 60;
 const MAX_ATTEMPTS = 5;
@@ -133,7 +134,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
     .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
-    .text("🚪 Logout", cb("adm", "logout")).text("🚪 Logout all", cb("adm", "logoutall")).row();
+    .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
 }
 
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
@@ -390,7 +391,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "saleoff": { await clearFlashSale(id); await ctx.reply("🔥 Sale ended."); return productView(ctx, id); }
     case "pdel": {
       const kb = new InlineKeyboard()
-        .text("🗑 Yes, delete", cb("adm", "pdely", id)).row()
+        .add(sbtn("🗑 Yes, delete", cb("adm", "pdely", id), "danger")).row()
         .text("◀️ No, keep it", cb("adm", "prod", id));
       await show(ctx, "⚠️ Delete this product? It will be removed from the shop.", kb, true);
       return;
@@ -719,8 +720,8 @@ export async function notifyAdminsForApproval(ctx: Ctx, orderId: string, method:
     : `🧾 <b>${method} payment to review</b> (order ${orderId})`;
   const text = `${head}\nRef: <code>${escapeHtml(reference)}</code>`;
   const markup = { inline_keyboard: [[
-    { text: "✅ Approve & deliver", callback_data: cb("adm", "approve", orderId) },
-    { text: "❌ Reject", callback_data: cb("adm", "reject", orderId) },
+    sbtn("✅ Approve & deliver", cb("adm", "approve", orderId), "success"),
+    sbtn("❌ Reject", cb("adm", "reject", orderId), "danger"),
   ]] };
   let sent = 0;
   for (const id of ids) {

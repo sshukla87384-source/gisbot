@@ -36,6 +36,7 @@ const envSchema = z
     PUBLIC_API_URL: z.string().url().optional(), // payment redirects / webhook base + media serving
     BOT_USERNAME: z.string().optional(), // for t.me deep-link buttons in announcements
     STORE_NAME: z.string().default("The Crazy Store"), // brand name shown to customers
+    BUTTON_STYLES_ENABLED: z.coerce.boolean().default(true), // native colored buttons (Bot API style: primary/success/danger)
     CUSTOM_EMOJI_ID: z.string().optional(), // premium custom emoji id (only works if the bot OWNS the emoji pack)
     CUSTOM_EMOJI_JSON: z.string().optional(), // {"wallet":"5..","cart":"5.."} — centralized custom emoji registry
     CELEBRATION_EMOJI: z.string().default("🎉"), // built-in emoji sent standalone → Telegram animates it for everyone
