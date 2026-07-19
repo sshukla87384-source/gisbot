@@ -225,6 +225,8 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
 
   if (outcome.telegramId !== null) {
     await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode)}. Delivering now… 🚀`);
+    const celeb = loadConfig().CELEBRATION_EMOJI;
+    if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb);
     for (const d of outcome.deliveries) await enqueueTelegramMessage(d.telegramId, d.text);
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🕐 ${outcome.pendingManual} item(s) are being prepared (~12 h).`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);

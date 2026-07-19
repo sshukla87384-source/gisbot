@@ -141,6 +141,8 @@ export function createBot(): Bot<Ctx> {
       const productId = await getProductIdBySlug(payload.slice(PRODUCT_DEEPLINK_PREFIX.length));
       if (productId) return render(ctx, await views.productView(ctx.user, productId), false);
     }
+    // Standalone single emoji → Telegram plays a fullscreen animation for the user.
+    if (config.CELEBRATION_EMOJI) await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
     const welcomeText = `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend"), store: config.STORE_NAME })}\n${t(ctx.user.locale, "tagline")}`;
     const emojiPrefix = config.CUSTOM_EMOJI_ID ? `<tg-emoji emoji-id="${config.CUSTOM_EMOJI_ID}">✨</tg-emoji> ` : "";
     try {
