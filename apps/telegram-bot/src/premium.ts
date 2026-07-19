@@ -3,6 +3,8 @@
  * Fancy numbers, bold Unicode, headers, cards, progress bars, VIP animation.
  */
 import type { Context } from "grammy";
+import { e } from "./emoji.js";
+export { e } from "./emoji.js";
 
 const BOLD_DIGIT_BASE = 0x1d7ec; // 𝟬
 const BOLD_UPPER_BASE = 0x1d5d4; // 𝗔
@@ -41,12 +43,12 @@ export function progressBar(pct: number, len = 10): string {
 
 /** Premium success card. */
 export function successCard(title: string, lines: string[]): string {
-  return [HR, `🎉 ${bold(title)}`, HR, ...lines, HR].join("\n");
+  return [HR, `${e("sparkle")} ${bold(title)}`, HR, ...lines, HR].join("\n");
 }
 
 /** Premium error card. */
 export function errorCard(reason: string): string {
-  return [HR, `❌ ${bold("Error")}`, HR, "", reason, HR].join("\n");
+  return [HR, `${e("error")} ${bold("Error")}`, HR, "", reason, HR].join("\n");
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
