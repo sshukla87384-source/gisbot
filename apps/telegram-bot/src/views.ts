@@ -225,8 +225,11 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     for (const p of gateways) {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
     }
+    if (loadConfig().STARS_ENABLED) {
+      kb.text("⭐ Pay with Telegram Stars", cb("ord", "paystars")).row();
+    }
     if (loadConfig().BINANCE_PAY_UID) {
-      kb.text("🪙 Pay via Binance (USD) ⭐", cb("ord", "paybinance")).row();
+      kb.text("🪙 Pay via Binance (USD)", cb("ord", "paybinance")).row();
     }
     if (loadConfig().UPI_ID) {
       kb.text("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi")).row();

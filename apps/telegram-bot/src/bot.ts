@@ -21,6 +21,8 @@ import {
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
+  createStarsCheckout,
+  confirmStarsPayment,
   getVariantAvailable,
   registerPostTarget,
   removePostTargetByChat,
@@ -74,6 +76,9 @@ export function createBot(): Bot<Ctx> {
     }
     await next();
   });
+
+  // ── Telegram Stars: pre-checkout must be answered within 10s (no chat on this update) ──
+  bot.on("pre_checkout_query", (ctx) => ctx.answerPreCheckoutQuery(true).catch(() => undefined));
 
   // ── Group registration commands (work in groups/channels; admin-gated) ──
   bot.command("registergroup", async (ctx) => {
@@ -255,6 +260,20 @@ export function createBot(): Bot<Ctx> {
     const photos = ctx.message.photo;
     const fileId = photos[photos.length - 1]?.file_id;
     if (fileId) await setProductImageFromFileId(ctx, fileId);
+  });
+
+  // ── Telegram Stars: payment succeeded → fulfil the order ──
+  bot.on("message:successful_payment", async (ctx) => {
+    const orderId = ctx.message.successful_payment.invoice_payload;
+    try {
+      const r = await confirmStarsPayment(orderId);
+      await ctx.reply(
+        successCard("Payment Received", [`✅ Paid with ⭐ Telegram Stars`, `📦 Delivered ${num(r.delivered)} item(s)`, `🎁 Thank you for your purchase!`]),
+        { parse_mode: "HTML" },
+      );
+    } catch {
+      await ctx.reply("⭐ Payment received — our team will deliver your order shortly.");
+    }
   });
 
   // ── Free-text conversations (search / ticket) ──
@@ -536,6 +555,18 @@ export function createBot(): Bot<Ctx> {
               "Complete the payment within <b>15 minutes</b>. Delivery lands here automatically after confirmation.",
             ].join("\n"),
             { parse_mode: "HTML", reply_markup: payKb },
+          );
+          break;
+        }
+        case "ord:paystars": {
+          await ctx.answerCallbackQuery({ text: "⭐ Creating Stars invoice…" });
+          const st = await createStarsCheckout(user.id);
+          await ctx.replyWithInvoice(
+            `Order ${st.orderNumber}`,
+            `${config.STORE_NAME} — instant digital delivery`,
+            st.orderId,
+            "XTR",
+            [{ label: `Order ${st.orderNumber}`, amount: st.stars }],
           );
           break;
         }

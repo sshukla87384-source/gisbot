@@ -53,6 +53,9 @@ const envSchema = z
     NOWPAYMENTS_API_KEY: z.string().optional(),
     NOWPAYMENTS_IPN_SECRET: z.string().optional(),
     // UPI (manual — customer pays to this VPA/ID, admin confirms)
+    // Telegram Stars checkout (native ⭐ invoice)
+    STARS_ENABLED: z.coerce.boolean().default(false),
+    STARS_PER_USD: z.coerce.number().positive().default(100), // Stars charged per 1 USD of order value
     UPI_ID: z.string().optional(),
     UPI_PAYEE_NAME: z.string().optional(),
     // Binance Pay (manual P2P via UID — no auto webhook; admin confirms)
