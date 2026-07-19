@@ -225,11 +225,11 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     for (const p of gateways) {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
     }
+    if (loadConfig().BINANCE_PAY_UID) {
+      kb.text("🪙 Pay via Binance (USD) ⭐", cb("ord", "paybinance")).row();
+    }
     if (loadConfig().UPI_ID) {
       kb.text("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi")).row();
-    }
-    if (loadConfig().BINANCE_PAY_UID) {
-      kb.text("🪙 Pay via Binance (USD)", cb("ord", "paybinance")).row();
     }
   }
   backToMenuRow(kb);
@@ -416,8 +416,9 @@ export function languageView(user: BotUser): View {
 
 export function currencyView(user: BotUser): View {
   const kb = new InlineKeyboard()
+    .text("🌐 USD ($) — recommended", cb("cur", "set", "USD"))
+    .row()
     .text("🇮🇳 INR (₹)", cb("cur", "set", "INR"))
-    .text("🌐 USD ($)", cb("cur", "set", "USD"))
     .row();
   backToMenuRow(kb);
   return { text: t(user.locale, "cur_title"), kb };
