@@ -21,7 +21,7 @@ import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
 import { LOCALES, t } from "./i18n.js";
-import { header, bold, num, HR } from "./premium.js";
+import { header, bold, num, HR, e } from "./premium.js";
 
 export interface View {
   text: string;
@@ -146,6 +146,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     `📈 ${bold("Available")}`,
     stockStr,
     "",
+    ...(user.isVip ? [`${e("vip")} <b>VIP price applied</b>`] : []),
     p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
     p.description ? escapeHtml(p.description) : "",
