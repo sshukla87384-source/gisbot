@@ -7,6 +7,7 @@ import { z } from "zod";
 import { writeAudit } from "../common/audit.js";
 import { notFound } from "../common/errors.js";
 import { filterValue, paginated, parseList } from "../common/pagination.js";
+import { announceRestock } from "@gis/core";
 import { RequirePermission } from "../common/permissions.decorator.js";
 import { validate } from "../common/zod-body.pipe.js";
 import type { ApiRequest } from "../common/types.js";
@@ -99,6 +100,10 @@ export class InventoryController {
       }
     }
     await writeAudit(req, "inventory.keys.import", "ProductVariant", variantId, undefined, { inserted, duplicates });
+    if (inserted > 0) {
+      const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
+      if (v) await announceRestock(v.productId, inserted, { createdById: req.user?.id ?? "admin" }).catch(() => undefined);
+    }
     return { inserted, duplicates };
   }
 

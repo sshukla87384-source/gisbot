@@ -3,6 +3,7 @@ import { prisma } from "@gis/database";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
+import { announceRestock } from "./broadcast.service.js";
 import { invalidate } from "./redis.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
@@ -221,6 +222,10 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
       data: { variantId, keyEncrypted: encryptSecret(value, masterKey), keyHash, supplier: "bot-admin" },
     });
     added++;
+  }
+  if (added > 0) {
+    const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
+    if (v) await announceRestock(v.productId, added, { createdById: "bot-admin" }).catch(() => undefined);
   }
   return { added, skipped };
 }

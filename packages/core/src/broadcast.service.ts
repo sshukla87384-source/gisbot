@@ -270,3 +270,43 @@ export async function announceFlashSale(
   });
   return { announced: true, targets: res.targets };
 }
+
+/**
+ * Announce a restock to all users: "🔥 RESTOCKED — <product> · N added",
+ * with image + price + a ⚡ Buy Now deep-link. Only for ACTIVE products.
+ */
+export async function announceRestock(
+  productId: string,
+  qtyAdded: number,
+  opts: { createdById: string } = { createdById: "system" },
+): Promise<{ announced: boolean; targets?: number }> {
+  const p = await prisma.product.findUnique({
+    where: { id: productId },
+    include: { variants: { where: { isActive: true, deletedAt: null }, include: { prices: { where: { tier: { name: "RETAIL" } } } } } },
+  });
+  if (!p || p.status !== "ACTIVE" || p.deletedAt || qtyAdded <= 0) return { announced: false };
+
+  const cfg = loadConfig();
+  const all = p.variants.flatMap((v) => v.prices);
+  const inr = all.filter((pr) => pr.currency === "INR");
+  const picks = (inr.length > 0 ? inr : all).map((pr) => ({ currency: pr.currency, minor: effectivePriceMinor(pr.amountMinor, p) }));
+  const cheapest = picks.length > 0 ? picks.reduce((a, b) => (b.minor < a.minor ? b : a)) : null;
+
+  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "📦 ";
+  const title = `🔥 RESTOCKED — ${icon}${p.name}`;
+  const lines = [`📦 ${qtyAdded} added — now in stock!`];
+  if (cheapest) lines.push(`💎 from ${fmtMinor(cheapest.minor, cheapest.currency)}`);
+  lines.push("", "⚡ Instant delivery • Grab it now!");
+
+  const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
+  const res = await sendBroadcast({
+    title,
+    body: lines.join("\n"),
+    segment: "all",
+    imageUrl: p.imageUrl ?? undefined,
+    buttonText: buttonUrl ? "⚡ Buy Now" : undefined,
+    buttonUrl,
+    createdById: opts.createdById,
+  });
+  return { announced: true, targets: res.targets };
+}
