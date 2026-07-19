@@ -256,7 +256,7 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
   }
   paginationRow(kb, "ord", "list", result.page, result.pages);
   backToMenuRow(kb);
-  return { text: result.items.length > 0 ? "📦 <b>Your Orders</b>\nTap an order to view your delivered items." : "📦 No orders yet.", kb };
+  return { text: result.items.length > 0 ? `${header(`📦 ${bold("Your Orders")}`)}\nTap an order to view your delivered items.` : `${header(`📦 ${bold("Your Orders")}`)}\nNo orders yet.`, kb };
 }
 
 export async function vaultView(user: BotUser, page: number): Promise<View> {
@@ -312,7 +312,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
   backToMenuRow(kb);
   return {
     text: [
-      "👥 <b>Referral Program</b>",
+      header(`👥 ${bold("Referral Program")}`),
       "",
       `Your link:\n<code>${link}</code>`,
       "",
