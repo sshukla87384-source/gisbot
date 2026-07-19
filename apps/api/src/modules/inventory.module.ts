@@ -124,6 +124,18 @@ export class InventoryController {
     return { updated: result.count };
   }
 
+  @RequirePermission("inventory.write")
+  @Post("keys/delete")
+  async deleteKeys(@Body() body: unknown, @Req() req: ApiRequest) {
+    const { ids } = validate(z.object({ ids: z.array(z.string().min(1)).min(1) }), body);
+    // Never delete SOLD/RESERVED stock — only unused keys.
+    const result = await prisma.licenseKey.deleteMany({
+      where: { id: { in: ids }, status: { in: ["AVAILABLE", "DISABLED"] } },
+    });
+    await writeAudit(req, "inventory.keys.delete", "LicenseKey", undefined, undefined, { count: result.count });
+    return { deleted: result.count };
+  }
+
   @RequirePermission("inventory.read")
   @Get("accounts")
   async accounts(@Query() query: unknown) {

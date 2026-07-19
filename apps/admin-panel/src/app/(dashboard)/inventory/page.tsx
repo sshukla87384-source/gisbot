@@ -21,6 +21,7 @@ export default function InventoryPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [reveal, setReveal] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
 
   const { data: products } = useQuery({ queryKey: ["inv-products"], queryFn: () => api<Product[]>("/products", { query: { perPage: 100 } }) });
   const { data: detail } = useQuery({ enabled: !!productId, queryKey: ["inv-detail", productId], queryFn: () => apiData<ProductDetail>(`/products/${productId}`) });
@@ -45,11 +46,28 @@ export default function InventoryPage() {
     onError: (e) => toast(errorMessage(e), "error"),
   });
 
+  const deleteKeys = useMutation({
+    mutationFn: (ids: string[]) => apiData<{ deleted: number }>("/inventory/keys/delete", { method: "POST", body: { ids } }),
+    onSuccess: (r) => { toast(`Deleted ${r.deleted} key(s)`); setSelected([]); void qc.invalidateQueries({ queryKey: ["inv-keys"] }); },
+    onError: (e) => toast(errorMessage(e), "error"),
+  });
+
+  const toggleSel = (id: string) => setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  const canDelete = (status: string) => status === "AVAILABLE" || status === "DISABLED";
+
   const columns: Column<KeyRow>[] = [
+    { header: "", cell: (k) => canDelete(k.status)
+        ? <input type="checkbox" checked={selected.includes(k.id)} onChange={() => toggleSel(k.id)} />
+        : <span className="text-slate-300">—</span> },
     { header: "Key", cell: (k) => <span className="font-mono text-xs">{k.maskedKey}</span> },
     { header: "Status", cell: (k) => <Badge tone={statusTone(k.status)}>{k.status}</Badge> },
     { header: "Supplier", cell: (k) => k.supplier ?? "—" },
-    { header: "", cell: (k) => <Button variant="ghost" onClick={() => revealKey.mutate(k.id)}>Reveal</Button>, className: "text-right" },
+    { header: "", className: "text-right", cell: (k) => (
+      <span className="flex justify-end gap-2">
+        <Button variant="ghost" onClick={() => revealKey.mutate(k.id)}>Reveal</Button>
+        {canDelete(k.status) ? <button onClick={() => { if (confirm("Delete this key permanently?")) deleteKeys.mutate([k.id]); }} className="text-xs text-red-500 hover:underline">Delete</button> : null}
+      </span>
+    ) },
   ];
 
   return (
@@ -72,6 +90,18 @@ export default function InventoryPage() {
           <Button onClick={() => setImportOpen(true)} disabled={!variantId}>Import keys</Button>
         </div>
       </Card>
+
+      {variantId && selected.length > 0 ? (
+        <Card>
+          <div className="flex items-center justify-between">
+            <span className="text-sm">{selected.length} selected</span>
+            <div className="flex gap-2">
+              <Button variant="secondary" onClick={() => setSelected([])}>Clear</Button>
+              <button onClick={() => { if (confirm(`Delete ${selected.length} selected key(s) permanently?`)) deleteKeys.mutate(selected); }} className="rounded-lg bg-red-500 px-3 py-2 text-sm font-medium text-white hover:bg-red-600">🗑 Delete selected</button>
+            </div>
+          </div>
+        </Card>
+      ) : null}
 
       {variantId ? (
         <DataTable columns={columns} rows={keys?.data ?? []} loading={isLoading} page={page} totalPages={keys?.meta?.totalPages ?? 1} onPage={setPage} empty="No keys for this variant." />
