@@ -6,6 +6,7 @@
  * entity when an ID exists, otherwise the Unicode fallback (works for everyone).
  */
 import { loadConfig } from "@gis/config";
+import { CUSTOM_EMOJI_IDS } from "./config/customEmojis.js";
 
 const FALLBACK: Record<string, string> = {
   wallet: "💰", cart: "🛒", success: "✅", error: "❌", vip: "👑", coin: "🪙",
@@ -17,12 +18,15 @@ const FALLBACK: Record<string, string> = {
 let idMap: Record<string, string> | null = null;
 function ids(): Record<string, string> {
   if (idMap) return idMap;
-  const raw = loadConfig().CUSTOM_EMOJI_JSON;
+  const fromFile = Object.fromEntries(Object.entries(CUSTOM_EMOJI_IDS).filter(([, v]) => v && v.trim() !== ""));
+  let fromEnv: Record<string, string> = {};
   try {
-    idMap = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    const raw = loadConfig().CUSTOM_EMOJI_JSON;
+    if (raw) fromEnv = JSON.parse(raw) as Record<string, string>;
   } catch {
-    idMap = {};
+    fromEnv = {};
   }
+  idMap = { ...fromFile, ...fromEnv }; // env overrides the file
   return idMap;
 }
 
