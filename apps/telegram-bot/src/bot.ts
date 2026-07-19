@@ -39,6 +39,7 @@ import { redisSessionStorage } from "./session.js";
 import { adminCommand, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { t } from "./i18n.js";
+import { vipAnimation, successCard, num } from "./premium.js";
 import * as views from "./views.js";
 import type { View } from "./views.js";
 
@@ -436,9 +437,15 @@ export function createBot(): Bot<Ctx> {
 
         case "ord:paywallet": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
+          await vipAnimation(ctx);
           const result = await checkoutWithWallet(user.id);
-          await ctx.editMessageText(
-            `✅ Payment received! Order <b>${result.orderNumber}</b> — ${fmt(result.totalMinor, result.currency)}.`,
+          await ctx.reply(
+            successCard("Order Success", [
+              `✅ Payment confirmed`,
+              `📦 Order <b>${result.orderNumber}</b>`,
+              `💰 Amount ${fmt(result.totalMinor, result.currency)}`,
+              `🎁 Thank you for your purchase!`,
+            ]),
             { parse_mode: "HTML" },
           );
           for (const d of result.deliveries) await sendDelivery(ctx, d);

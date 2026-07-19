@@ -3,17 +3,18 @@ import { loadConfig } from "@gis/config";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { t } from "./i18n.js";
+import { num, header, bold } from "./premium.js";
 
 export const fmt = (minor: number | bigint, currency: string): string =>
-  formatMinor(minor, currency as CurrencyCode);
+  num(formatMinor(minor, currency as CurrencyCode));
 
 export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: number): string {
   const loc = user.locale;
   return [
-    `🏠 <b>${loadConfig().STORE_NAME}</b>`,
+    header(`💎 ${bold(loadConfig().STORE_NAME)}`),
     `<b>${t(loc, "tagline")}</b>`,
     "",
-    `<b>${t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: orderCount })}</b>`,
+    `<b>${t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: num(orderCount) })}</b>`,
     "",
     `<b>${t(loc, "hint")}</b>`,
   ].join("\n");

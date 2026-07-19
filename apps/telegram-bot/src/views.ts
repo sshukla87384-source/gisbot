@@ -21,6 +21,7 @@ import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
 import { LOCALES, t } from "./i18n.js";
+import { header, bold, num } from "./premium.js";
 
 export interface View {
   text: string;
@@ -128,11 +129,11 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
   const priced = p.variants.filter((v) => v.priceMinor !== null);
   const vlabel = (name: string) => (name.trim().toLowerCase() === "standard" ? "In stock" : escapeHtml(name));
   const stockLines = priced.map((v) =>
-    v.stock >= UNLIMITED ? `📦 ${vlabel(v.name)}: ✅ available` : `📦 ${vlabel(v.name)}: <b>${v.stock}</b> left`,
+    v.stock >= UNLIMITED ? `📦 ${vlabel(v.name)}: ✅ available` : `📦 ${vlabel(v.name)}: <b>${num(v.stock)}</b> left`,
   );
   // Stock shown at the TOP so it's always visible even in truncated photo captions.
   const lines = [
-    `<b>${title}</b>`,
+    header(`🛍 ${bold(escapeHtml(p.name))}${p.iconEmoji ? " " + p.iconEmoji : ""}`),
     saleBadge,
     "",
     ...stockLines,
@@ -201,7 +202,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   const gateways = listEnabledProviders(user.currency);
   const enough = wallet.balanceMinor >= BigInt(view.subtotalMinor);
   const lines = [
-    "🧾 <b>Checkout</b>",
+    header(`🛒 ${bold("Checkout")}`),
     "",
     cartText(view),
     "",
@@ -272,7 +273,8 @@ export async function walletView(user: BotUser): Promise<View> {
   backToMenuRow(kb);
   return {
     text: [
-      `💳 <b>Wallet</b> — <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+      header(`💰 ${bold("Wallet")}`),
+      `Balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
       "",
       "Top up instantly with Binance (USDT) — tap ➕ Top up. You can also pay orders directly at checkout.",
     ].join("\n"),
