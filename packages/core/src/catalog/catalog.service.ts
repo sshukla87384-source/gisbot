@@ -92,10 +92,11 @@ export async function listProducts(opts: {
   currency: Currency;
   page: number;
   pageSize?: number;
+  userId?: string;
 }): Promise<Paged<ProductListItem>> {
-  const { categoryId, search, featuredOnly, currency, page } = opts;
+  const { categoryId, search, featuredOnly, currency, page, userId } = opts;
   const size = opts.pageSize ?? PAGE_SIZE;
-  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}`;
+  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}:${userId ?? "-"}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
@@ -119,10 +120,14 @@ export async function listProducts(opts: {
       },
     });
 
+    const overrideMap = userId
+      ? new Map((await prisma.userPrice.findMany({ where: { userId, productId: { in: products.map((p) => p.id) } } })).map((o) => [o.productId, o.amountMinor]))
+      : new Map<string, number>();
     const items: ProductListItem[] = [];
     for (const p of products) {
       const onSale = isSaleActive(p);
-      const priced = p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
+      const ov = overrideMap.get(p.id);
+      const priced = ov !== undefined ? [ov] : p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
       let inStock = false;
       for (const v of p.variants) {
         if ((await variantStock(v.id, p.type)) > 0) {
@@ -143,7 +148,7 @@ export async function listProducts(opts: {
   });
 }
 
-export async function getProductView(productId: string, currency: Currency): Promise<ProductView> {
+export async function getProductView(productId: string, currency: Currency, userId?: string): Promise<ProductView> {
   const p = await prisma.product.findFirst({
     where: { id: productId, status: "ACTIVE", deletedAt: null },
     include: {
@@ -157,14 +162,18 @@ export async function getProductView(productId: string, currency: Currency): Pro
   if (!p) throw new CoreError("PRODUCT_NOT_FOUND");
 
   const onSale = isSaleActive(p);
+  const override = userId
+    ? (await prisma.userPrice.findUnique({ where: { userId_productId: { userId, productId: p.id } } }))?.amountMinor ?? null
+    : null;
   const variants: VariantView[] = [];
   for (const v of p.variants) {
     const base = v.prices[0]?.amountMinor ?? null;
+    const eff = override ?? (base === null ? null : effectivePriceMinor(base, p));
     variants.push({
       id: v.id,
       name: v.name,
-      priceMinor: base === null ? null : effectivePriceMinor(base, p),
-      originalPriceMinor: onSale && base !== null ? base : null,
+      priceMinor: eff,
+      originalPriceMinor: override !== null && base !== null ? base : (onSale && base !== null ? base : null),
       stock: await variantStock(v.id, p.type),
     });
   }

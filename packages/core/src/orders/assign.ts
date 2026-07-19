@@ -43,6 +43,10 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
   });
   if (!cart || cart.items.length === 0) throw new CoreError("CART_EMPTY");
 
+  // VIP per-user price overrides (by product) for this user.
+  const overrides = await tx.userPrice.findMany({ where: { userId } });
+  const overrideByProduct = new Map(overrides.map((o) => [o.productId, o.amountMinor]));
+
   return cart.items.map((item) => {
     const v = item.variant;
     if (!v.isActive || v.deletedAt !== null || v.product.status !== "ACTIVE" || v.product.deletedAt !== null) {
@@ -50,6 +54,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
     }
     const price = v.prices[0];
     if (!price) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no ${currency} price`);
+    const vipOverride = overrideByProduct.get(v.productId);
     return {
       variantId: v.id,
       productId: v.productId,
@@ -59,7 +64,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
       activationGuide: v.product.activationGuide,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
-      unitPriceMinor: effectivePriceMinor(price.amountMinor, v.product),
+      unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),
       fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
     };
   });

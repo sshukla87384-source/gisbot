@@ -24,6 +24,12 @@ import {
   getVariantAvailable,
   registerPostTarget,
   removePostTargetByChat,
+  resolveUserByTelegramId,
+  setVip,
+  setUserPrice,
+  removeUserPrice,
+  listUserPrices,
+  setStoreDefaultPrice,
   type DeliveredSecret,
 } from "@gis/core";
 import {
@@ -167,6 +173,65 @@ export function createBot(): Bot<Ctx> {
   bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
   bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
   bot.command("admin", async (ctx) => adminCommand(ctx));
+
+  // ── VIP pricing admin commands (bot-admin only) ──
+  const adminOnly = async (ctx: Ctx): Promise<boolean> => {
+    if (await isBotAdmin(ctx.from?.id)) return true;
+    await ctx.reply("⛔ Admins only. Use /admin first.").catch(() => undefined);
+    return false;
+  };
+  bot.command("setprice", async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const [uid, pid, price] = ctx.match.trim().split(/\s+/);
+    const amt = Math.round(Number.parseFloat(price ?? "") * 100);
+    if (!uid || !pid || !Number.isFinite(amt) || amt <= 0) return ctx.reply("Usage: /setprice &lt;user_id&gt; &lt;product_id&gt; &lt;price&gt;", { parse_mode: "HTML" });
+    const u = await resolveUserByTelegramId(uid);
+    if (!u) return ctx.reply("User not found (they must have used the bot).");
+    await setUserPrice(u.id, pid, amt);
+    return ctx.reply(`✅ VIP price set for ${u.label} on product ${pid}: ${price}`);
+  });
+  bot.command("removeprice", async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const [uid, pid] = ctx.match.trim().split(/\s+/);
+    if (!uid || !pid) return ctx.reply("Usage: /removeprice <user_id> <product_id>");
+    const u = await resolveUserByTelegramId(uid);
+    if (!u) return ctx.reply("User not found.");
+    await removeUserPrice(u.id, pid);
+    return ctx.reply(`✅ VIP price removed for ${u.label} on ${pid}.`);
+  });
+  bot.command("prices", async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const uid = ctx.match.trim();
+    if (!uid) return ctx.reply("Usage: /prices <user_id>");
+    const u = await resolveUserByTelegramId(uid);
+    if (!u) return ctx.reply("User not found.");
+    const rows = await listUserPrices(u.id);
+    if (rows.length === 0) return ctx.reply(`${u.label} has no VIP prices.`);
+    const lines = rows.map((r) => `• ${escapeHtml(r.productName)} — ${(r.amountMinor / 100).toFixed(2)}`);
+    return ctx.reply(`💰 <b>VIP prices for ${escapeHtml(u.label)}</b>\n${lines.join("\n")}`, { parse_mode: "HTML" });
+  });
+  bot.command("storeprice", async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const [pid, price] = ctx.match.trim().split(/\s+/);
+    const amt = Math.round(Number.parseFloat(price ?? "") * 100);
+    if (!pid || !Number.isFinite(amt) || amt <= 0) return ctx.reply("Usage: /storeprice <product_id> <default_price>");
+    await setStoreDefaultPrice(pid, amt);
+    return ctx.reply(`✅ Default price for product ${pid} set to ${price} (INR, USD auto-derived).`);
+  });
+  bot.command("setvip", async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const u = await resolveUserByTelegramId(ctx.match.trim());
+    if (!u) return ctx.reply("Usage: /setvip <user_id> (user must have used the bot)");
+    await setVip(u.id, true);
+    return ctx.reply(`👑 ${u.label} is now a VIP member.`);
+  });
+  bot.command("removevip", async (ctx) => {
+    if (!(await adminOnly(ctx))) return;
+    const u = await resolveUserByTelegramId(ctx.match.trim());
+    if (!u) return ctx.reply("Usage: /removevip <user_id>");
+    await setVip(u.id, false);
+    return ctx.reply(`✅ ${u.label} is no longer a VIP.`);
+  });
 
   if (isDev()) {
     // Dev-only wallet top-up so checkout is testable end-to-end.

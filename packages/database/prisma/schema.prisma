@@ -232,6 +232,7 @@ model User {
   lastName       String?
   locale         String     @default("en")
   currency       Currency   @default(INR)
+  isVip          Boolean    @default(false)
   status         UserStatus @default(ACTIVE)
   notifiable     Boolean    @default(true) // false if bot blocked
   marketingOptIn Boolean    @default(true)
@@ -342,6 +343,18 @@ model Session {
   createdAt DateTime @default(now())
   revokedAt DateTime?
 
+  @@index([userId])
+}
+
+model UserPrice {
+  id          String   @id @default(cuid())
+  userId      String
+  productId   String
+  amountMinor Int      // VIP override price (major units × 100), shown in the user's currency
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, productId])
   @@index([userId])
 }
 

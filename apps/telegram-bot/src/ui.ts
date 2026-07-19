@@ -12,6 +12,7 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
   const loc = user.locale;
   return [
     header(`💎 ${bold(loadConfig().STORE_NAME)}`),
+    ...(user.isVip ? ["👑 <b>VIP MEMBER</b>"] : []),
     `<b>${t(loc, "tagline")}</b>`,
     "",
     `<b>${t(loc, "wallet_orders", { bal: fmt(balanceMinor, user.currency), n: num(orderCount) })}</b>`,

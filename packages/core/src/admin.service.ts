@@ -322,3 +322,57 @@ export async function createProductFull(input: {
     return { productId: product.id };
   });
 }
+
+// ───────────── VIP per-user pricing ─────────────
+
+export async function resolveUserByTelegramId(telegramId: string): Promise<{ id: string; label: string } | null> {
+  const id = telegramId.trim().replace(/^@/, "");
+  const user = /^\d+$/.test(id)
+    ? await prisma.user.findUnique({ where: { telegramId: BigInt(id) } })
+    : await prisma.user.findFirst({ where: { telegramHandle: id } });
+  if (!user) return null;
+  return { id: user.id, label: user.telegramHandle ? `@${user.telegramHandle}` : (user.firstName ?? String(user.telegramId)) };
+}
+
+export async function setVip(userId: string, isVip: boolean): Promise<void> {
+  await prisma.user.update({ where: { id: userId }, data: { isVip } });
+}
+
+export async function setUserPrice(userId: string, productId: string, amountMinor: number): Promise<void> {
+  await prisma.userPrice.upsert({
+    where: { userId_productId: { userId, productId } },
+    create: { userId, productId, amountMinor },
+    update: { amountMinor },
+  });
+  await invalidate("cat:*");
+}
+
+export async function removeUserPrice(userId: string, productId: string): Promise<void> {
+  await prisma.userPrice.deleteMany({ where: { userId, productId } });
+  await invalidate("cat:*");
+}
+
+export async function listUserPrices(userId: string): Promise<Array<{ productId: string; productName: string; amountMinor: number }>> {
+  const rows = await prisma.userPrice.findMany({ where: { userId } });
+  const products = await prisma.product.findMany({ where: { id: { in: rows.map((r) => r.productId) } }, select: { id: true, name: true } });
+  const nameOf = new Map(products.map((p) => [p.id, p.name]));
+  return rows.map((r) => ({ productId: r.productId, productName: nameOf.get(r.productId) ?? r.productId, amountMinor: r.amountMinor }));
+}
+
+/** Set the default store price (INR + derived USD) for all variants of a product. */
+export async function setStoreDefaultPrice(productId: string, amountMinorInr: number): Promise<void> {
+  const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
+  const rate = loadConfig().BINANCE_USDT_INR_RATE || 90;
+  const usdMinor = Math.max(1, Math.round(amountMinorInr / rate));
+  const variants = await prisma.productVariant.findMany({ where: { productId, deletedAt: null } });
+  for (const v of variants) {
+    for (const [currency, amt] of [["INR", amountMinorInr], ["USD", usdMinor]] as const) {
+      await prisma.variantPrice.upsert({
+        where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } },
+        create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt },
+        update: { amountMinor: amt },
+      });
+    }
+  }
+  await invalidate("cat:*");
+}

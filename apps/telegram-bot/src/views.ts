@@ -21,7 +21,7 @@ import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
 import { LOCALES, t } from "./i18n.js";
-import { header, bold, num } from "./premium.js";
+import { header, bold, num, HR } from "./premium.js";
 
 export interface View {
   text: string;
@@ -38,7 +38,7 @@ export async function menuView(user: BotUser): Promise<View> {
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
-  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 10 });
+  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 10, userId: user.id });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -72,7 +72,7 @@ export async function productListView(
   categoryId: string,
   page: number,
 ): Promise<View> {
-  const result = await listProducts({ categoryId, currency: user.currency as Currency, page });
+  const result = await listProducts({ categoryId, currency: user.currency as Currency, page, userId: user.id });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -88,7 +88,7 @@ export async function productListView(
 }
 
 export async function searchResultsView(user: BotUser, query: string, page: number): Promise<View> {
-  const result = await listProducts({ search: query, currency: user.currency as Currency, page });
+  const result = await listProducts({ search: query, currency: user.currency as Currency, page, userId: user.id });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -119,29 +119,37 @@ function timeLeft(until: Date): string {
 }
 
 export async function productView(user: BotUser, productId: string): Promise<View> {
-  const p = await getProductView(productId, user.currency as Currency);
-  const title = `${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}`;
-  const saleBadge =
-    p.onSale && p.salePercentBp
-      ? `🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>${p.saleEndsAt ? ` · ⏳ ${timeLeft(p.saleEndsAt)}` : ""}`
-      : "";
+  const p = await getProductView(productId, user.currency as Currency, user.id);
   const UNLIMITED = 1_000_000;
   const priced = p.variants.filter((v) => v.priceMinor !== null);
-  const vlabel = (name: string) => (name.trim().toLowerCase() === "standard" ? "In stock" : escapeHtml(name));
-  const stockLines = priced.map((v) =>
-    v.stock >= UNLIMITED ? `📦 ${vlabel(v.name)}: ✅ available` : `📦 ${vlabel(v.name)}: <b>${num(v.stock)}</b> left`,
-  );
-  // Stock shown at the TOP so it's always visible even in truncated photo captions.
+  const cheapest = priced.reduce<{ now: number; was: number | null } | null>((acc, v) => {
+    if (v.priceMinor === null) return acc;
+    if (!acc || v.priceMinor < acc.now) return { now: v.priceMinor, was: v.originalPriceMinor };
+    return acc;
+  }, null);
+  const priceStr = cheapest
+    ? cheapest.was !== null
+      ? `${fmt(cheapest.was, user.currency)} ➜ <b>${fmt(cheapest.now, user.currency)}</b>`
+      : `<b>${fmt(cheapest.now, user.currency)}</b>`
+    : "—";
+  const totalStock = priced.reduce((sum, v) => sum + (v.stock >= UNLIMITED ? 0 : v.stock), 0);
+  const stockStr = priced.some((v) => v.stock >= UNLIMITED) ? "✅ Available" : `<b>${num(totalStock)}</b> in Stock`;
   const lines = [
-    header(`🛍 ${bold(escapeHtml(p.name))}${p.iconEmoji ? " " + p.iconEmoji : ""}`),
-    saleBadge,
+    header(p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
     "",
-    ...stockLines,
+    `📦 ${bold("Product")}`,
+    `${p.iconEmoji ? p.iconEmoji + " " : ""}${escapeHtml(p.name)}`,
     "",
-    p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant delivery" : "🕐 Manual delivery (~12 h)",
-    p.isPlatform ? `🏬 Sold by ${loadConfig().STORE_NAME}` : "🏪 Sold by a verified reseller",
+    `💎 ${bold("Price")}`,
+    priceStr,
     "",
+    `📈 ${bold("Available")}`,
+    stockStr,
+    "",
+    p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
+    p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
     p.description ? escapeHtml(p.description) : "",
+    HR,
   ].filter((l) => l !== "");
 
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";

@@ -56,13 +56,14 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * Cosmetic only; the caller performs the real checkout separately.
  */
 export async function vipAnimation(ctx: Context): Promise<void> {
+  const bar = (f: number) => "🟩".repeat(f) + "□".repeat(10 - f);
   const frames = [
-    `⏳ ${bold("Initializing order")}…\n${progressBar(10)}`,
-    `💳 ${bold("Verifying payment")}…\n${progressBar(30)}`,
-    `🔐 ${bold("Checking security")}…\n${progressBar(50)}`,
-    `📦 ${bold("Preparing product")}…\n${progressBar(70)}`,
-    `🚀 ${bold("Encrypting delivery")}…\n${progressBar(90)}`,
-    `✨ ${bold("Finalizing order")}…\n${progressBar(100)}`,
+    `${bar(1)}\n⏳ ${bold("Initializing Purchase")}…`,
+    `${bar(3)}\n📈 ${bold("Checking Stock")}…`,
+    `${bar(5)}\n💳 ${bold("Processing Payment")}…`,
+    `${bar(7)}\n📦 ${bold("Preparing Account")}…`,
+    `${bar(9)}\n🚀 ${bold("Delivering Product")}…`,
+    `${bar(10)}\n🎉 ${bold("Order Completed Successfully")}`,
   ];
   let msgId: number | undefined;
   try {
