@@ -36,6 +36,13 @@ export function Sidebar() {
     router.push("/login");
   }
 
+  async function logoutEverywhere() {
+    if (!confirm("Sign out of ALL devices/sessions?")) return;
+    await api("/auth/logout-all", { method: "POST" }).catch(() => undefined);
+    authStore.setToken(null);
+    router.push("/login");
+  }
+
   return (
     <aside className="flex w-60 shrink-0 flex-col bg-slate-900 text-slate-300">
       <div className="px-5 py-5 text-lg font-semibold text-white">Get It Sasta</div>
@@ -57,8 +64,11 @@ export function Sidebar() {
           );
         })}
       </nav>
-      <button onClick={logout} className="m-3 flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-slate-800">
+      <button onClick={logout} className="mx-3 mt-3 flex items-center gap-3 rounded-lg px-3 py-2 text-sm hover:bg-slate-800">
         <LogOut size={16} /> Sign out
+      </button>
+      <button onClick={logoutEverywhere} className="mx-3 mb-3 flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-red-300 hover:bg-slate-800">
+        <LogOut size={16} /> Sign out everywhere
       </button>
     </aside>
   );

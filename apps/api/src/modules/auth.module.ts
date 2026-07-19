@@ -152,6 +152,16 @@ export class AuthController {
     return { ok: true };
   }
 
+  @Post("logout-all")
+  async logoutAll(@Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
+    await prisma.refreshToken.updateMany({
+      where: { userId: req.user!.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    res.clearCookie(REFRESH_COOKIE, { path: "/api/v1/auth" });
+    return { ok: true };
+  }
+
   @Get("me")
   async me(@Req() req: ApiRequest) {
     const user = await prisma.user.findUnique({ where: { id: req.user!.id } });

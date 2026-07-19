@@ -45,7 +45,7 @@ import { escapeHtml, fmt } from "./ui.js";
 const ATTEMPT_WINDOW_SEC = 15 * 60;
 const MAX_ATTEMPTS = 5;
 
-const sessionKey = (tgId: number | bigint): string => `botadmin:${tgId}`;
+const sessionKey = (tgId: number | bigint | string): string => `botadmin:${tgId}`;
 
 export async function isBotAdmin(tgId: number | bigint | undefined): Promise<boolean> {
   if (tgId === undefined) return false;
@@ -133,7 +133,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
     .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
-    .text("🚪 Logout", cb("adm", "logout")).row();
+    .text("🚪 Logout", cb("adm", "logout")).text("🚪 Logout all", cb("adm", "logoutall")).row();
 }
 
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
@@ -320,6 +320,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
+    case "logoutall": {
+      const redis = getRedis();
+      const members = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);
+      for (const m of members) await redis.del(sessionKey(m));
+      await redis.del(BOT_ADMIN_MEMBERS_KEY);
+      await show(ctx, "🚪 Logged out of the admin panel on <b>all</b> devices.", new InlineKeyboard(), true);
+      return;
+    }
     case "stats": return statsView(ctx);
     case "orders": return ordersView(ctx, true);
     case "recent": return ordersView(ctx, false);
