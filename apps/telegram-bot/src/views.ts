@@ -46,7 +46,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
     const stock = p.inStock ? "" : " · ❌ out of stock";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.text(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id)).row();
+    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id), p.inStock ? "success" : "danger")).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().text("📂 All Categories", cb("shp", "root"));
@@ -80,7 +80,7 @@ export async function productListView(
     const stock = p.inStock ? "✅" : "❌";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.text(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
+    kb.add(sbtn(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? "success" : "danger")).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().text("◀️ Categories", cb("shp", "root"));
@@ -95,7 +95,7 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.text(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id)).row();
+    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? "success" : "danger")).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   backToMenuRow(kb);
@@ -167,7 +167,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       kb.add(sbtn(`⚡ ${icon}Buy${bl} — ${priceLabel}`, cb("crt", "buynow", v.id), "success")).row();
     } else {
       const bl = v.name.trim().toLowerCase() === "standard" ? "this" : v.name;
-      kb.text(`❌ ${bl} — out of stock`, cb("mnu", "noop")).row();
+      kb.add(sbtn(`❌ ${bl} — out of stock`, cb("mnu", "noop"), "danger")).row();
     }
   }
   backToMenuRow(kb);
