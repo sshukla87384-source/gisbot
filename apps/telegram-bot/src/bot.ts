@@ -141,10 +141,14 @@ export function createBot(): Bot<Ctx> {
       const productId = await getProductIdBySlug(payload.slice(PRODUCT_DEEPLINK_PREFIX.length));
       if (productId) return render(ctx, await views.productView(ctx.user, productId), false);
     }
-    await ctx.reply(
-      `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend"), store: config.STORE_NAME })}\n${t(ctx.user.locale, "tagline")}`,
-      { parse_mode: "HTML" },
-    );
+    const welcomeText = `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend"), store: config.STORE_NAME })}\n${t(ctx.user.locale, "tagline")}`;
+    const emojiPrefix = config.CUSTOM_EMOJI_ID ? `<tg-emoji emoji-id="${config.CUSTOM_EMOJI_ID}">✨</tg-emoji> ` : "";
+    try {
+      await ctx.reply(`${emojiPrefix}${welcomeText}`, { parse_mode: "HTML" });
+    } catch {
+      // Telegram rejects custom emoji the bot doesn't own — fall back to plain text.
+      await ctx.reply(welcomeText, { parse_mode: "HTML" });
+    }
     // First-time users: let them pick their preferred currency (defaults to USD).
     if (ctx.session.isNewUser) {
       ctx.session.isNewUser = false;

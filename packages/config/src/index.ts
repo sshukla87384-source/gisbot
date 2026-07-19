@@ -36,6 +36,7 @@ const envSchema = z
     PUBLIC_API_URL: z.string().url().optional(), // payment redirects / webhook base + media serving
     BOT_USERNAME: z.string().optional(), // for t.me deep-link buttons in announcements
     STORE_NAME: z.string().default("The Crazy Store"), // brand name shown to customers
+    CUSTOM_EMOJI_ID: z.string().optional(), // premium custom emoji id (only works if the bot OWNS the emoji pack)
     MEDIA_DIR: z.string().default("/data/media"), // local uploaded-image storage
     ADMIN_PANEL_ORIGIN: z.string().url().default("http://localhost:3000"),
 
