@@ -418,7 +418,8 @@ export function helpView(): View {
   const kb = new InlineKeyboard()
     .add(sbtn("🛍 Shop", cb("shp", "home", 1), "success")).row()
     .text("💰 Wallet", cb("wal", "view")).text("📦 My Orders", cb("ord", "list", 1)).row()
-    .text("🎫 Support", cb("sup", "home")).row();
+    .add(sbtn("💬 Chat with Support", cb("sup", "chat"), "primary")).row()
+    .text("🎫 Support / Tickets", cb("sup", "home")).row();
   backToMenuRow(kb);
   return {
     text: [
