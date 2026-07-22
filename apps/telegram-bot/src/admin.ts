@@ -366,6 +366,52 @@ async function customPriceChannelPrompt(ctx: Ctx): Promise<void> {
   await show(ctx, `Where should <b>${escapeHtml(ctx.session.priceUserLabel ?? "this customer")}</b>'s price of <b>${((ctx.session.priceAmountMinor ?? 0) / 100).toFixed(2)}</b> apply?`, kb, false);
 }
 
+/** Build HTML from an admin message, preserving premium custom emoji as <tg-emoji> tags. */
+function composeBroadcastHtml(ctx: Ctx): string {
+  const msg = ctx.message;
+  const text = (msg?.text ?? "").slice(0, 3200);
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ents = ((msg?.entities ?? []) as Array<{ type: string; offset: number; length: number; custom_emoji_id?: string }>)
+    .filter((e) => e.type === "custom_emoji" && e.offset + e.length <= text.length)
+    .sort((a, b) => a.offset - b.offset);
+  if (ents.length === 0) return esc(text);
+  let out = ""; let i = 0;
+  for (const e of ents) {
+    out += esc(text.slice(i, e.offset));
+    const emo = text.slice(e.offset, e.offset + e.length);
+    out += e.custom_emoji_id ? `<tg-emoji emoji-id="${e.custom_emoji_id}">${esc(emo)}</tg-emoji>` : esc(emo);
+    i = e.offset + e.length;
+  }
+  out += esc(text.slice(i));
+  return out;
+}
+
+async function broadcastProductPicker(ctx: Ctx): Promise<void> {
+  const prods = await listProductsBrief(50);
+  const kb = new InlineKeyboard();
+  for (const p of prods) kb.text(`${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.name}`, cb("adm", "bcpick", p.id)).row();
+  kb.text("📨 Send without product", cb("adm", "bcsend")).row();
+  kb.text("✖️ Cancel", cb("adm", "home"));
+  await show(ctx, "📦 Pick a product to attach a ⚡ Buy button:", kb, true);
+}
+
+async function finishBroadcast(ctx: Ctx): Promise<void> {
+  const body = ctx.session.bcBody ?? "";
+  if (!body.trim()) { await ctx.reply("Nothing to send — start again from 📢 Broadcast."); return sendPanel(ctx, false); }
+  const res = await sendBroadcast({
+    title: "",
+    body,
+    bodyIsHtml: true,
+    segment: "all",
+    buttonText: ctx.session.bcBtnText,
+    buttonUrl: ctx.session.bcBtnUrl,
+    createdById: "bot-admin",
+  });
+  ctx.session.bcBody = ctx.session.bcBtnText = ctx.session.bcBtnUrl = undefined;
+  await ctx.reply(`📢 Broadcast queued to ${res.targets} users.${res.targets ? "" : " (no eligible users yet)"}`);
+  return sendPanel(ctx, false);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -635,9 +681,24 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "bc": {
       ctx.session.awaiting = "admin_broadcast";
-      await ctx.reply("📢 Send the message to broadcast to <b>all</b> users:", { parse_mode: "HTML" });
+      ctx.session.bcBody = ctx.session.bcBtnText = ctx.session.bcBtnUrl = undefined;
+      await ctx.reply("📢 Send the message to broadcast to <b>all</b> users.\nYou can include <b>premium custom emoji</b> — they're sent exactly as you type them. 🎨", { parse_mode: "HTML" });
       return;
     }
+    case "bcprod": return broadcastProductPicker(ctx);
+    case "bcpick": {
+      const prods = await listProductsBrief(200);
+      const p = prods.find((x) => x.id === id);
+      const uname = loadConfig().BOT_USERNAME;
+      if (p && uname) { ctx.session.bcBtnText = "⚡ Buy Now"; ctx.session.bcBtnUrl = `https://t.me/${uname}?start=p_${p.slug}`; }
+      return finishBroadcast(ctx);
+    }
+    case "bcmenu": {
+      const uname = loadConfig().BOT_USERNAME;
+      if (uname) { ctx.session.bcBtnText = "🏠 Open Store"; ctx.session.bcBtnUrl = `https://t.me/${uname}?start=menu`; }
+      return finishBroadcast(ctx);
+    }
+    case "bcsend": return finishBroadcast(ctx);
     default:
       return sendPanel(ctx, true);
   }
@@ -866,9 +927,16 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
 
   if (awaiting === "admin_broadcast") {
-    const res = await sendBroadcast({ title: "", body: text.slice(0, 3500), segment: "all", createdById: "bot-admin" });
-    await ctx.reply(`📢 Broadcast queued to ${res.targets} users.`);
-    await sendPanel(ctx, false);
+    const html = composeBroadcastHtml(ctx);
+    if (!html.trim()) { await ctx.reply("Please send some text for the broadcast."); ctx.session.awaiting = "admin_broadcast"; return true; }
+    ctx.session.bcBody = html;
+    ctx.session.bcBtnText = undefined; ctx.session.bcBtnUrl = undefined;
+    const kb = new InlineKeyboard()
+      .text("📦 Attach a product", cb("adm", "bcprod")).row()
+      .text("🏠 Attach Menu button", cb("adm", "bcmenu")).row()
+      .text("📨 Send now (text only)", cb("adm", "bcsend")).row()
+      .text("✖️ Cancel", cb("adm", "home"));
+    await ctx.reply("📢 <b>Ready to send.</b> Attach a product or the menu, or send now:", { parse_mode: "HTML", reply_markup: kb });
     return true;
   }
 

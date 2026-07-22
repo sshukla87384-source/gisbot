@@ -61,6 +61,9 @@ export interface SessionData {
   priceAmountMinor?: number;
   pubUsdMinor?: number;
   admManualItemId?: string;
+  bcBody?: string;
+  bcBtnText?: string;
+  bcBtnUrl?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

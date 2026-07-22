@@ -32,9 +32,10 @@ async function deliver(broadcast: {
   pin: boolean;
   segmentQuery: unknown;
 }): Promise<number> {
-  const segment = ((broadcast.segmentQuery as { segment?: BroadcastSegment })?.segment ?? "all") as BroadcastSegment;
+  const sq = broadcast.segmentQuery as { segment?: BroadcastSegment; html?: boolean } | null;
+  const segment = (sq?.segment ?? "all") as BroadcastSegment;
   const ids = await targetTelegramIds(segment);
-  const text = renderText(broadcast.title, broadcast.body);
+  const text = sq?.html ? broadcast.body : renderText(broadcast.title, broadcast.body);
   const buttons: OutboxButton[] | undefined =
     broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: "success" }] : undefined;
   let sent = 0;
@@ -57,6 +58,7 @@ export interface BroadcastInput {
   buttonText?: string;
   buttonUrl?: string;
   pin?: boolean;
+  bodyIsHtml?: boolean;
   createdById: string;
 }
 
@@ -70,7 +72,7 @@ export async function sendBroadcast(opts: BroadcastInput): Promise<{ broadcastId
       buttonText: opts.buttonText ?? null,
       buttonUrl: opts.buttonUrl ?? null,
       pin: opts.pin ?? false,
-      segmentQuery: { segment: opts.segment } as never,
+      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false } as never,
       status: "RUNNING",
       createdById: opts.createdById,
       startedAt: new Date(),
