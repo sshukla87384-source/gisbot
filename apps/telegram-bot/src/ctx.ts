@@ -30,6 +30,7 @@ export interface SessionData {
     | "admin_pubprice_inr"
     | "admin_manual_key"
     | "admin_btn_label"
+    | "admin_newpass"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"

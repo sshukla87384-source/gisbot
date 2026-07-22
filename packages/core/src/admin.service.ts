@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
@@ -447,4 +448,37 @@ export async function setStoreDefaultPrice(productId: string, amountMinorInr: nu
     }
   }
   await invalidate("cat:*");
+}
+
+
+// ───────────── Admin passcode (in-bot change, stored hashed) ─────────────
+const _pcHash = (plain: string): string => createHash("sha256").update(plain).digest("hex");
+
+export async function getAdminPasscodeHash(): Promise<string | null> {
+  const row = await prisma.setting.findUnique({ where: { key: "bot.admin_passcode" } });
+  const v = row?.value as { hash?: string } | null | undefined;
+  return v?.hash ?? null;
+}
+
+/** Set (or change) the in-bot admin passcode. Stored as a SHA-256 hash, never plaintext. */
+export async function setAdminPasscode(plain: string): Promise<void> {
+  const value = { hash: _pcHash(plain.trim()) };
+  await prisma.setting.upsert({
+    where: { key: "bot.admin_passcode" },
+    create: { key: "bot.admin_passcode", value },
+    update: { value },
+  });
+}
+
+/** True if a passcode is configured either in the DB (in-bot) or via env. */
+export async function isAdminPasscodeConfigured(envPasscode?: string | null): Promise<boolean> {
+  if (envPasscode) return true;
+  return (await getAdminPasscodeHash()) !== null;
+}
+
+/** Verify an entered passcode against the DB override (preferred) or the env value. */
+export async function verifyAdminPasscode(plain: string, envPasscode?: string | null): Promise<boolean> {
+  const dbHash = await getAdminPasscodeHash();
+  if (dbHash) return _pcHash(plain.trim()) === dbHash;
+  return !!envPasscode && plain === envPasscode;
 }

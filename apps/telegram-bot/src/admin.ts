@@ -21,6 +21,9 @@ import {
   setApiKeyScopes,
   getButtonConfig,
   setButton,
+  verifyAdminPasscode,
+  setAdminPasscode,
+  isAdminPasscodeConfigured,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -80,7 +83,7 @@ export async function adminCommand(ctx: Ctx): Promise<void> {
   const tgId = ctx.from?.id;
   if (tgId === undefined) return;
   const cfg = loadConfig();
-  if (!cfg.BOT_ADMIN_PASSCODE) {
+  if (!(await isAdminPasscodeConfigured(cfg.BOT_ADMIN_PASSCODE))) {
     await ctx.reply("🔒 Admin panel is not enabled. Set BOT_ADMIN_PASSCODE on the server to use it.");
     return;
   }
@@ -116,7 +119,7 @@ export async function handleAdminPasscode(ctx: Ctx): Promise<void> {
   // Delete the message that contained the passcode (best-effort).
   await ctx.deleteMessage().catch(() => undefined);
 
-  if (cfg.BOT_ADMIN_PASSCODE && text === cfg.BOT_ADMIN_PASSCODE && idAllowed(tgId)) {
+  if (idAllowed(tgId) && (await verifyAdminPasscode(text, cfg.BOT_ADMIN_PASSCODE))) {
     // Notify any admins already logged in that a new sign-in happened.
     const existing = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);
     const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name ?? String(tgId));
@@ -149,6 +152,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
     .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
     .text("🔤 Rename buttons", cb("adm", "btns")).row()
+    .text("🔑 Change passcode", cb("adm", "chpass")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
 }
@@ -725,6 +729,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return finishBroadcast(ctx);
     }
     case "bcsend": return finishBroadcast(ctx);
+    case "chpass":
+      ctx.session.awaiting = "admin_newpass";
+      await askStep(ctx, "🔑 Send the <b>new</b> admin passcode (at least 6 characters). Keep it private — your message will be deleted after.");
+      return;
     case "btns": return renameButtonsView(ctx);
     case "btnedit":
       ctx.session.btnKey = id;
@@ -886,6 +894,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_newpass") {
+    await ctx.deleteMessage().catch(() => undefined);
+    const pass = text.trim();
+    if (pass.length < 6) { await ctx.reply("⚠️ Too short — use at least 6 characters. Tap 🔑 Change passcode to try again."); return true; }
+    await setAdminPasscode(pass);
+    await ctx.reply("✅ Admin passcode changed. It takes effect immediately for new logins.\nTip: use 🚪 Logout all to force re-login on other devices.");
+    await sendPanel(ctx, false);
+    return true;
+  }
   if (awaiting === "admin_btn_label") {
     const key = (ctx.session.btnKey ?? "") as ButtonLabelKey; ctx.session.btnKey = undefined;
     if (!BUTTON_LABEL_KEYS.includes(key)) { await ctx.reply("Unknown button."); return true; }
