@@ -27,6 +27,8 @@ import {
   getSalesDashboard,
   adminRefundOrder,
   adminReplaceOrderItem,
+  getReferralConfig,
+  setReferralRate,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -157,6 +159,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
     .text("🔤 Rename buttons", cb("adm", "btns")).row()
     .text("🔑 Change passcode", cb("adm", "chpass")).row()
+    .text("🎁 Referral %", cb("adm", "refrates")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
 }
@@ -488,6 +491,23 @@ async function replaceItemsView(ctx: Ctx, orderId: string): Promise<void> {
   await show(ctx, auto.length ? `🔄 <b>Replace an item</b> — order <b>${escapeHtml(o.orderNumber)}</b>\nTap the item to deliver a fresh one from stock.` : "No auto-delivery items to replace on this order.", kb, true);
 }
 
+async function refRatesView(ctx: Ctx): Promise<void> {
+  const c = await getReferralConfig();
+  const kb = new InlineKeyboard()
+    .text(`✏️ First purchase: ${c.firstPct}%`, cb("adm", "refset", "first")).row()
+    .text(`✏️ Repeat purchase: ${c.repeatPct}%`, cb("adm", "refset", "repeat")).row()
+    .text("◀️ Back", cb("adm", "home"));
+  await show(ctx, [
+    "🎁 <b>Referral rewards</b>",
+    "",
+    `Referrers earn a % of each referred order (credited to their wallet after a ${c.holdHours}h hold).`,
+    `• First purchase: <b>${c.firstPct}%</b>`,
+    `• Every purchase after: <b>${c.repeatPct}%</b>`,
+    "",
+    "Tap a rate to change it.",
+  ].join("\n"), kb, true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -506,6 +526,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   switch (action) {
     case "home": return sendPanel(ctx, true);
     case "sales": return salesView(ctx);
+    case "refrates": return refRatesView(ctx);
+    case "refset":
+      ctx.session.awaiting = id === "repeat" ? "admin_ref_repeat" : "admin_ref_first";
+      await askStep(ctx, `🎁 Send the new <b>${id === "repeat" ? "repeat" : "first-purchase"}</b> referral reward percentage (e.g. <code>${id === "repeat" ? "2" : "5"}</code>). Send <code>0</code> to disable.`);
+      return;
     case "refund": {
       const r = await adminRefundOrder(id, String(ctx.from?.id ?? ""));
       if (r.ok) await ctx.reply(r.refundedMinor ? `↩️ Refunded ${fmt(r.refundedMinor, r.currency ?? "USD")} to the customer's wallet.` : "↩️ Order marked refunded (nothing was paid).");
@@ -1012,6 +1037,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
     await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_ref_first" || awaiting === "admin_ref_repeat") {
+    const kind = awaiting === "admin_ref_repeat" ? "repeat" : "first";
+    const pct = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) { await askStep(ctx, "Please send a percentage between 0 and 100, e.g. 5"); ctx.session.awaiting = awaiting; return true; }
+    await setReferralRate(kind, pct);
+    await ctx.reply(`✅ ${kind === "repeat" ? "Repeat" : "First-purchase"} referral reward set to <b>${pct}%</b>.`, { parse_mode: "HTML" });
+    await refRatesView(ctx);
     return true;
   }
   if (awaiting === "admin_pin") {

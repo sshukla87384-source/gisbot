@@ -31,6 +31,8 @@ export interface SessionData {
     | "admin_manual_key"
     | "admin_btn_label"
     | "admin_newpass"
+    | "admin_ref_first"
+    | "admin_ref_repeat"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"

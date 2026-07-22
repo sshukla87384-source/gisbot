@@ -5,6 +5,7 @@ import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument } fr
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
+import { grantReferralRewardTx } from "../referral.service.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -219,6 +220,14 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         where: { orderId: order.id },
         create: { orderId: order.id, invoiceNumber: order.orderNumber.replace(/^GIS/, "INV") },
         update: {},
+      });
+      await grantReferralRewardTx(tx, {
+        referrerId: order.user.referredById,
+        referredId: order.userId,
+        orderId: order.id,
+        netMinor: order.subtotalMinor - order.discountMinor,
+        currency: order.currency as "INR" | "USD",
+        isFirst: order.user.firstPurchaseAt === null,
       });
       await tx.user.updateMany({ where: { id: order.userId, firstPurchaseAt: null }, data: { firstPurchaseAt: new Date() } });
       const cart = await tx.cart.findUnique({ where: { userId: order.userId } });

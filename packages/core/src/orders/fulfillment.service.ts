@@ -6,6 +6,7 @@ import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegra
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyManualOrder } from "./manual-pay.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
+import { grantReferralRewardTx } from "../referral.service.js";
 
 /**
  * Webhook-driven fulfillment (PRD §6.1 steps 6-13, Security doc §5).
@@ -76,11 +77,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
     return;
   }
 
-  const [rewardBp, holdHours, commissionBpDefault] = await Promise.all([
-    getSettingInt("referral.reward_pct_bp", 500),
-    getSettingInt("referral.hold_hours", 48),
-    getSettingInt("reseller.commission_pct_bp", 1000),
-  ]);
+  const commissionBpDefault = await getSettingInt("reseller.commission_pct_bp", 1000);
 
   const outcome = await prisma.$transaction(
     async (tx) => {
@@ -200,24 +197,15 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         }
       }
 
-      // Referral reward on first purchase, held for anti-fraud (PRD §6.5).
-      if (wasFirstPurchase && order.user.referredById) {
-        const net = order.subtotalMinor - order.discountMinor;
-        const amount = Math.floor((net * rewardBp) / 10_000);
-        if (amount > 0) {
-          await tx.referralReward.create({
-            data: {
-              referrerId: order.user.referredById,
-              referredId: order.userId,
-              orderId: order.id,
-              amountMinor: amount,
-              currency: order.currency,
-              status: "PENDING_HOLD",
-              holdUntil: new Date(Date.now() + holdHours * 3_600_000),
-            },
-          });
-        }
-      }
+      // Referral reward (tiered: first purchase vs repeat), held for anti-fraud.
+      await grantReferralRewardTx(tx, {
+        referrerId: order.user.referredById,
+        referredId: order.userId,
+        orderId: order.id,
+        netMinor: order.subtotalMinor - order.discountMinor,
+        currency: order.currency as "INR" | "USD",
+        isFirst: wasFirstPurchase,
+      });
 
       await tx.invoice.create({
         data: { orderId: order.id, invoiceNumber: order.orderNumber.replace(/^GIS/, "INV") },

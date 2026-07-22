@@ -3,6 +3,7 @@ import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret } from "@gis/shared";
 import { notifyManualOrder } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
+import { grantReferralRewardTx } from "../referral.service.js";
 import { assignAccountSlot, assignLicenseKey, priceCart } from "./assign.js";
 
 /**
@@ -178,6 +179,15 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
       await tx.order.update({
         where: { id: order.id },
         data: { status: finalStatus, ...(finalStatus === "COMPLETED" ? { completedAt: new Date() } : {}) },
+      });
+      const buyer = await tx.user.findUnique({ where: { id: userId }, select: { firstPurchaseAt: true, referredById: true } });
+      await grantReferralRewardTx(tx, {
+        referrerId: buyer?.referredById ?? null,
+        referredId: userId,
+        orderId: order.id,
+        netMinor: subtotalMinor - discountMinor,
+        currency: wallet.currency as "INR" | "USD",
+        isFirst: (buyer?.firstPurchaseAt ?? null) === null,
       });
       await tx.user.updateMany({
         where: { id: userId, firstPurchaseAt: null },
