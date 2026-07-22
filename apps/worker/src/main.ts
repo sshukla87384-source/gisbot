@@ -41,8 +41,9 @@ async function main(): Promise<void> {
     QUEUE_NAMES.outbox,
     async (job) => {
       try {
+        const styled = config.BUTTON_STYLES_ENABLED;
         const reply_markup = job.data.buttons && job.data.buttons.length > 0
-          ? { inline_keyboard: [job.data.buttons.map((b) => ({ text: b.text, url: b.url }))] }
+          ? { inline_keyboard: [job.data.buttons.map((b) => (styled && b.style ? { text: b.text, url: b.url, style: b.style } : { text: b.text, url: b.url }))] }
           : undefined;
         let msg;
         if (job.data.photo) {

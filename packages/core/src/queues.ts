@@ -21,6 +21,7 @@ export interface FulfillmentJob {
 export interface OutboxButton {
   text: string;
   url: string;
+  style?: "primary" | "success" | "danger";
 }
 export interface OutboxJob {
   telegramId: string;

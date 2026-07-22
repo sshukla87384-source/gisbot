@@ -36,7 +36,7 @@ async function deliver(broadcast: {
   const ids = await targetTelegramIds(segment);
   const text = renderText(broadcast.title, broadcast.body);
   const buttons: OutboxButton[] | undefined =
-    broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl }] : undefined;
+    broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: "success" }] : undefined;
   let sent = 0;
   for (const id of ids) {
     await enqueueTelegramMessage(id, text, { photo: broadcast.imageUrl ?? undefined, buttons, pin: broadcast.pin });
