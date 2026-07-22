@@ -1,6 +1,7 @@
 import { loadConfig } from "@gis/config";
 import {
   addLicenseKeys,
+  addStock,
   adminCancelOrder,
   enqueueTelegramMessage,
   BOT_ADMIN_MEMBERS_KEY,
@@ -749,7 +750,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "kv": {
       ctx.session.awaiting = "admin_addkeys";
       ctx.session.admVariantId = id;
-      await ctx.reply("🔑 Paste the license keys, <b>one per line</b>. They'll be encrypted and added as stock.", { parse_mode: "HTML" });
+      await ctx.reply("📦 Paste stock <b>one per line</b> — they're encrypted and added.\n• License keys: one key per line.\n• Accounts: <code>username:password</code> per line (or <code>username | password</code>).", { parse_mode: "HTML" });
       return;
     }
     case "addp": {
@@ -925,9 +926,10 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const variantId = ctx.session.admVariantId ?? "";
     ctx.session.admVariantId = undefined;
     const keys = text.split("\n").map((k) => k.trim()).filter(Boolean);
-    if (keys.length === 0) { await ctx.reply("❌ No keys detected."); return true; }
-    const r = await addLicenseKeys(variantId, keys);
-    await ctx.reply(`🔑 Added ${r.added} key(s)${r.skipped ? `, skipped ${r.skipped} duplicate(s)` : ""}.`);
+    if (keys.length === 0) { await ctx.reply("❌ Nothing detected."); return true; }
+    const r = await addStock(variantId, keys);
+    const unit = r.type === "DIGITAL_ACCOUNT" ? "account" : "key";
+    await ctx.reply(`✅ Added ${r.added} ${unit}(s)${r.skipped ? `, skipped ${r.skipped}` : ""}.`);
     await sendPanel(ctx, false);
     return true;
   }

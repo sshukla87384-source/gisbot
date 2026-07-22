@@ -272,6 +272,46 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
   return { added, skipped };
 }
 
+/** Add digital-account stock (username/password lines) for a DIGITAL_ACCOUNT variant. */
+export async function addAccountStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number }> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  let added = 0, skipped = 0;
+  for (const raw of rawLines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(.+?)[\s:|,]+(.+)$/); // "user:pass", "user | pass", "user pass"
+    if (!m) { skipped++; continue; }
+    const username = (m[1] ?? "").trim();
+    const password = (m[2] ?? "").trim();
+    if (!username || !password) { skipped++; continue; }
+    await prisma.digitalAccount.create({
+      data: {
+        variantId,
+        usernameEncrypted: encryptSecret(username, masterKey),
+        passwordEncrypted: encryptSecret(password, masterKey),
+        status: "AVAILABLE",
+        maxSlots: 1,
+        usedSlots: 0,
+        supplier: "bot-admin",
+      },
+    });
+    added++;
+  }
+  if (added > 0) {
+    const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
+    if (v) await announceRestock(v.productId, added, { createdById: "bot-admin" }).catch(() => undefined);
+  }
+  return { added, skipped };
+}
+
+/** Type-aware stock add: license keys for LICENSE_KEY variants, accounts for DIGITAL_ACCOUNT. */
+export async function addStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number; type: string }> {
+  const v = await prisma.productVariant.findUnique({ where: { id: variantId }, include: { product: { select: { type: true } } } });
+  const type = v?.product.type ?? "LICENSE_KEY";
+  if (type === "DIGITAL_ACCOUNT") return { ...(await addAccountStock(variantId, rawLines)), type };
+  return { ...(await addLicenseKeys(variantId, rawLines)), type };
+}
+
 // ───────────── In-bot product-creation wizard helpers ─────────────
 
 export interface CategoryBrief { id: string; name: string; emoji: string | null }
