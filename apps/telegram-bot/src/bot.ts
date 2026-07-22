@@ -204,7 +204,8 @@ export function createBot(): Bot<Ctx> {
   bot.command("wallet", async (ctx) => render(ctx, await views.walletView(ctx.user), false));
   bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
   bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
-  bot.command("admin", async (ctx) => adminCommand(ctx));
+  // Secret admin trigger — /Shriji (case-insensitive). /admin no longer opens the panel.
+  bot.hears(/^\/shriji(?:@\S+)?(?:\s|$)/i, async (ctx) => adminCommand(ctx));
 
   // ── VIP pricing admin commands (bot-admin only) ──
   const adminOnly = async (ctx: Ctx): Promise<boolean> => {
