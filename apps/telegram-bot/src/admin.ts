@@ -19,8 +19,8 @@ import {
   createApiKey,
   listApiKeys,
   setApiKeyScopes,
-  getButtonLabels,
-  setButtonLabel,
+  getButtonConfig,
+  setButton,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -427,14 +427,15 @@ const BTN_LABEL_DEFAULTS: Record<string, string> = {
 };
 
 async function renameButtonsView(ctx: Ctx): Promise<void> {
-  const labels = await getButtonLabels();
+  const cfg = await getButtonConfig();
   const kb = new InlineKeyboard();
   for (const k of BUTTON_LABEL_KEYS) {
-    const cur = labels[k] ?? BTN_LABEL_DEFAULTS[k];
-    kb.text(`✏️ ${cur}`, cb("adm", "btnedit", k)).row();
+    const cur = cfg[k]?.label ?? BTN_LABEL_DEFAULTS[k];
+    const ic = cfg[k]?.icon ? " 🎨" : "";
+    kb.text(`✏️ ${cur}${ic}`, cb("adm", "btnedit", k)).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
-  await show(ctx, "🔤 <b>Rename menu buttons</b>\nTap a button to set a new label (emoji allowed).", kb, true);
+  await show(ctx, "🔤 <b>Rename menu buttons</b>\nTap a button, then send the new label. Include a <b>premium emoji</b> and it becomes the button's icon 🎨. Send <code>reset</code> to restore the default.", kb, true);
 }
 
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
@@ -728,7 +729,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "btnedit":
       ctx.session.btnKey = id;
       ctx.session.awaiting = "admin_btn_label";
-      await askStep(ctx, `🔤 Send the new label for this button (current: <b>${escapeHtml((await getButtonLabels())[id as ButtonLabelKey] ?? BTN_LABEL_DEFAULTS[id] ?? id)}</b>). Send <code>reset</code> to restore the default.`);
+      await askStep(ctx, `🔤 Send the new label for this button (current: <b>${escapeHtml((await getButtonConfig())[id as ButtonLabelKey]?.label ?? BTN_LABEL_DEFAULTS[id] ?? id)}</b>). Include a premium emoji to set it as the icon 🎨, or send <code>reset</code> for default.`);
       return;
     default:
       return sendPanel(ctx, true);
@@ -888,9 +889,21 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   if (awaiting === "admin_btn_label") {
     const key = (ctx.session.btnKey ?? "") as ButtonLabelKey; ctx.session.btnKey = undefined;
     if (!BUTTON_LABEL_KEYS.includes(key)) { await ctx.reply("Unknown button."); return true; }
-    const label = text.trim().toLowerCase() === "reset" ? "" : text.trim();
-    await setButtonLabel(key, label);
-    await ctx.reply(label ? `✅ Button renamed to <b>${escapeHtml(label)}</b>.` : "✅ Button label reset to default.", { parse_mode: "HTML" });
+    if (text.trim().toLowerCase() === "reset") {
+      await setButton(key, "", null);
+      await ctx.reply("✅ Button reset to default.");
+      await renameButtonsView(ctx);
+      return true;
+    }
+    const ents = ((ctx.message?.entities ?? []) as Array<{ type: string; offset: number; length: number; custom_emoji_id?: string }>).filter((e) => e.type === "custom_emoji");
+    const icon = ents[0]?.custom_emoji_id ?? null;
+    // Strip premium-emoji characters from the label (the icon shows them instead).
+    let label = text;
+    for (const e of [...ents].sort((a, b) => b.offset - a.offset)) label = label.slice(0, e.offset) + label.slice(e.offset + e.length);
+    label = label.trim();
+    if (!label) label = BTN_LABEL_DEFAULTS[key] ?? key;
+    await setButton(key, label, icon);
+    await ctx.reply(`✅ Button set to <b>${escapeHtml(label)}</b>${icon ? " with your premium emoji icon 🎨" : ""}.`, { parse_mode: "HTML" });
     await renameButtonsView(ctx);
     return true;
   }

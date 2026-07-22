@@ -32,19 +32,20 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
   ].join("\n");
 }
 
-export function mainMenuKeyboard(user: BotUser, labels: Record<string, string | undefined> = {}): InlineKeyboard {
+export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: string; icon?: string } | undefined> = {}): InlineKeyboard {
   const loc = user.locale;
-  const L = (key: string, fallback: string) => labels[key] || fallback;
+  const L = (key: string, fallback: string) => cfg[key]?.label || fallback;
+  const I = (key: string) => cfg[key]?.icon;
   const kb = new InlineKeyboard()
-    .add(sbtn(L("shop", t(loc, "b_shopnow")), cb("shp", "home", 1), "success"))
+    .add(sbtn(L("shop", t(loc, "b_shopnow")), cb("shp", "home", 1), "success", I("shop")))
     .row()
-    .add(sbtn(L("orders", t(loc, "b_orders")), cb("ord", "list", 1), "primary"), sbtn(L("wallet", t(loc, "b_wallet")), cb("wal", "view"), "primary"))
+    .add(sbtn(L("orders", t(loc, "b_orders")), cb("ord", "list", 1), "primary", I("orders")), sbtn(L("wallet", t(loc, "b_wallet")), cb("wal", "view"), "primary", I("wallet")))
     .row()
-    .add(sbtn(L("support", t(loc, "b_helpsupport")), cb("sup", "home"), "primary"), sbtn(L("referral", t(loc, "b_referral")), cb("ref", "view"), "primary"))
+    .add(sbtn(L("support", t(loc, "b_helpsupport")), cb("sup", "home"), "primary", I("support")), sbtn(L("referral", t(loc, "b_referral")), cb("ref", "view"), "primary", I("referral")))
     .row()
-    .add(sbtn(L("currency", t(loc, "b_currency", { cur: user.currency })), cb("cur", "home"), "primary"), sbtn(L("language", t(loc, "b_language")), cb("lang", "home"), "primary"))
+    .add(sbtn(L("currency", t(loc, "b_currency", { cur: user.currency })), cb("cur", "home"), "primary", I("currency")), sbtn(L("language", t(loc, "b_language")), cb("lang", "home"), "primary", I("language")))
     .row()
-    .add(sbtn(L("developer", t(loc, "b_developer")), cb("api", "home"), "primary"));
+    .add(sbtn(L("developer", t(loc, "b_developer")), cb("api", "home"), "primary", I("developer")));
   if (user.roleNames.includes("RESELLER")) {
     kb.row().text(t(loc, "b_reseller"), cb("rsl", "home"));
   }

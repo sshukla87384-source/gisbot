@@ -398,15 +398,16 @@ export function createBot(): Bot<Ctx> {
     }
     if (awaiting === "api_key_name") {
       const name = ctx.message.text.trim().slice(0, 120) || "my key";
-      const created = await createApiKey({ name, scopes: ["catalog:read"], ownerUserId: ctx.user.id });
+      const created = await createApiKey({ name, scopes: ["catalog:read", "orders:read", "orders:write", "wallet:read"], ownerUserId: ctx.user.id });
       const base = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "") + "/api/v1/developer";
-      return ctx.reply(
+      await ctx.reply(
         [
           "✅ <b>API key created</b> — copy it now, it won’t be shown again:",
           "",
           `<code>${created.apiKey}</code>`,
           "",
-          `Scope: catalog:read`,
+          `Scopes: catalog:read, orders:read, orders:write, wallet:read`,
+          "This key can browse products, check your balance, and <b>buy from your wallet</b>.",
           `Base URL: <code>${base}</code>`,
           `📖 Full docs: ${base}`,
           `🔧 Interactive reference: ${base}/docs`,
@@ -414,6 +415,7 @@ export function createBot(): Bot<Ctx> {
         ].join("\n"),
         { parse_mode: "HTML" },
       );
+      return render(ctx, await views.apiKeysListView(ctx.user), false);
     }
     if (awaiting === "search") {
       const q = ctx.message.text.trim().slice(0, 64);
@@ -752,6 +754,12 @@ export function createBot(): Bot<Ctx> {
         case "api:home":
           await render(ctx, await views.apiKeysView(user), true);
           break;
+        case "api:list":
+          await render(ctx, await views.apiKeysListView(user), true);
+          break;
+        case "api:docs":
+          await render(ctx, views.apiDocsView(), true);
+          break;
         case "api:new":
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "api_key_name";
@@ -760,7 +768,7 @@ export function createBot(): Bot<Ctx> {
         case "api:revoke": {
           const done = await revokeApiKeyOwned(args[0] ?? "", user.id);
           await ctx.answerCallbackQuery({ text: done ? "Revoked" : "Not found" });
-          await render(ctx, await views.apiKeysView(user), true);
+          await render(ctx, await views.apiKeysListView(user), true);
           break;
         }
 

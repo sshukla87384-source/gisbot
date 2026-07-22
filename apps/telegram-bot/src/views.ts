@@ -4,7 +4,7 @@ import {
   getProductView,
   getReferralStats,
   getWallet,
-  getButtonLabels,
+  getButtonConfig,
   listCategories,
   listOrders,
   listOrderItems,
@@ -36,8 +36,8 @@ export async function menuView(user: BotUser): Promise<View> {
     getWallet(user.id),
     prisma.order.count({ where: { userId: user.id } }),
   ]);
-  const labels = await getButtonLabels();
-  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, labels) };
+  const btnCfg = await getButtonConfig();
+  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg) };
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
@@ -415,22 +415,69 @@ export function helpView(): View {
 
 export async function apiKeysView(user: BotUser): Promise<View> {
   const keys = await listApiKeysByOwner(user.id);
-  const kb = new InlineKeyboard().text("➕ Create API key", cb("api", "new")).row();
-  const lines = [
-    "🧑‍💻 <b>Developer API</b>",
-    "",
-    "Create a personal API key to browse the catalog, check your balance, and place orders from your wallet.",
-    "Full documentation, base URL and examples are shown after you create a key.",
-    "",
-  ];
   const active = keys.filter((k) => !k.revokedAt);
-  if (active.length === 0) lines.push("You have no active keys yet.");
-  for (const k of active.slice(0, 10)) {
-    lines.push(`• <b>${escapeHtml(k.name)}</b> — <code>${k.prefix}…</code> · ${k.callCount} calls`);
-    kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("api", "revoke", k.id)).row();
-  }
+  const kb = new InlineKeyboard();
+  kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
+  if (active.length > 0) kb.text(`📋 My API keys (${active.length})`, cb("api", "list")).row();
+  kb.text("📖 API Documentation", cb("api", "docs")).row();
   backToMenuRow(kb);
+  return {
+    text: [
+      header(`🧑‍💻 ${bold("Developer API")}`),
+      "",
+      "Build on our store: browse the catalog, check your balance, and place orders from your wallet — all via a REST API.",
+      "",
+      active.length > 0
+        ? `You have <b>${num(active.length)}</b> active key(s). Tap 📋 My API keys to manage them.`
+        : "Tap 🔑 Generate API key to create your first key.",
+    ].join("\n"),
+    kb,
+  };
+}
+
+export async function apiKeysListView(user: BotUser): Promise<View> {
+  const keys = await listApiKeysByOwner(user.id);
+  const active = keys.filter((k) => !k.revokedAt);
+  const kb = new InlineKeyboard();
+  kb.add(sbtn("🔑 Generate another key", cb("api", "new"), "success")).row();
+  const lines = [header(`📋 ${bold("My API keys")}`), ""];
+  if (active.length === 0) lines.push("You have no active keys yet.");
+  for (const k of active.slice(0, 15)) {
+    lines.push(`• <b>${escapeHtml(k.name)}</b> — <code>${k.prefix}…</code> · ${num(k.callCount)} calls`);
+    kb.add(sbtn(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("api", "revoke", k.id), "danger")).row();
+  }
+  navRow(kb, cb("api", "home"));
   return { text: lines.join("\n"), kb };
+}
+
+export function apiDocsView(): View {
+  const base = `${(loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "")}/api/v1/developer`;
+  const hasUrl = (loadConfig().PUBLIC_API_URL ?? "").length > 0;
+  const kb = new InlineKeyboard();
+  if (hasUrl) kb.url("📖 Open full documentation", base).row();
+  navRow(kb, cb("api", "home"));
+  return {
+    text: [
+      header(`📖 ${bold("API Documentation")}`),
+      "",
+      hasUrl ? `Base URL:\n<code>${base}</code>` : "Base URL is shown once configured by the store.",
+      "",
+      `${bold("Auth")} — send your key as a header:`,
+      "<code>Authorization: Bearer YOUR_KEY</code>",
+      "<code>X-API-Key: YOUR_KEY</code>",
+      "",
+      `${bold("Endpoints")}`,
+      "• GET /products — buyable catalog",
+      "• GET /products/{id} — one product",
+      "• GET /balance — wallet balance + ledger",
+      "• POST /orders — place an order (paid from wallet)",
+      "• GET /orders/{orderNumber} — order status",
+      "• GET /health — liveness (no auth)",
+      "",
+      hasUrl ? `Full guide & examples: ${base}` : "",
+    ].filter((l) => l !== "").join("\n"),
+    kb,
+  };
 }
 
 export function languageView(user: BotUser): View {

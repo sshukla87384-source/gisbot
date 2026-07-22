@@ -188,17 +188,21 @@ export async function setProductDescription(productId: string, description: stri
 export const BUTTON_LABEL_KEYS = ["shop", "orders", "wallet", "support", "referral", "currency", "language", "developer"] as const;
 export type ButtonLabelKey = (typeof BUTTON_LABEL_KEYS)[number];
 
-/** Admin-defined overrides for main-menu button labels (empty when unset). */
-export async function getButtonLabels(): Promise<Partial<Record<ButtonLabelKey, string>>> {
+export interface ButtonOverride { label?: string; icon?: string }
+
+/** Admin overrides for main-menu buttons: custom label and/or premium-emoji icon (empty when unset). */
+export async function getButtonConfig(): Promise<Partial<Record<ButtonLabelKey, ButtonOverride>>> {
   const row = await prisma.setting.findUnique({ where: { key: "ui.button_labels" } });
-  return (row?.value as Partial<Record<ButtonLabelKey, string>> | undefined) ?? {};
+  return (row?.value as Partial<Record<ButtonLabelKey, ButtonOverride>> | undefined) ?? {};
 }
 
-export async function setButtonLabel(key: ButtonLabelKey, label: string): Promise<void> {
-  const current = await getButtonLabels();
+/** Set a button's label and/or premium-emoji icon. Pass empty label + null icon to reset to default. */
+export async function setButton(key: ButtonLabelKey, label: string, icon: string | null): Promise<void> {
+  const current = await getButtonConfig();
   const next = { ...current };
-  const trimmed = label.trim().slice(0, 40);
-  if (trimmed) next[key] = trimmed; else delete next[key];
+  const l = label.trim().slice(0, 40);
+  if (!l && !icon) delete next[key];
+  else next[key] = { ...(l ? { label: l } : {}), ...(icon ? { icon } : {}) };
   await prisma.setting.upsert({
     where: { key: "ui.button_labels" },
     create: { key: "ui.button_labels", value: next as object },
