@@ -3,7 +3,7 @@ import { loadConfig } from "@gis/config";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { t } from "./i18n.js";
-import { num, header, bold, e, HR } from "./premium.js";
+import { num, header, bold, e } from "./premium.js";
 import { sbtn } from "./keyboard.js";
 
 export const fmt = (minor: number | bigint, currency: string): string =>
@@ -17,18 +17,9 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
     `<b>${t(loc, "tagline")}</b>`,
     "",
     `💰 Wallet: <b>${fmt(balanceMinor, user.currency)}</b>   ·   📦 Orders: <b>${num(orderCount)}</b>`,
-    HR,
-    `<b>What would you like to do?</b>`,
     "",
-    `🛍 <b>Shop Now</b> — browse & buy products`,
-    `📦 <b>My Orders</b> — orders & delivered keys`,
-    `💰 <b>Wallet</b> — deposit & pay instantly`,
-    `🎫 <b>Help &amp; Support</b> — guide & live help`,
-    `👥 <b>Referral</b> — invite friends, earn rewards`,
-    `💱 <b>Currency</b> / 🌐 <b>Language</b> — your preferences`,
-    `🧑‍💻 <b>Developer API</b> — build on our catalog`,
-    HR,
     `<b>${t(loc, "hint")}</b>`,
+    `<i>Tap ❓ Help for all commands &amp; a quick guide.</i>`,
   ].join("\n");
 }
 
