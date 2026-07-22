@@ -216,6 +216,9 @@ importers:
       '@gis/shared':
         specifier: workspace:*
         version: link:../shared
+      '@node-rs/argon2':
+        specifier: ^2.0.2
+        version: 2.0.2
       bullmq:
         specifier: ^5.34.0
         version: 5.80.2

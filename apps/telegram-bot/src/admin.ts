@@ -36,6 +36,7 @@ import {
   setCustomEmojiEntry,
   removeCustomEmojiEntry,
   dmUser,
+  setWebAdminPassword,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -72,6 +73,7 @@ import { InlineKeyboard } from "grammy";
 import type { Ctx } from "./ctx.js";
 import { escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
+import { header, bold } from "./premium.js";
 import { setDynamicEmojis } from "./emoji.js";
 
 const ATTEMPT_WINDOW_SEC = 15 * 60;
@@ -159,19 +161,23 @@ async function guard(ctx: Ctx): Promise<boolean> {
 
 function panelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("➕ Add product", cb("adm", "addp")).row()
-    .text("📊 Dashboard", cb("adm", "stats")).text("📈 Sales", cb("adm", "sales")).row()
-    .text("🧾 Pending", cb("adm", "orders")).row()
-    .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
-    .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
-    .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
-    .text("🔤 Rename buttons", cb("adm", "btns")).row()
-    .text("🔑 Change passcode", cb("adm", "chpass")).row()
-    .text("🎁 Referral %", cb("adm", "refrates")).row()
-    .text("🕒 BNPL limit", cb("adm", "bnpl")).row()
-    .text("🎨 Custom emoji", cb("adm", "emoji")).row()
-    .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
-    .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
+    // ── Catalog ──
+    .add(sbtn("➕ Add Product", cb("adm", "addp"), "success"), sbtn("📦 Products", cb("adm", "prods"), "primary")).row()
+    // ── Insights ──
+    .add(sbtn("📊 Dashboard", cb("adm", "stats"), "primary"), sbtn("📈 Sales", cb("adm", "sales"), "primary")).row()
+    // ── Orders ──
+    .add(sbtn("🧾 Pending Orders", cb("adm", "orders"), "primary"), sbtn("🗂 Recent", cb("adm", "recent"), "primary")).row()
+    // ── Marketing ──
+    .add(sbtn("📢 Broadcast", cb("adm", "bc"), "primary"), sbtn("📣 Groups", cb("adm", "groups"), "primary")).row()
+    .add(sbtn("🎁 Referral %", cb("adm", "refrates"), "primary"), sbtn("🎨 Emoji", cb("adm", "emoji"), "primary")).row()
+    // ── Customers ──
+    .add(sbtn("💰 Adjust Wallet", cb("adm", "walletadj"), "primary"), sbtn("🕒 BNPL Limit", cb("adm", "bnpl"), "primary")).row()
+    // ── Customize & integrations ──
+    .add(sbtn("🔤 Rename Buttons", cb("adm", "btns"), "primary"), sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
+    .add(sbtn("🔑 API Keys", cb("adm", "apikeys"), "primary")).row()
+    // ── Security ──
+    .add(sbtn("🔑 Passcode", cb("adm", "chpass"), "primary"), sbtn("🔐 Web Login", cb("adm", "webpass"), "primary")).row()
+    .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout All", cb("adm", "logoutall"), "danger")).row();
 }
 
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
@@ -183,7 +189,19 @@ async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): 
 }
 
 async function sendPanel(ctx: Ctx, edit: boolean): Promise<void> {
-  await show(ctx, "🛠 <b>Admin Panel</b>\nManage the store right here.", panelKeyboard(), edit);
+  const s = await getAdminStats().catch(() => null);
+  const lines = [
+    header(`🛠 ${bold(`${loadConfig().STORE_NAME} · Admin`)}`),
+    "Your control center — everything in one place.",
+  ];
+  if (s) {
+    lines.push(
+      "",
+      `🧾 Pending: <b>${s.pendingPayments}</b>   ·   📦 Active: <b>${s.activeProducts}</b>`,
+      `🧾 Orders today: <b>${s.ordersToday}</b>   ·   ${s.lowStockVariants > 0 ? `⚠️ Low stock: <b>${s.lowStockVariants}</b>` : "✅ Stock healthy"}`,
+    );
+  }
+  await show(ctx, lines.join("\n"), panelKeyboard(), edit);
 }
 
 async function statsView(ctx: Ctx): Promise<void> {
@@ -866,6 +884,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return finishBroadcast(ctx);
     }
     case "bcsend": return finishBroadcast(ctx);
+    case "webpass":
+      ctx.session.awaiting = "admin_web_email";
+      await askStep(ctx, "🔐 <b>Reset web admin login</b>\nSend the <b>email</b> for the web panel login (e.g. <code>admin@getitsasta.cloud</code>):");
+      return;
     case "chpass":
       ctx.session.awaiting = "admin_newpass";
       await askStep(ctx, "🔑 Send the <b>new</b> admin passcode (at least 6 characters). Keep it private — your message will be deleted after.");
@@ -1036,6 +1058,24 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_web_email") {
+    const email = text.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { await askStep(ctx, "Please send a valid email, e.g. admin@getitsasta.cloud"); ctx.session.awaiting = "admin_web_email"; return true; }
+    ctx.session.webAdminEmail = email;
+    ctx.session.awaiting = "admin_web_pass";
+    await askStep(ctx, "🔐 Now send the <b>new password</b> (at least 12 characters). Your message will be deleted after.");
+    return true;
+  }
+  if (awaiting === "admin_web_pass") {
+    await ctx.deleteMessage().catch(() => undefined);
+    const email = ctx.session.webAdminEmail ?? ""; ctx.session.webAdminEmail = undefined;
+    const pass = text.trim();
+    const r = await setWebAdminPassword(email, pass);
+    if (r.ok) await ctx.reply(`✅ Web admin login updated.\nEmail: <code>${escapeHtml(email)}</code>\nUse it to sign in to the web panel.`, { parse_mode: "HTML" });
+    else await ctx.reply(r.reason === "WEAK" ? "⚠️ Password too short — use at least 12 characters. Tap 🔐 Web login password again." : r.reason === "BAD_EMAIL" ? "⚠️ That email looks invalid." : "❌ Couldn't set it (role missing). Run a deploy first.");
+    await sendPanel(ctx, false);
+    return true;
+  }
   if (awaiting === "admin_newpass") {
     await ctx.deleteMessage().catch(() => undefined);
     const pass = text.trim();

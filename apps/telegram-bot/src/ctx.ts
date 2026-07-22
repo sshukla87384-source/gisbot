@@ -45,6 +45,8 @@ export interface SessionData {
     | "coupon_code"
     | "support_chat"
     | "admin_dm_reply"
+    | "admin_web_email"
+    | "admin_web_pass"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -80,6 +82,7 @@ export interface SessionData {
   pendEmojiId?: string;
   pendEmojiGlyph?: string;
   dmTarget?: string;
+  webAdminEmail?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

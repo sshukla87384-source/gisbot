@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
     "@gis/config": "workspace:*",
     "@gis/database": "workspace:*",
     "@gis/payments": "workspace:*",

@@ -616,3 +616,30 @@ export async function dmUser(userId: string, text: string): Promise<boolean> {
   await enqueueTelegramMessage(u.telegramId, `💬 <b>Support</b>\n${safe}`);
   return true;
 }
+
+// ───────────── Web admin password reset (from the bot) ─────────────
+import { hash as argonHash } from "@node-rs/argon2";
+
+/**
+ * Set (or create) the web admin-panel super-admin credentials from the bot.
+ * Hashes with argon2 — same scheme the web login verifies against.
+ */
+export async function setWebAdminPassword(email: string, password: string): Promise<{ ok: boolean; reason?: string }> {
+  const mail = email.trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(mail)) return { ok: false, reason: "BAD_EMAIL" };
+  if (password.length < 12) return { ok: false, reason: "WEAK" };
+  const role = await prisma.role.findUnique({ where: { name: "SUPER_ADMIN" } });
+  if (!role) return { ok: false, reason: "NO_ROLE" };
+  const passwordHash = await argonHash(password, { memoryCost: 65536, timeCost: 3, parallelism: 4 });
+  const user = await prisma.user.upsert({
+    where: { email: mail },
+    create: { email: mail, emailVerified: true, passwordHash, firstName: "Admin", currency: "USD", status: "ACTIVE", wallet: { create: { currency: "USD" } } },
+    update: { passwordHash, status: "ACTIVE" },
+  });
+  await prisma.userRole.upsert({
+    where: { userId_roleId: { userId: user.id, roleId: role.id } },
+    create: { userId: user.id, roleId: role.id },
+    update: {},
+  });
+  return { ok: true };
+}
