@@ -4,6 +4,7 @@ import {
   getProductView,
   getReferralStats,
   getWallet,
+  getButtonLabels,
   listCategories,
   listOrders,
   listOrderItems,
@@ -35,7 +36,8 @@ export async function menuView(user: BotUser): Promise<View> {
     getWallet(user.id),
     prisma.order.count({ where: { userId: user.id } }),
   ]);
-  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user) };
+  const labels = await getButtonLabels();
+  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, labels) };
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
@@ -139,7 +141,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     header(p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
     "",
     `📦 ${bold("Product")}`,
-    `${p.iconEmoji ? p.iconEmoji + " " : ""}${escapeHtml(p.name)}`,
+    `${p.iconEmoji ? p.iconEmoji + " " : ""}${p.nameHtml ?? escapeHtml(p.name)}`,
     "",
     `💎 ${bold("Price")}`,
     priceStr,
@@ -150,7 +152,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     ...(user.isVip ? [`${e("vip")} <b>VIP price applied</b>`] : []),
     p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
-    p.description ? escapeHtml(p.description) : "",
+    p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : ""),
     HR,
   ].filter((l) => l !== "");
 

@@ -173,14 +173,37 @@ export async function adminDeleteProduct(id: string): Promise<void> {
   await prisma.product.update({ where: { id }, data: { deletedAt: new Date(), status: "ARCHIVED" } });
 }
 
-export async function setProductName(productId: string, name: string): Promise<void> {
-  await prisma.product.update({ where: { id: productId }, data: { name: name.slice(0, 200) } });
+export async function setProductName(productId: string, name: string, nameHtml: string | null = null): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { name: name.slice(0, 200), nameHtml: nameHtml?.slice(0, 500) ?? null } });
   await invalidate("cat:*");
 }
 
-export async function setProductDescription(productId: string, description: string): Promise<void> {
-  await prisma.product.update({ where: { id: productId }, data: { description: description.slice(0, 4000) } });
+export async function setProductDescription(productId: string, description: string, descriptionHtml: string | null = null): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { description: description.slice(0, 4000), descriptionHtml: descriptionHtml?.slice(0, 8000) ?? null } });
   await invalidate("cat:*");
+}
+
+// ───────────── Customisable button labels ─────────────
+
+export const BUTTON_LABEL_KEYS = ["shop", "orders", "wallet", "support", "referral", "currency", "language", "developer"] as const;
+export type ButtonLabelKey = (typeof BUTTON_LABEL_KEYS)[number];
+
+/** Admin-defined overrides for main-menu button labels (empty when unset). */
+export async function getButtonLabels(): Promise<Partial<Record<ButtonLabelKey, string>>> {
+  const row = await prisma.setting.findUnique({ where: { key: "ui.button_labels" } });
+  return (row?.value as Partial<Record<ButtonLabelKey, string>> | undefined) ?? {};
+}
+
+export async function setButtonLabel(key: ButtonLabelKey, label: string): Promise<void> {
+  const current = await getButtonLabels();
+  const next = { ...current };
+  const trimmed = label.trim().slice(0, 40);
+  if (trimmed) next[key] = trimmed; else delete next[key];
+  await prisma.setting.upsert({
+    where: { key: "ui.button_labels" },
+    create: { key: "ui.button_labels", value: next as object },
+    update: { value: next as object },
+  });
 }
 
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {

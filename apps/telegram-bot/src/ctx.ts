@@ -29,6 +29,7 @@ export interface SessionData {
     | "admin_pubprice_usd"
     | "admin_pubprice_inr"
     | "admin_manual_key"
+    | "admin_btn_label"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"
@@ -64,6 +65,7 @@ export interface SessionData {
   bcBody?: string;
   bcBtnText?: string;
   bcBtnUrl?: string;
+  btnKey?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

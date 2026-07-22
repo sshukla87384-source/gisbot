@@ -19,6 +19,10 @@ import {
   createApiKey,
   listApiKeys,
   setApiKeyScopes,
+  getButtonLabels,
+  setButtonLabel,
+  BUTTON_LABEL_KEYS,
+  type ButtonLabelKey,
   revokeApiKey,
   announceProduct,
   announceFlashSale,
@@ -144,6 +148,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
     .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
+    .text("🔤 Rename buttons", cb("adm", "btns")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
 }
@@ -366,6 +371,10 @@ async function customPriceChannelPrompt(ctx: Ctx): Promise<void> {
   await show(ctx, `Where should <b>${escapeHtml(ctx.session.priceUserLabel ?? "this customer")}</b>'s price of <b>${((ctx.session.priceAmountMinor ?? 0) / 100).toFixed(2)}</b> apply?`, kb, false);
 }
 
+function hasCustomEmoji(ctx: Ctx): boolean {
+  return ((ctx.message?.entities ?? []) as Array<{ type: string }>).some((e) => e.type === "custom_emoji");
+}
+
 /** Build HTML from an admin message, preserving premium custom emoji as <tg-emoji> tags. */
 function composeBroadcastHtml(ctx: Ctx): string {
   const msg = ctx.message;
@@ -410,6 +419,22 @@ async function finishBroadcast(ctx: Ctx): Promise<void> {
   ctx.session.bcBody = ctx.session.bcBtnText = ctx.session.bcBtnUrl = undefined;
   await ctx.reply(`📢 Broadcast queued to ${res.targets} users.${res.targets ? "" : " (no eligible users yet)"}`);
   return sendPanel(ctx, false);
+}
+
+const BTN_LABEL_DEFAULTS: Record<string, string> = {
+  shop: "🛍 Shop Now", orders: "📦 My Orders", wallet: "💰 Wallet", support: "🎫 Help & Support",
+  referral: "👥 Referral", currency: "💱 Currency", language: "🌐 Language", developer: "🧑‍💻 Developer API",
+};
+
+async function renameButtonsView(ctx: Ctx): Promise<void> {
+  const labels = await getButtonLabels();
+  const kb = new InlineKeyboard();
+  for (const k of BUTTON_LABEL_KEYS) {
+    const cur = labels[k] ?? BTN_LABEL_DEFAULTS[k];
+    kb.text(`✏️ ${cur}`, cb("adm", "btnedit", k)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "home"));
+  await show(ctx, "🔤 <b>Rename menu buttons</b>\nTap a button to set a new label (emoji allowed).", kb, true);
 }
 
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
@@ -699,6 +724,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return finishBroadcast(ctx);
     }
     case "bcsend": return finishBroadcast(ctx);
+    case "btns": return renameButtonsView(ctx);
+    case "btnedit":
+      ctx.session.btnKey = id;
+      ctx.session.awaiting = "admin_btn_label";
+      await askStep(ctx, `🔤 Send the new label for this button (current: <b>${escapeHtml((await getButtonLabels())[id as ButtonLabelKey] ?? BTN_LABEL_DEFAULTS[id] ?? id)}</b>). Send <code>reset</code> to restore the default.`);
+      return;
     default:
       return sendPanel(ctx, true);
   }
@@ -832,15 +863,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   if (awaiting === "admin_p_editname") {
     const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
     if (!text) { await ctx.reply("Please send a name."); return true; }
-    await setProductName(pid, text);
-    await ctx.reply("✅ Name updated.");
+    await setProductName(pid, text, hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : null);
+    await ctx.reply("✅ Name updated." + (hasCustomEmoji(ctx) ? " (premium emoji kept 🎨)" : ""));
     await productView(ctx, pid);
     return true;
   }
   if (awaiting === "admin_p_editdesc") {
     const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
-    await setProductDescription(pid, text);
-    await ctx.reply("✅ Description updated.");
+    await setProductDescription(pid, text, hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : null);
+    await ctx.reply("✅ Description updated." + (hasCustomEmoji(ctx) ? " (premium emoji kept 🎨)" : ""));
     await productView(ctx, pid);
     return true;
   }
@@ -854,6 +885,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_btn_label") {
+    const key = (ctx.session.btnKey ?? "") as ButtonLabelKey; ctx.session.btnKey = undefined;
+    if (!BUTTON_LABEL_KEYS.includes(key)) { await ctx.reply("Unknown button."); return true; }
+    const label = text.trim().toLowerCase() === "reset" ? "" : text.trim();
+    await setButtonLabel(key, label);
+    await ctx.reply(label ? `✅ Button renamed to <b>${escapeHtml(label)}</b>.` : "✅ Button label reset to default.", { parse_mode: "HTML" });
+    await renameButtonsView(ctx);
+    return true;
+  }
   if (awaiting === "admin_manual_key") {
     const itemId = ctx.session.admManualItemId ?? ""; ctx.session.admManualItemId = undefined;
     const r = await manualFulfillItem(itemId, text);

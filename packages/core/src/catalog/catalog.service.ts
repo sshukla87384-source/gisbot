@@ -39,7 +39,9 @@ export interface VariantView {
 export interface ProductView {
   id: string;
   name: string;
+  nameHtml: string | null;
   description: string | null;
+  descriptionHtml: string | null;
   imageUrl: string | null;
   iconEmoji: string | null;
   onSale: boolean;
@@ -196,7 +198,9 @@ export async function getProductView(productId: string, currency: Currency, user
   return {
     id: p.id,
     name: p.name,
+    nameHtml: p.nameHtml,
     description: p.description,
+    descriptionHtml: p.descriptionHtml,
     imageUrl: p.imageUrl,
     iconEmoji: p.iconEmoji,
     onSale,

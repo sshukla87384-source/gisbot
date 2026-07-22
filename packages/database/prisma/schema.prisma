@@ -481,6 +481,8 @@ model Product {
   image           Media?          @relation(fields: [imageId], references: [id])
   imageUrl        String? // hosted image URL (upload or paste) shown in bot product card
   iconEmoji       String? // small emoji/icon shown next to the product name
+  nameHtml        String? // premium-emoji HTML for the product-card title (display only)
+  descriptionHtml String? // premium-emoji HTML for the product-card description (display only)
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
   saleEndsAt      DateTime?
