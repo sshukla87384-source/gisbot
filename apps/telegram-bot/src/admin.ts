@@ -6,6 +6,11 @@ import {
   BOT_ADMIN_MEMBERS_KEY,
   adminDeleteProduct,
   adjustUserWallet,
+  resolveUserByTelegramId,
+  setUserPrice,
+  removeUserPrice,
+  listProductUserPrices,
+  type PriceChannel,
   createApiKey,
   listApiKeys,
   revokeApiKey,
@@ -225,6 +230,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
+  kb.text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
@@ -304,6 +310,36 @@ async function groupsView(ctx: Ctx): Promise<void> {
 }
 
 /** Central callback dispatcher for the admin panel (ns === "adm"). */
+
+const chLabel = (c: PriceChannel): string => c === "DIRECT" ? "🛒 Direct only" : c === "API" ? "🔌 API only" : "🛒🔌 Both";
+
+async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
+  const prods = await listProductsBrief(200);
+  const p = prods.find((x) => x.id === productId);
+  const rows = await listProductUserPrices(productId);
+  const kb = new InlineKeyboard();
+  kb.text("➕ Add custom price", cb("adm", "cpadd", productId)).row();
+  for (const r of rows) {
+    kb.text(`✖️ ${r.label} · ${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel}~${productId}`)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "prod", productId));
+  const lines = [
+    `💲 <b>Custom pricing</b> — ${p ? escapeHtml(p.name) : "product"}`,
+    "",
+    rows.length ? "Set special prices for specific customers (direct, API, or both). Tap a row to remove it." : "No custom prices yet. Tap ➕ to add one.",
+  ];
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+async function customPriceChannelPrompt(ctx: Ctx): Promise<void> {
+  const kb = new InlineKeyboard()
+    .text("🛒 Direct only", cb("adm", "cpset", "DIRECT")).row()
+    .text("🔌 API only", cb("adm", "cpset", "API")).row()
+    .text("🛒🔌 Both", cb("adm", "cpset", "BOTH")).row()
+    .text("✖️ Cancel", cb("adm", "home"));
+  await show(ctx, `Where should <b>${escapeHtml(ctx.session.priceUserLabel ?? "this customer")}</b>'s price of <b>${((ctx.session.priceAmountMinor ?? 0) / 100).toFixed(2)}</b> apply?`, kb, false);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -335,6 +371,33 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "ord": return orderView(ctx, id);
     case "prods": return productsView(ctx);
     case "prod": return productView(ctx, id);
+    case "cprice": return customPriceView(ctx, id);
+    case "cpadd":
+      ctx.session.priceProductId = id;
+      ctx.session.priceUserId = undefined;
+      ctx.session.priceAmountMinor = undefined;
+      ctx.session.awaiting = "admin_price_user";
+      await askStep(ctx, "👤 Which customer? Send their @username or Telegram numeric ID (they must have used the bot).");
+      return;
+    case "cpset": {
+      const channel = (id === "DIRECT" || id === "API" || id === "BOTH" ? id : "BOTH") as PriceChannel;
+      const pid = ctx.session.priceProductId ?? "";
+      const uid = ctx.session.priceUserId ?? "";
+      const amt = ctx.session.priceAmountMinor ?? 0;
+      if (!pid || !uid || amt <= 0) { await sendPanel(ctx, true); return; }
+      await setUserPrice(uid, pid, amt, channel);
+      const label = ctx.session.priceUserLabel ?? "customer";
+      ctx.session.priceProductId = ctx.session.priceUserId = ctx.session.priceUserLabel = undefined;
+      ctx.session.priceAmountMinor = undefined;
+      await ctx.reply(`✅ Set ${escapeHtml(label)}'s price to <b>${(amt / 100).toFixed(2)}</b> (${chLabel(channel)}).`, { parse_mode: "HTML" });
+      await customPriceView(ctx, pid);
+      return;
+    }
+    case "cprm": {
+      const [uid, channel, pid] = id.split("~");
+      if (uid && channel && pid) { await removeUserPrice(uid, pid, channel as PriceChannel); await customPriceView(ctx, pid); }
+      return;
+    }
 
     case "confirm": {
       try {
@@ -672,6 +735,24 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setProductImage(productId, text.trim());
     await ctx.reply("🖼 Image updated.");
     await sendPanel(ctx, false);
+    return true;
+  }
+
+  if (awaiting === "admin_price_user") {
+    const found = await resolveUserByTelegramId(text.trim());
+    if (!found) { await askStep(ctx, "❌ No customer found. Send their @username or Telegram numeric ID (they must have used the bot)."); ctx.session.awaiting = "admin_price_user"; return true; }
+    ctx.session.priceUserId = found.id;
+    ctx.session.priceUserLabel = found.label;
+    ctx.session.awaiting = "admin_price_amount";
+    await askStep(ctx, `💲 Price for <b>${escapeHtml(found.label)}</b>? Send the amount in the customer's currency, e.g. <code>9.99</code>.`);
+    return true;
+  }
+  if (awaiting === "admin_price_amount") {
+    const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(val) || val <= 0) { await askStep(ctx, "Please send a valid price, e.g. 9.99"); ctx.session.awaiting = "admin_price_amount"; return true; }
+    ctx.session.priceAmountMinor = Math.round(val * 100);
+    ctx.session.awaiting = null;
+    await customPriceChannelPrompt(ctx);
     return true;
   }
 

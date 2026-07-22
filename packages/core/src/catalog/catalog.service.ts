@@ -93,10 +93,11 @@ export async function listProducts(opts: {
   page: number;
   pageSize?: number;
   userId?: string;
+  channel?: "DIRECT" | "API";
 }): Promise<Paged<ProductListItem>> {
-  const { categoryId, search, featuredOnly, currency, page, userId } = opts;
+  const { categoryId, search, featuredOnly, currency, page, userId, channel = "DIRECT" } = opts;
   const size = opts.pageSize ?? PAGE_SIZE;
-  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}:${userId ?? "-"}`;
+  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}:${userId ?? "-"}:${channel}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
@@ -121,7 +122,7 @@ export async function listProducts(opts: {
     });
 
     const overrideMap = userId
-      ? new Map((await prisma.userPrice.findMany({ where: { userId, productId: { in: products.map((p) => p.id) } } })).map((o) => [o.productId, o.amountMinor]))
+      ? await resolveUserPriceMap(userId, products.map((p) => p.id), channel)
       : new Map<string, number>();
     const items: ProductListItem[] = [];
     for (const p of products) {
@@ -148,7 +149,24 @@ export async function listProducts(opts: {
   });
 }
 
-export async function getProductView(productId: string, currency: Currency, userId?: string): Promise<ProductView> {
+
+/** Resolve a user's per-product override for a channel: a channel-specific price (DIRECT/API) wins over a BOTH price. */
+async function resolveUserPriceMap(userId: string, productIds: string[], channel: "DIRECT" | "API"): Promise<Map<string, number>> {
+  const rows = await prisma.userPrice.findMany({ where: { userId, productId: { in: productIds }, channel: { in: [channel, "BOTH"] } } });
+  const map = new Map<string, number>();
+  for (const r of rows) {
+    const cur = map.get(r.productId);
+    if (cur === undefined || r.channel === channel) map.set(r.productId, r.amountMinor);
+  }
+  return map;
+}
+
+async function resolveUserPrice(userId: string, productId: string, channel: "DIRECT" | "API"): Promise<number | null> {
+  const m = await resolveUserPriceMap(userId, [productId], channel);
+  return m.get(productId) ?? null;
+}
+
+export async function getProductView(productId: string, currency: Currency, userId?: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<ProductView> {
   const p = await prisma.product.findFirst({
     where: { id: productId, status: "ACTIVE", deletedAt: null },
     include: {
@@ -162,9 +180,7 @@ export async function getProductView(productId: string, currency: Currency, user
   if (!p) throw new CoreError("PRODUCT_NOT_FOUND");
 
   const onSale = isSaleActive(p);
-  const override = userId
-    ? (await prisma.userPrice.findUnique({ where: { userId_productId: { userId, productId: p.id } } }))?.amountMinor ?? null
-    : null;
+  const override = userId ? await resolveUserPrice(userId, p.id, channel) : null;
   const variants: VariantView[] = [];
   for (const v of p.variants) {
     const base = v.prices[0]?.amountMinor ?? null;

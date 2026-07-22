@@ -23,6 +23,8 @@ export interface SessionData {
     | "admin_p_editdesc"
     | "admin_api_name"
     | "admin_wallet_adj"
+    | "admin_price_user"
+    | "admin_price_amount"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"
@@ -48,6 +50,11 @@ export interface SessionData {
   };
   /** Name for an API key being created via the bot admin. */
   admApiName?: string;
+  /** Custom-pricing wizard state. */
+  priceProductId?: string;
+  priceUserId?: string;
+  priceUserLabel?: string;
+  priceAmountMinor?: number;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

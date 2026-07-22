@@ -25,7 +25,7 @@ export interface PricedLine {
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
-export async function priceCart(tx: Tx, userId: string, currency: Currency): Promise<PricedLine[]> {
+export async function priceCart(tx: Tx, userId: string, currency: Currency, channel: "DIRECT" | "API" = "DIRECT"): Promise<PricedLine[]> {
   const cart = await tx.cart.findUnique({
     where: { userId },
     include: {
@@ -43,9 +43,14 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency): Pro
   });
   if (!cart || cart.items.length === 0) throw new CoreError("CART_EMPTY");
 
-  // VIP per-user price overrides (by product) for this user.
-  const overrides = await tx.userPrice.findMany({ where: { userId } });
-  const overrideByProduct = new Map(overrides.map((o) => [o.productId, o.amountMinor]));
+  // VIP per-user price overrides (by product) for this user, for this channel.
+  // A channel-specific price (DIRECT/API) wins over a BOTH price.
+  const overrides = await tx.userPrice.findMany({ where: { userId, channel: { in: [channel, "BOTH"] } } });
+  const overrideByProduct = new Map<string, number>();
+  for (const o of overrides) {
+    const cur = overrideByProduct.get(o.productId);
+    if (cur === undefined || o.channel === channel) overrideByProduct.set(o.productId, o.amountMinor);
+  }
 
   return cart.items.map((item) => {
     const v = item.variant;

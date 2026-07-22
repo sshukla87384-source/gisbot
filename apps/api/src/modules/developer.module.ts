@@ -44,7 +44,7 @@ export class DeveloperController {
 
   @Scopes("catalog:read")
   @Get("products")
-  async products(@Query() query: Record<string, string>) {
+  async products(@Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     const page = Math.max(1, Number.parseInt(query.page ?? "1", 10) || 1);
     return listProducts({
       currency: currencyOf(query),
@@ -52,14 +52,16 @@ export class DeveloperController {
       search: query.search,
       categoryId: query.categoryId,
       featuredOnly: query.featured === "true",
+      userId: req.apiKey?.ownerUserId ?? undefined,
+      channel: "API",
     });
   }
 
   @Scopes("catalog:read")
   @Get("products/:id")
-  async product(@Param("id") id: string, @Query() query: Record<string, string>) {
+  async product(@Param("id") id: string, @Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     try {
-      return await getProductView(id, currencyOf(query));
+      return await getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API");
     } catch {
       throw notFound("Product");
     }
@@ -67,9 +69,9 @@ export class DeveloperController {
 
   @Scopes("catalog:read")
   @Get("products/:id/stock")
-  async stock(@Param("id") id: string, @Query() query: Record<string, string>) {
+  async stock(@Param("id") id: string, @Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     try {
-      const p = await getProductView(id, currencyOf(query));
+      const p = await getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API");
       return {
         productId: p.id,
         name: p.name,
@@ -130,7 +132,7 @@ export class DeveloperController {
     try {
       await clearCart(userId);
       await addToCart(userId, variantId, quantity);
-      const r = await checkoutWithWallet(userId);
+      const r = await checkoutWithWallet(userId, "API");
       return {
         orderNumber: r.orderNumber,
         status: r.status,

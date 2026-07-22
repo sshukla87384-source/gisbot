@@ -34,7 +34,7 @@ export interface CheckoutResult {
   pendingManualItems: number;
 }
 
-export async function checkoutWithWallet(userId: string): Promise<CheckoutResult> {
+export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
 
   return prisma.$transaction(
@@ -46,7 +46,7 @@ export async function checkoutWithWallet(userId: string): Promise<CheckoutResult
       if (!wallet) throw new CoreError("WALLET_NOT_FOUND");
 
       // 2) Re-price cart from live rows in the wallet currency.
-      const lines = await priceCart(tx, userId, wallet.currency);
+      const lines = await priceCart(tx, userId, wallet.currency, channel);
       const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
       if (wallet.balanceMinor < BigInt(totalMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
 

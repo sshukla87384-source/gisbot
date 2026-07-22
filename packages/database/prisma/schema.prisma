@@ -346,15 +346,22 @@ model Session {
   @@index([userId])
 }
 
+enum PriceChannel {
+  BOTH   // applies to bot direct purchase AND the developer API
+  DIRECT // bot / in-app direct purchase only
+  API    // developer API purchases only
+}
+
 model UserPrice {
-  id          String   @id @default(cuid())
+  id          String       @id @default(cuid())
   userId      String
   productId   String
-  amountMinor Int      // VIP override price (major units × 100), shown in the user's currency
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  amountMinor Int          // override price (major units × 100), charged in the user's currency
+  channel     PriceChannel @default(BOTH)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
-  @@unique([userId, productId])
+  @@unique([userId, productId, channel])
   @@index([userId])
 }
 

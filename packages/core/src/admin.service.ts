@@ -343,25 +343,35 @@ export async function setVip(userId: string, isVip: boolean): Promise<void> {
   await prisma.user.update({ where: { id: userId }, data: { isVip } });
 }
 
-export async function setUserPrice(userId: string, productId: string, amountMinor: number): Promise<void> {
+export type PriceChannel = "BOTH" | "DIRECT" | "API";
+
+export async function setUserPrice(userId: string, productId: string, amountMinor: number, channel: PriceChannel = "BOTH"): Promise<void> {
   await prisma.userPrice.upsert({
-    where: { userId_productId: { userId, productId } },
-    create: { userId, productId, amountMinor },
+    where: { userId_productId_channel: { userId, productId, channel } },
+    create: { userId, productId, amountMinor, channel },
     update: { amountMinor },
   });
   await invalidate("cat:*");
 }
 
-export async function removeUserPrice(userId: string, productId: string): Promise<void> {
-  await prisma.userPrice.deleteMany({ where: { userId, productId } });
+export async function removeUserPrice(userId: string, productId: string, channel?: PriceChannel): Promise<void> {
+  await prisma.userPrice.deleteMany({ where: { userId, productId, ...(channel ? { channel } : {}) } });
   await invalidate("cat:*");
 }
 
-export async function listUserPrices(userId: string): Promise<Array<{ productId: string; productName: string; amountMinor: number }>> {
+export async function listUserPrices(userId: string): Promise<Array<{ productId: string; productName: string; amountMinor: number; channel: PriceChannel }>> {
   const rows = await prisma.userPrice.findMany({ where: { userId } });
   const products = await prisma.product.findMany({ where: { id: { in: rows.map((r) => r.productId) } }, select: { id: true, name: true } });
   const nameOf = new Map(products.map((p) => [p.id, p.name]));
-  return rows.map((r) => ({ productId: r.productId, productName: nameOf.get(r.productId) ?? r.productId, amountMinor: r.amountMinor }));
+  return rows.map((r) => ({ productId: r.productId, productName: nameOf.get(r.productId) ?? r.productId, amountMinor: r.amountMinor, channel: r.channel as PriceChannel }));
+}
+
+/** All per-user custom prices set for one product (for the admin product view). */
+export async function listProductUserPrices(productId: string): Promise<Array<{ userId: string; label: string; amountMinor: number; channel: PriceChannel }>> {
+  const rows = await prisma.userPrice.findMany({ where: { productId }, orderBy: { updatedAt: "desc" } });
+  const users = await prisma.user.findMany({ where: { id: { in: rows.map((r) => r.userId) } }, select: { id: true, telegramHandle: true, firstName: true, telegramId: true } });
+  const labelOf = new Map(users.map((u) => [u.id, u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId))]));
+  return rows.map((r) => ({ userId: r.userId, label: labelOf.get(r.userId) ?? r.userId, amountMinor: r.amountMinor, channel: r.channel as PriceChannel }));
 }
 
 /** Set the default store price (INR + derived USD) for all variants of a product. */
