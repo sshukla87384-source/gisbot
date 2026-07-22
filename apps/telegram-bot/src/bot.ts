@@ -128,31 +128,40 @@ export function createBot(): Bot<Ctx> {
     await next();
   });
 
+  // Telegram rejects messages with custom emoji the bot doesn't own. Strip
+  // <tg-emoji> tags back to their fallback glyph so the message still sends.
+  const stripEmoji = (html: string): string => html.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, "$1");
+
   const render = async (ctx: Ctx, view: View, edit: boolean): Promise<void> => {
     const opts = { parse_mode: "HTML" as const, reply_markup: view.kb };
-    // A photo message can't be produced by editing a text message, so image
-    // cards are always sent fresh (with the text as the caption).
+    const cap = (t: string) => (t.length > 1024 ? `${t.slice(0, 1021)}…` : t);
     if (view.photo) {
-      const caption = view.text.length > 1024 ? `${view.text.slice(0, 1021)}…` : view.text;
       try {
-        await ctx.replyWithPhoto(view.photo, { caption, parse_mode: "HTML", reply_markup: view.kb });
+        await ctx.replyWithPhoto(view.photo, { caption: cap(view.text), parse_mode: "HTML", reply_markup: view.kb });
         return;
-      } catch {
-        // Bad/broken image URL → fall back to a plain text card.
-        await ctx.reply(view.text, opts);
+      } catch (e) {
+        // Retry without custom emoji first (bot may not own them), then plain.
+        if (e instanceof GrammyError && e.description.includes("CUSTOM_EMOJI")) {
+          try { await ctx.replyWithPhoto(view.photo, { caption: cap(stripEmoji(view.text)), parse_mode: "HTML", reply_markup: view.kb }); return; } catch { /* fall through */ }
+        }
+        await ctx.reply(stripEmoji(view.text), opts).catch(() => ctx.reply(view.text.replace(/<[^>]+>/g, "")));
         return;
       }
     }
-    if (edit && ctx.callbackQuery?.message) {
-      try {
-        await ctx.editMessageText(view.text, opts);
-      } catch (e) {
-        // "message is not modified" is benign; anything else falls through to a fresh send.
-        if (e instanceof GrammyError && e.description.includes("message is not modified")) return;
-        await ctx.reply(view.text, opts);
+    const send = async (text: string): Promise<void> => {
+      if (edit && ctx.callbackQuery?.message) {
+        await ctx.editMessageText(text, opts);
+      } else {
+        await ctx.reply(text, opts);
       }
-    } else {
-      await ctx.reply(view.text, opts);
+    };
+    try {
+      await send(view.text);
+    } catch (e) {
+      if (e instanceof GrammyError && e.description.includes("message is not modified")) return;
+      // Most likely an unowned custom emoji — retry with tg-emoji stripped.
+      try { await send(stripEmoji(view.text)); }
+      catch { await ctx.reply(stripEmoji(view.text), opts).catch(() => ctx.reply(view.text.replace(/<[^>]+>/g, ""))); }
     }
   };
 
