@@ -472,6 +472,14 @@ export function createBot(): Bot<Ctx> {
     const route = `${ns}:${action}`;
     const user = ctx.user;
 
+    // Prevent double-submits on payment actions (rapid taps / concurrent webhooks).
+    const isPay = route.startsWith("ord:pay");
+    if (isPay) {
+      const locked = await getRedis().set(`paylock:${user.id}`, "1", "EX", 60, "NX");
+      if (!locked) { await ctx.answerCallbackQuery({ text: "⏳ Already processing your order…" }); return; }
+      await ctx.editMessageReplyMarkup().catch(() => undefined); // remove buttons so it can't be tapped again
+    }
+
     try {
       if (ns === "adm") {
         await handleAdminCallback(ctx, action, args);
@@ -886,6 +894,8 @@ export function createBot(): Bot<Ctx> {
       const copy = isCoreError(e) ? (ERROR_COPY[e.code] ?? "Something went wrong.") : "Something went wrong.";
       await ctx.answerCallbackQuery({ text: copy, show_alert: true }).catch(() => undefined);
       if (!isCoreError(e)) throw e;
+    } finally {
+      if (isPay) await getRedis().del(`paylock:${user.id}`).catch(() => undefined);
     }
   });
 
