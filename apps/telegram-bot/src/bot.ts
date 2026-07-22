@@ -5,6 +5,9 @@ import {
   changeQty,
   checkoutWithWallet,
   greetName,
+  applyCouponToCart,
+  removeCouponFromCart,
+  couponReason,
   clearCart,
   createGatewayCheckout,
   createBinanceManualCheckout,
@@ -39,6 +42,7 @@ import {
   setStoreDefaultPrice,
   type DeliveredSecret,
 } from "@gis/core";
+import type { Currency } from "@gis/database";
 import {
   PRODUCT_DEEPLINK_PREFIX,
   intArg,
@@ -160,7 +164,16 @@ export function createBot(): Bot<Ctx> {
     }
     // Standalone single emoji → Telegram plays a fullscreen animation for the user.
     if (config.CELEBRATION_EMOJI) await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
-    const welcomeText = `${t(ctx.user.locale, "welcome", { name: escapeHtml(ctx.user.firstName ?? "friend"), store: config.STORE_NAME })}\n${t(ctx.user.locale, "tagline")}`;
+    const who = greetName(ctx.user);
+    const welcomeLines = [
+      `👋 <b>Welcome, ${who}!</b> 🙏`,
+      `It's a real pleasure to have you at <b>${escapeHtml(config.STORE_NAME)}</b>. We're honoured to serve you.`,
+      `<i>Digital products · instant delivery · best prices.</i>`,
+    ];
+    if (ctx.session.isNewUser) {
+      welcomeLines.push("", "💱 Your currency is set to <b>USD</b> — you can switch anytime from ⚙️ the menu.");
+    }
+    const welcomeText = welcomeLines.join("\n");
     const emojiPrefix = config.CUSTOM_EMOJI_ID ? `<tg-emoji emoji-id="${config.CUSTOM_EMOJI_ID}">✨</tg-emoji> ` : "";
     try {
       await ctx.reply(`${emojiPrefix}${welcomeText}`, { parse_mode: "HTML" });
@@ -168,11 +181,7 @@ export function createBot(): Bot<Ctx> {
       // Telegram rejects custom emoji the bot doesn't own — fall back to plain text.
       await ctx.reply(welcomeText, { parse_mode: "HTML" });
     }
-    // First-time users: let them pick their preferred currency (defaults to USD).
-    if (ctx.session.isNewUser) {
-      ctx.session.isNewUser = false;
-      return render(ctx, views.currencyView(ctx.user), false);
-    }
+    ctx.session.isNewUser = false;
     return render(ctx, await views.menuView(ctx.user), false);
   });
   bot.command("menu", async (ctx) => render(ctx, await views.menuView(ctx.user), false));
@@ -423,6 +432,13 @@ export function createBot(): Bot<Ctx> {
       ctx.session.lastSearch = q;
       return render(ctx, await views.searchResultsView(ctx.user, q, 1), false);
     }
+    if (awaiting === "coupon_code") {
+      const code = ctx.message.text.trim().slice(0, 32);
+      const res = await applyCouponToCart(ctx.user.id, code, ctx.user.currency as Currency);
+      if (res.ok) await ctx.reply(`✅ Coupon <b>${escapeHtml(res.code ?? code)}</b> applied — you save <b>${fmt(res.discountMinor ?? 0, ctx.user.currency)}</b>! 🎉`, { parse_mode: "HTML" });
+      else await ctx.reply(`❌ ${couponReason(res.reason ?? "INVALID")}`);
+      return render(ctx, await views.checkoutSummaryView(ctx.user), false);
+    }
     if (awaiting === "ticket") {
       const ticket = await createTicket(ctx.user.id, "OTHER", ctx.message.text.trim().slice(0, 2000));
       return ctx.reply(`🎫 Ticket <b>#${ticket.ticketNumber}</b> created. Support will reply here.`, {
@@ -540,6 +556,16 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.cartViewKb(user), true);
           break;
         case "crt:checkout":
+          await render(ctx, await views.checkoutSummaryView(user), true);
+          break;
+        case "crt:coupon":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "coupon_code";
+          await ctx.reply("🎟 Send your <b>coupon code</b> to apply a discount:", { parse_mode: "HTML" });
+          break;
+        case "crt:couponrm":
+          await removeCouponFromCart(user.id);
+          await ctx.answerCallbackQuery({ text: "Coupon removed" });
           await render(ctx, await views.checkoutSummaryView(user), true);
           break;
 

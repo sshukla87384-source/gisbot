@@ -5,6 +5,7 @@ import {
   getReferralStats,
   getWallet,
   getButtonConfig,
+  getCartCoupon,
   listCategories,
   listOrders,
   listOrderItems,
@@ -207,23 +208,29 @@ export async function cartViewKb(user: BotUser): Promise<View> {
 }
 
 export async function checkoutSummaryView(user: BotUser): Promise<View> {
-  const [view, wallet] = await Promise.all([
+  const [view, wallet, coupon] = await Promise.all([
     getCartView(user.id, user.currency as Currency),
     getWallet(user.id),
+    getCartCoupon(user.id, user.currency as Currency),
   ]);
+  const discount = coupon?.discountMinor ?? 0;
+  const payable = Math.max(0, view.subtotalMinor - discount);
   const gateways = listEnabledProviders(user.currency);
-  const enough = wallet.balanceMinor >= BigInt(view.subtotalMinor);
+  const enough = wallet.balanceMinor >= BigInt(payable);
   const lines = [
     header(`🛒 ${bold("Checkout")}`),
     "",
     cartText(view),
+    ...(coupon ? [`🎟 Coupon <b>${escapeHtml(coupon.code)}</b>: −${fmt(discount, view.currency)}`, `💳 <b>Total to pay: ${fmt(payable, view.currency)}</b>`] : []),
     "",
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>`,
     gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
+  if (coupon) kb.add(sbtn(`🎟 ${coupon.code} applied — ✖️ Remove`, cb("crt", "couponrm"), "primary")).row();
+  else kb.add(sbtn("🎟 Apply coupon", cb("crt", "coupon"), "primary")).row();
   if (view.allAvailable && enough) {
-    kb.add(sbtn(`💰 Pay ${fmt(view.subtotalMinor, view.currency)} from Wallet`, cb("ord", "paywallet"), "success")).row();
+    kb.add(sbtn(`💰 Pay ${fmt(payable, view.currency)} from Wallet`, cb("ord", "paywallet"), "success")).row();
   } else if (view.allAvailable && wallet.balanceMinor > 0n) {
     kb.add(sbtn("➕ Add funds to Wallet", cb("wal", "topup"), "primary")).row();
   }

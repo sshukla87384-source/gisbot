@@ -3,6 +3,7 @@ import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -58,10 +59,13 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
       data: { status: "CANCELLED", cancelledAt: new Date() },
     });
     const lines = await priceCart(tx, userId, user.currency);
-    const totalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
+    const subtotalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
+    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+    const discountMinor = coupon?.discountMinor ?? 0;
+    const totalMinor = Math.max(0, subtotalMinor - discountMinor);
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
-      data: { orderNumber, userId, status: "PENDING_PAYMENT", currency: user.currency, subtotalMinor: totalMinor, totalMinor, expiresAt },
+      data: { orderNumber, userId, status: "PENDING_PAYMENT", currency: user.currency, subtotalMinor, discountMinor, couponId: coupon?.couponId ?? null, totalMinor, expiresAt },
     });
     for (const line of lines) {
       const isUnitStocked = line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT";
@@ -78,6 +82,7 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
         });
       }
     }
+    if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
     return { orderId: order.id, orderNumber, totalMinor };
   });
   await enqueueAdminAlert(
@@ -100,7 +105,10 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
       data: { status: "CANCELLED", cancelledAt: new Date() },
     });
     const lines = await priceCart(tx, userId, user.currency);
-    const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+    const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+    const discountMinor = coupon?.discountMinor ?? 0;
+    const totalMinor = Math.max(0, subtotalMinor - discountMinor);
     const usdt = toUsdtAmount(totalMinor, user.currency);
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
@@ -109,7 +117,9 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
         userId,
         status: "PENDING_PAYMENT",
         currency: user.currency,
-        subtotalMinor: totalMinor,
+        subtotalMinor,
+        discountMinor,
+        couponId: coupon?.couponId ?? null,
         totalMinor,
         expiresAt,
         binanceAsset: "USDT",
@@ -145,6 +155,7 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
         after: { orderNumber, totalMinor, currency: user.currency },
       },
     });
+    if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
     return { orderId: order.id, orderNumber, totalMinor, binanceAmount: usdt };
   });
 

@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret } from "@gis/shared";
 import { notifyManualOrder } from "./manual-pay.service.js";
+import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { assignAccountSlot, assignLicenseKey, priceCart } from "./assign.js";
 
 /**
@@ -48,7 +49,10 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
 
       // 2) Re-price cart from live rows in the wallet currency.
       const lines = await priceCart(tx, userId, wallet.currency, channel);
-      const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+      const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+      const coupon = await resolveCartCouponTx(tx, userId, wallet.currency, subtotalMinor);
+      const discountMinor = coupon?.discountMinor ?? 0;
+      const totalMinor = Math.max(0, subtotalMinor - discountMinor);
       if (wallet.balanceMinor < BigInt(totalMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
 
       // 3) Create order.
@@ -59,12 +63,15 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
           userId,
           status: "PAID",
           currency: wallet.currency,
-          subtotalMinor: totalMinor,
+          subtotalMinor,
+          discountMinor,
+          couponId: coupon?.couponId ?? null,
           walletUsedMinor: totalMinor,
           totalMinor: 0, // nothing owed via gateway
           paidAt: new Date(),
         },
       });
+      if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
 
       // 4) Items — inventory-backed quantities expand to unit items so the
       //    1:1 unique inventory↔item constraint can do its job.

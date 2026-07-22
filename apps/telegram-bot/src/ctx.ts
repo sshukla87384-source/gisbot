@@ -37,6 +37,7 @@ export interface SessionData {
     | "api_key_name"
     | "upi_ref"
     | "buy_qty"
+    | "coupon_code"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
