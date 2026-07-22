@@ -29,6 +29,8 @@ import {
   adminReplaceOrderItem,
   getReferralConfig,
   setReferralRate,
+  setBnplLimit,
+  getBnplStatus,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -160,6 +162,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("🔤 Rename buttons", cb("adm", "btns")).row()
     .text("🔑 Change passcode", cb("adm", "chpass")).row()
     .text("🎁 Referral %", cb("adm", "refrates")).row()
+    .text("🕒 BNPL limit", cb("adm", "bnpl")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
 }
@@ -526,6 +529,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   switch (action) {
     case "home": return sendPanel(ctx, true);
     case "sales": return salesView(ctx);
+    case "bnpl":
+      ctx.session.awaiting = "admin_bnpl";
+      await askStep(ctx, "🕒 Set a customer's <b>Pay Later (BNPL) limit</b>.\nSend: <code>&lt;@user or id&gt; &lt;amount&gt;</code> in their currency.\nExample: <code>@john 50</code> (or <code>0</code> to disable).");
+      return;
     case "refrates": return refRatesView(ctx);
     case "refset":
       ctx.session.awaiting = id === "repeat" ? "admin_ref_repeat" : "admin_ref_first";
@@ -1041,6 +1048,19 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
     await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_bnpl") {
+    const parts = text.trim().split(/\s+/);
+    const identifier = parts[0] ?? "";
+    const amt = Number.parseFloat(parts[1] ?? "");
+    if (!identifier || !Number.isFinite(amt) || amt < 0) { await askStep(ctx, "Format: <@user or id> <amount>. Example: @john 50"); ctx.session.awaiting = "admin_bnpl"; return true; }
+    const u = await resolveUserByTelegramId(identifier);
+    if (!u) { await ctx.reply("❌ User not found (they must have used the bot)."); return true; }
+    await setBnplLimit(u.id, Math.round(amt * 100));
+    const st = await getBnplStatus(u.id);
+    await ctx.reply(`✅ BNPL limit for ${escapeHtml(u.label)} set to <b>${(st.limitMinor / 100).toFixed(2)} ${st.currency}</b> (owed: ${(st.outstandingMinor / 100).toFixed(2)}).`, { parse_mode: "HTML" });
+    await sendPanel(ctx, false);
     return true;
   }
   if (awaiting === "admin_ref_first" || awaiting === "admin_ref_repeat") {

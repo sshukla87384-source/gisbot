@@ -33,6 +33,7 @@ export interface SessionData {
     | "admin_newpass"
     | "admin_ref_first"
     | "admin_ref_repeat"
+    | "admin_bnpl"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"

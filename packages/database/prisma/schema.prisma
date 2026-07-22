@@ -240,6 +240,8 @@ model User {
   twoFactorEnabled Boolean  @default(false)
 
   referralCode   String   @unique @default(cuid())
+  bnplLimitMinor Int      @default(0) // Buy-Now-Pay-Later credit limit (user currency)
+  bnplOutstandingMinor Int @default(0) // current BNPL amount owed
   referredById   String?
   referredBy     User?    @relation("Referrals", fields: [referredById], references: [id])
   referrals      User[]   @relation("Referrals")
@@ -681,6 +683,7 @@ model Order {
   subtotalMinor  Int
   discountMinor  Int         @default(0)
   walletUsedMinor Int        @default(0)
+  bnplMinor       Int        @default(0) // amount put on BNPL credit
   totalMinor     Int // payable via gateway after wallet
   couponId       String?
   coupon         Coupon?     @relation(fields: [couponId], references: [id])

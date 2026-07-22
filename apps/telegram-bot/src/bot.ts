@@ -4,6 +4,8 @@ import {
   adjustWallet,
   changeQty,
   checkoutWithWallet,
+  checkoutWithBnpl,
+  repayBnpl,
   greetName,
   applyCouponToCart,
   removeCouponFromCart,
@@ -602,6 +604,27 @@ export function createBot(): Bot<Ctx> {
           if (nudge) await ctx.reply(nudge, { parse_mode: "HTML" });
           break;
         }
+        case "ord:paybnpl": {
+          await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
+          await vipAnimation(ctx);
+          try {
+            const result = await checkoutWithBnpl(user.id);
+            await ctx.reply(
+              successCard("Order Placed — Pay Later", [
+                `✅ Placed on 🕒 Pay Later (BNPL)`,
+                `📦 Order <b>${result.orderNumber}</b>`,
+                `🕒 Added to your BNPL balance: ${fmt(result.totalMinor, result.currency)}`,
+                `🙏 Thank you so much, ${greetName(user)} — repay anytime from 💰 Wallet.`,
+              ]),
+              { parse_mode: "HTML" },
+            );
+            await deliverAll(ctx, result.deliveries, result.orderNumber);
+            if (result.pendingManualItems > 0) await ctx.reply(`🕐 ${result.pendingManualItems} item(s) are being prepared (~12 h).`);
+          } catch {
+            await ctx.reply("❌ Couldn't place on Pay Later — your BNPL limit may be exceeded. Try another payment method.");
+          }
+          break;
+        }
         case "ord:paygw": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating payment link…" });
           const gw = await createGatewayCheckout(user.id, args[0] ?? "");
@@ -782,6 +805,16 @@ export function createBot(): Bot<Ctx> {
             ].join("\n"),
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I have deposited — enter Order ID", "wal:freetxn").row().text("🏠 Menu", "mnu:home") },
           );
+          break;
+        }
+        case "wal:bnplrepay": {
+          await ctx.answerCallbackQuery({ text: "Processing…" });
+          try {
+            const r = await repayBnpl(user.id);
+            if (r.repaidMinor > 0) await ctx.reply(`✅ Repaid <b>${fmt(r.repaidMinor, r.currency)}</b> from your wallet. Remaining BNPL: <b>${fmt(r.outstandingMinor, r.currency)}</b>.`, { parse_mode: "HTML" });
+            else await ctx.reply("Nothing to repay, or your wallet balance is 0. Top up first.");
+          } catch { await ctx.reply("Couldn't repay — add wallet funds first."); }
+          await render(ctx, await views.walletView(user), false);
           break;
         }
         case "wal:freetxn":

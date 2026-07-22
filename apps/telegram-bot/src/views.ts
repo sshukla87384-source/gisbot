@@ -6,6 +6,7 @@ import {
   getWallet,
   getButtonConfig,
   getCartCoupon,
+  getBnplStatus,
   listCategories,
   listOrders,
   listOrderItems,
@@ -208,10 +209,11 @@ export async function cartViewKb(user: BotUser): Promise<View> {
 }
 
 export async function checkoutSummaryView(user: BotUser): Promise<View> {
-  const [view, wallet, coupon] = await Promise.all([
+  const [view, wallet, coupon, bnpl] = await Promise.all([
     getCartView(user.id, user.currency as Currency),
     getWallet(user.id),
     getCartCoupon(user.id, user.currency as Currency),
+    getBnplStatus(user.id),
   ]);
   const discount = coupon?.discountMinor ?? 0;
   const payable = Math.max(0, view.subtotalMinor - discount);
@@ -234,6 +236,9 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   } else if (view.allAvailable && wallet.balanceMinor > 0n) {
     const need = payable - Number(wallet.balanceMinor);
     kb.add(sbtn(`💰 Wallet ${fmt(wallet.balanceMinor, wallet.currency)} · ➕ Add ${fmt(need, view.currency)} to pay`, cb("wal", "topup"), "primary")).row();
+  }
+  if (view.allAvailable && bnpl.limitMinor > 0 && bnpl.availableMinor >= payable && payable > 0) {
+    kb.add(sbtn(`🕒 Pay Later — ${fmt(payable, view.currency)} (BNPL)`, cb("ord", "paybnpl"), "primary")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {
@@ -289,19 +294,24 @@ export async function vaultView(user: BotUser, page: number): Promise<View> {
 }
 
 export async function walletView(user: BotUser): Promise<View> {
-  const wallet = await getWallet(user.id);
+  const [wallet, bnpl] = await Promise.all([getWallet(user.id), getBnplStatus(user.id)]);
   const kb = new InlineKeyboard()
     .text("➕ Top up", cb("wal", "topup")).text("📜 History", cb("wal", "hist", 1)).row();
+  if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
   backToMenuRow(kb);
-  return {
-    text: [
-      header(`💰 ${bold("Wallet")}`),
-      `Balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+  const lines = [
+    header(`💰 ${bold("Wallet")}`),
+    `Balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+  ];
+  if (bnpl.limitMinor > 0) {
+    lines.push(
       "",
-      "Top up instantly with Binance (USDT) — tap ➕ Top up. You can also pay orders directly at checkout.",
-    ].join("\n"),
-    kb,
-  };
+      `🕒 <b>Pay Later (BNPL)</b>`,
+      `Limit: <b>${fmt(bnpl.limitMinor, bnpl.currency)}</b> · Owed: <b>${fmt(bnpl.outstandingMinor, bnpl.currency)}</b> · Available: <b>${fmt(bnpl.availableMinor, bnpl.currency)}</b>`,
+    );
+  }
+  lines.push("", "Top up instantly with Binance (USDT) — tap ➕ Top up. You can also pay orders directly at checkout.");
+  return { text: lines.join("\n"), kb };
 }
 
 export async function walletHistoryView(user: BotUser, page: number): Promise<View> {
