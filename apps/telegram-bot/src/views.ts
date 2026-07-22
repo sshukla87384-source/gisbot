@@ -232,7 +232,8 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   if (view.allAvailable && enough) {
     kb.add(sbtn(`💰 Pay ${fmt(payable, view.currency)} from Wallet`, cb("ord", "paywallet"), "success")).row();
   } else if (view.allAvailable && wallet.balanceMinor > 0n) {
-    kb.add(sbtn("➕ Add funds to Wallet", cb("wal", "topup"), "primary")).row();
+    const need = payable - Number(wallet.balanceMinor);
+    kb.add(sbtn(`💰 Wallet ${fmt(wallet.balanceMinor, wallet.currency)} · ➕ Add ${fmt(need, view.currency)} to pay`, cb("wal", "topup"), "primary")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {

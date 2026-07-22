@@ -588,7 +588,6 @@ export function createBot(): Bot<Ctx> {
               `🕐 ${result.pendingManualItems} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
             );
           }
-          await render(ctx, await views.menuView(user), false);
           break;
         }
         case "ord:paygw": {
