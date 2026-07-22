@@ -28,6 +28,7 @@ export interface SessionData {
     | "admin_pin"
     | "admin_pubprice_usd"
     | "admin_pubprice_inr"
+    | "admin_manual_key"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"
@@ -59,6 +60,7 @@ export interface SessionData {
   priceUserLabel?: string;
   priceAmountMinor?: number;
   pubUsdMinor?: number;
+  admManualItemId?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

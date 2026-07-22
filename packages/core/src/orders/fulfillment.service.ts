@@ -4,6 +4,7 @@ import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./assign.js";
+import { notifyManualOrder } from "./manual-pay.service.js";
 
 /**
  * Webhook-driven fulfillment (PRD §6.1 steps 6-13, Security doc §5).
@@ -245,6 +246,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
 
       return {
         kind: "fulfilled" as const,
+        orderId: order.id,
         orderNumber: order.orderNumber,
         totalMinor: order.totalMinor,
         currency: order.currency,
@@ -296,6 +298,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         );
       }
     }
+    if (outcome.pendingManual > 0) await notifyManualOrder(outcome.orderId);
     if (outcome.email && loadConfig().RESEND_API_KEY) {
       await enqueueEmail({
         to: outcome.email,

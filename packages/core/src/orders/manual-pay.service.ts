@@ -1,6 +1,6 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
-import { CoreError, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
+import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, priceCart, type DeliveryLine } from "./assign.js";
 
@@ -216,7 +216,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       await tx.order.update({ where: { id: order.id }, data: { status: finalStatus, ...(finalStatus === "COMPLETED" ? { completedAt: new Date() } : {}) } });
       await tx.auditLog.create({ data: { actorId, actorType: "ADMIN", action: "order.confirm.manual", entityType: "Order", entityId: order.id, after: { finalStatus, delivered: deliveries.length } } });
 
-      return { kind: "done" as const, telegramId: order.user.telegramId, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
+      return { kind: "done" as const, orderId: order.id, telegramId: order.user.telegramId, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
     },
     { timeout: 20_000 },
   );
@@ -239,5 +239,75 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🕐 ${outcome.pendingManual} item(s) are being prepared (~12 h).`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
   }
+  if (outcome.pendingManual > 0) await notifyManualOrder(outcome.orderId);
   return { status: outcome.finalStatus, delivered: outcome.deliveries.length };
+}
+
+// ───────────── Manual-delivery: admin notify + fulfill ─────────────
+
+/** Notify bot admins that an order has manual items awaiting hand-delivery, with a Deliver button. */
+export async function notifyManualOrder(orderId: string): Promise<void> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { user: { select: { telegramHandle: true, firstName: true, telegramId: true } }, items: true },
+  });
+  if (!order) return;
+  const pending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null);
+  if (pending.length === 0) return;
+  const buyer = order.user.telegramHandle ? `@${order.user.telegramHandle}` : (order.user.firstName ?? String(order.user.telegramId));
+  const lines = [
+    "📦 <b>New manual-delivery order!</b>",
+    `🧾 Order <b>${order.orderNumber}</b>`,
+    `👤 Buyer: ${buyer}`,
+    "",
+    ...pending.map((i) => `• ${i.productNameSnap}${i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${i.variantNameSnap}`}`),
+    "",
+    "Tap Deliver to send the key/details now.",
+  ];
+  await enqueueAdminAlert(lines.join("\n"), [{ text: "📦 Deliver now", callbackData: cb("adm", "deliver", orderId), style: "primary" }]);
+}
+
+export interface PendingManualItem { id: string; productName: string; variantName: string; }
+
+/** List the still-unfulfilled manual items of an order (for the admin deliver view). */
+export async function listPendingManualItems(orderId: string): Promise<{ orderNumber: string; items: PendingManualItem[] }> {
+  const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
+  if (!order) return { orderNumber: "?", items: [] };
+  const items = order.items
+    .filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null)
+    .map((i) => ({ id: i.id, productName: i.productNameSnap, variantName: i.variantNameSnap }));
+  return { orderNumber: order.orderNumber, items };
+}
+
+export interface ManualFulfillResult { ok: boolean; reason?: string; orderNumber?: string; remaining?: number; completed?: boolean; }
+
+/** Admin hand-delivers one manual item: store the secret, mark fulfilled, deliver to the customer with a thank-you + instructions. */
+export async function manualFulfillItem(orderItemId: string, secretText: string): Promise<ManualFulfillResult> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const item = await prisma.orderItem.findUnique({
+    where: { id: orderItemId },
+    include: { order: { include: { user: { select: { telegramId: true } } } }, variant: { include: { product: true } } },
+  });
+  if (!item) return { ok: false, reason: "NOT_FOUND" };
+  if (item.fulfilledAt) return { ok: false, reason: "ALREADY_DELIVERED", orderNumber: item.order.orderNumber };
+
+  const clean = secretText.trim();
+  if (!clean) return { ok: false, reason: "EMPTY" };
+  const payload = { kind: "LICENSE_KEY", key: clean };
+  await prisma.orderItem.update({
+    where: { id: item.id },
+    data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+  });
+
+  // Recompute remaining manual items on the order.
+  const remainingItems = await prisma.orderItem.count({ where: { orderId: item.orderId, fulfillmentMode: "MANUAL", fulfilledAt: null } });
+  const allDone = (await prisma.orderItem.count({ where: { orderId: item.orderId, fulfilledAt: null } })) === 0;
+  if (allDone) await prisma.order.update({ where: { id: item.orderId }, data: { status: "COMPLETED", completedAt: new Date() } });
+
+  const tgId = item.order.user.telegramId;
+  if (tgId !== null) {
+    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide));
+    await enqueueTelegramMessage(tgId, `🎁 <b>Thank you for your purchase!</b>\nWe truly appreciate your business at ${loadConfig().STORE_NAME}. 💙`);
+  }
+  return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
 }

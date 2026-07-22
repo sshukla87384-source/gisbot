@@ -20,7 +20,8 @@ export interface FulfillmentJob {
 }
 export interface OutboxButton {
   text: string;
-  url: string;
+  url?: string;
+  callbackData?: string;
   style?: "primary" | "success" | "danger";
 }
 export interface OutboxJob {
@@ -123,14 +124,15 @@ export const BOT_ADMIN_MEMBERS_KEY = "botadmin:members";
  * Alert admins (best-effort): the configured ADMIN_ALERT_CHAT_ID plus every
  * admin currently logged in to the in-bot panel, each de-duplicated.
  */
-export async function enqueueAdminAlert(text: string): Promise<void> {
+export async function enqueueAdminAlert(text: string, buttons?: OutboxButton[]): Promise<void> {
   const sent = new Set<string>();
+  const opts = buttons && buttons.length > 0 ? { buttons } : {};
   const chatId = loadConfig().ADMIN_ALERT_CHAT_ID;
-  if (chatId) { await enqueueTelegramMessage(chatId, text); sent.add(String(chatId)); }
+  if (chatId) { await enqueueTelegramMessage(chatId, text, opts); sent.add(String(chatId)); }
   try {
     const members = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY);
     for (const m of members) {
-      if (m && !sent.has(m)) { await enqueueTelegramMessage(m, text); sent.add(m); }
+      if (m && !sent.has(m)) { await enqueueTelegramMessage(m, text, opts); sent.add(m); }
     }
   } catch {
     // Redis unavailable — the configured channel (if any) still got it.

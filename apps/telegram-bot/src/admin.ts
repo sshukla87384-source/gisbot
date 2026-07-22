@@ -12,6 +12,9 @@ import {
   listProductUserPrices,
   setProductPinRank,
   setProductPublicPrice,
+  setProductFulfillmentMode,
+  listPendingManualItems,
+  manualFulfillItem,
   type PriceChannel,
   createApiKey,
   listApiKeys,
@@ -231,6 +234,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
@@ -316,6 +320,20 @@ async function groupsView(ctx: Ctx): Promise<void> {
 
 const chLabel = (c: PriceChannel): string => c === "DIRECT" ? "🛒 Direct only" : c === "API" ? "🔌 API only" : "🛒🔌 Both";
 
+async function manualDeliverView(ctx: Ctx, orderId: string): Promise<void> {
+  const { orderNumber, items } = await listPendingManualItems(orderId);
+  const kb = new InlineKeyboard();
+  for (const it of items) {
+    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
+    kb.text(`📤 Deliver — ${it.productName}${vn}`, cb("adm", "dlv", it.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "orders"));
+  const text = items.length
+    ? `📦 <b>Manual delivery</b> — Order <b>${escapeHtml(orderNumber)}</b>\n\nTap an item to send its key/details to the customer.`
+    : `✅ Order <b>${escapeHtml(orderNumber)}</b> — nothing left to deliver.`;
+  await show(ctx, text, kb, true);
+}
+
 async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
   const prods = await listProductsBrief(200);
   const p = prods.find((x) => x.id === productId);
@@ -381,6 +399,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "💵 New <b>USD</b> price for everyone (applies to all variants), e.g. <code>9.99</code>. Send <code>0</code> to skip USD.");
       return;
     case "cprice": return customPriceView(ctx, id);
+    case "pmode": {
+      const prods = await listProductsBrief(200);
+      const cur = prods.find((x) => x.id === id)?.fulfillmentMode ?? "AUTOMATIC";
+      const next = cur === "MANUAL" ? "AUTOMATIC" : "MANUAL";
+      await setProductFulfillmentMode(id, next);
+      await ctx.reply(`⚙️ Delivery mode set to <b>${next}</b>.`, { parse_mode: "HTML" });
+      return productView(ctx, id);
+    }
+    case "deliver": return manualDeliverView(ctx, id);
+    case "dlv":
+      ctx.session.admManualItemId = id;
+      ctx.session.awaiting = "admin_manual_key";
+      await askStep(ctx, "🔑 Send the key / login details to deliver to the customer now:");
+      return;
     case "cpin":
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_pin";
@@ -752,6 +784,17 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_manual_key") {
+    const itemId = ctx.session.admManualItemId ?? ""; ctx.session.admManualItemId = undefined;
+    const r = await manualFulfillItem(itemId, text);
+    if (!r.ok) {
+      const msg = r.reason === "ALREADY_DELIVERED" ? "That item was already delivered." : r.reason === "EMPTY" ? "Please send the key/details (it was empty)." : "Could not deliver — item not found.";
+      await ctx.reply(`❌ ${msg}`);
+      return true;
+    }
+    await ctx.reply(`✅ Delivered to the customer with a thank-you + instructions.${r.completed ? `\n🎉 Order <b>${escapeHtml(r.orderNumber ?? "")}</b> is now complete.` : `\n${r.remaining} item(s) still pending on order <b>${escapeHtml(r.orderNumber ?? "")}</b>.`}`, { parse_mode: "HTML" });
+    return true;
+  }
   if (awaiting === "admin_pubprice_usd") {
     const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
     ctx.session.pubUsdMinor = Number.isFinite(val) && val > 0 ? Math.round(val * 100) : 0;

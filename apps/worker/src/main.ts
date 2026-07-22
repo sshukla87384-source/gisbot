@@ -42,9 +42,14 @@ async function main(): Promise<void> {
     async (job) => {
       try {
         const styled = config.BUTTON_STYLES_ENABLED;
-        const reply_markup = job.data.buttons && job.data.buttons.length > 0
-          ? { inline_keyboard: [job.data.buttons.map((b) => (styled && b.style ? { text: b.text, url: b.url, style: b.style } : { text: b.text, url: b.url }))] }
+        const btns = job.data.buttons && job.data.buttons.length > 0
+          ? job.data.buttons.map((b) => {
+              const base: Record<string, unknown> = b.callbackData ? { text: b.text, callback_data: b.callbackData } : { text: b.text, url: b.url };
+              if (styled && b.style) base.style = b.style;
+              return base;
+            })
           : undefined;
+        const reply_markup = btns ? ({ inline_keyboard: [btns] } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
         let msg;
         if (job.data.document) {
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;

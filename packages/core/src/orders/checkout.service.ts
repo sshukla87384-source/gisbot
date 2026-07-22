@@ -1,6 +1,7 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret } from "@gis/shared";
+import { notifyManualOrder } from "./manual-pay.service.js";
 import { assignAccountSlot, assignLicenseKey, priceCart } from "./assign.js";
 
 /**
@@ -37,8 +38,8 @@ export interface CheckoutResult {
 export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
 
-  return prisma.$transaction(
-    async (tx) => {
+  const result = await prisma.$transaction(
+    async (tx): Promise<CheckoutResult> => {
       // 1) Lock wallet (serializes concurrent checkouts per user).
       const wallets = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
         SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
@@ -201,4 +202,6 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
     },
     { timeout: 15_000 },
   );
+  if (result.pendingManualItems > 0) await notifyManualOrder(result.orderId);
+  return result;
 }

@@ -154,13 +154,13 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; name: string; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number }
+export interface ProductBrief { id: string; name: string; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string }
 
 export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
   const rows = await prisma.product.findMany({
     where: { deletedAt: null }, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], take: limit,
   });
-  return rows.map((p) => ({ id: p.id, name: p.name, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank }));
+  return rows.map((p) => ({ id: p.id, name: p.name, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode }));
 }
 
 /** Pin a product to the top / a chosen priority. Higher rank = higher in the list; 0 = unpinned. */
@@ -185,6 +185,11 @@ export async function setProductDescription(productId: string, description: stri
 
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { imageUrl } });
+}
+
+export async function setProductFulfillmentMode(productId: string, mode: "AUTOMATIC" | "MANUAL"): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { fulfillmentMode: mode } });
+  await invalidate("cat:*");
 }
 
 export async function setProductStatus(productId: string, status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED"): Promise<void> {
