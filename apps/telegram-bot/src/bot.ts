@@ -408,8 +408,9 @@ export function createBot(): Bot<Ctx> {
           "",
           `Scope: catalog:read`,
           `Base URL: <code>${base}</code>`,
-          `Docs: ${base}/docs`,
-          `Send it as the <code>X-API-Key</code> header.`,
+          `📖 Full docs: ${base}`,
+          `🔧 Interactive reference: ${base}/docs`,
+          `Send it as <code>Authorization: Bearer &lt;key&gt;</code> or the <code>X-API-Key</code> header.`,
         ].join("\n"),
         { parse_mode: "HTML" },
       );

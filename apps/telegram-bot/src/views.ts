@@ -417,8 +417,8 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   const lines = [
     "🧑‍💻 <b>Developer API</b>",
     "",
-    "Create a personal, read-only key to access the public catalog API.",
-    "Docs & base URL are shown after you create a key.",
+    "Create a personal API key to browse the catalog, check your balance, and place orders from your wallet.",
+    "Full documentation, base URL and examples are shown after you create a key.",
     "",
   ];
   const active = keys.filter((k) => !k.revokedAt);
