@@ -266,7 +266,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
-  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
+  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
   await show(ctx, text, kb, true);
 }
 
