@@ -185,9 +185,10 @@ export function buildDeliveryText(
 
 /** Friendly display name for greetings: @handle, else first name, else "there". */
 export function greetName(u: { telegramHandle?: string | null; firstName?: string | null }): string {
-  if (u.telegramHandle) return `@${u.telegramHandle}`;
   const f = (u.firstName ?? "").trim();
-  return f ? f.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "there";
+  if (f) return f.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (u.telegramHandle) return `@${u.telegramHandle}`;
+  return "there";
 }
 
 /** Warm, respectful, personalised thank-you sent after a successful purchase. */

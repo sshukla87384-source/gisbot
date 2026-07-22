@@ -11,9 +11,8 @@ export const fmt = (minor: number | bigint, currency: string): string =>
 
 export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: number): string {
   const loc = user.locale;
-  const who = user.telegramHandle
-    ? `@${user.telegramHandle}`
-    : (user.firstName ?? "").trim().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") || "there";
+  const _fn = (user.firstName ?? "").trim().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const who = _fn || (user.telegramHandle ? `@${user.telegramHandle}` : "there");
   return [
     header(`${e("diamond")} ${bold(loadConfig().STORE_NAME)}`),
     `👋 <b>Welcome back, ${who}!</b>`,
