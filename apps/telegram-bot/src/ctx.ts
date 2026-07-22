@@ -52,7 +52,9 @@ export interface SessionData {
   /** In-progress product being created via the admin wizard. */
   admDraft?: {
     name?: string;
+    nameHtml?: string;
     description?: string;
+    descriptionHtml?: string;
     type?: string;
     categoryId?: string;
     priceInrMinor?: number;

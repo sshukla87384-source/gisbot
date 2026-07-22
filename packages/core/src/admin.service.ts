@@ -324,7 +324,9 @@ export const WIZARD_TYPES: Record<string, { type: string; fulfillmentMode: "AUTO
 /** Create a product with one "Standard" variant + prices, as a DRAFT. */
 export async function createProductFull(input: {
   name: string;
+  nameHtml?: string;
   description?: string;
+  descriptionHtml?: string;
   typeKey: string;
   categoryId?: string;
   priceInrMinor: number;
@@ -340,7 +342,9 @@ export async function createProductFull(input: {
       data: {
         slug,
         name: input.name.slice(0, 200),
+        nameHtml: input.nameHtml?.slice(0, 500) || null,
         description: input.description?.slice(0, 4000) || null,
+        descriptionHtml: input.descriptionHtml?.slice(0, 8000) || null,
         type: spec.type as never,
         status: "DRAFT",
         categoryId,

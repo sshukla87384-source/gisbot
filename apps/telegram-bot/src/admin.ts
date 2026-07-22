@@ -884,7 +884,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   if (awaiting === "admin_p_name") {
     const name = text.slice(0, 200);
     if (!name) { await askStep(ctx, "Please send a product name."); ctx.session.awaiting = "admin_p_name"; return true; }
-    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), name };
+    const nameHtml = hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : undefined;
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), name, nameHtml };
     ctx.session.awaiting = "admin_p_desc";
     await askStep(ctx, `<b>New product · Step 2/6</b>\nSend a <b>description</b> for “${name}” (or send <code>-</code> to skip):`);
     return true;
@@ -892,7 +893,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
 
   if (awaiting === "admin_p_desc") {
     const desc = text === "-" ? "" : text.slice(0, 4000);
-    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), description: desc };
+    const descriptionHtml = desc && hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : undefined;
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), description: desc, descriptionHtml };
     await wizardTypeStep(ctx); // step 3 is button-driven
     return true;
   }
@@ -925,7 +927,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     const { productId } = await createProductFull({
       name: d.name,
+      nameHtml: d.nameHtml,
       description: d.description,
+      descriptionHtml: d.descriptionHtml,
       typeKey: d.type,
       categoryId: d.categoryId,
       priceInrMinor: d.priceInrMinor,
