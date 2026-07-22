@@ -67,6 +67,7 @@ export interface SessionData {
   upiOrderId?: string;
   /** Variant the user is buying; awaiting quantity. */
   buyVariantId?: string;
+  buyProductId?: string;
   buyMaxQty?: number;
   /** True on the update where the user was just created. */
   isNewUser?: boolean;

@@ -155,7 +155,7 @@ export function createBot(): Bot<Ctx> {
     const payload = ctx.match.trim();
     if (payload.startsWith(PRODUCT_DEEPLINK_PREFIX)) {
       const productId = await getProductIdBySlug(payload.slice(PRODUCT_DEEPLINK_PREFIX.length));
-      if (productId) return render(ctx, await views.productView(ctx.user, productId), false);
+      if (productId) { ctx.session.buyProductId = productId; return render(ctx, await views.productView(ctx.user, productId), false); }
     }
     // Standalone single emoji → Telegram plays a fullscreen animation for the user.
     if (config.CELEBRATION_EMOJI) await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
@@ -472,6 +472,7 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.productListView(user, args[0] ?? "", intArg(args, 1, 1)), true);
           break;
         case "shp:prod":
+          ctx.session.buyProductId = args[0] ?? "";
           await render(ctx, await views.productView(user, args[0] ?? ""), true);
           break;
 
@@ -490,7 +491,7 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery();
           const vId = args[0] ?? "";
           const stock = await getVariantAvailable(vId);
-          await render(ctx, views.quantityPickerView(vId, stock), true);
+          await render(ctx, views.quantityPickerView(vId, stock, ctx.session.buyProductId), true);
           break;
         }
         case "crt:qty": {

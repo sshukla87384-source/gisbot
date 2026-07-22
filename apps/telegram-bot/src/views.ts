@@ -19,7 +19,7 @@ import { PROVIDER_LABELS, listEnabledProviders } from "@gis/payments";
 import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
-import { backToMenuRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
+import { backToMenuRow, navRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
 import { LOCALES, t } from "./i18n.js";
 import { header, bold, num, HR, e } from "./premium.js";
 import { sbtn } from "./keyboard.js";
@@ -170,7 +170,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       kb.add(sbtn(`❌ ${bl} — out of stock`, cb("mnu", "noop"), "danger")).row();
     }
   }
-  backToMenuRow(kb);
+  navRow(kb, cb("shp", "home", 1));
   return { text: lines.join("\n"), kb, photo: p.imageUrl || undefined };
 }
 
@@ -200,7 +200,7 @@ export async function cartViewKb(user: BotUser): Promise<View> {
   } else {
     kb.text("🛍 Go shopping", cb("shp", "home", 1)).row();
   }
-  backToMenuRow(kb);
+  navRow(kb, cb("shp", "home", 1));
   return { text: cartText(view), kb };
 }
 
@@ -236,7 +236,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       kb.add(sbtn("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi"), "success")).row();
     }
   }
-  backToMenuRow(kb);
+  navRow(kb, cb("crt", "view"));
   return { text: lines.join("\n"), kb };
 }
 
@@ -443,7 +443,7 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
   };
 }
 
-export function quantityPickerView(variantId: string, stock: number): View {
+export function quantityPickerView(variantId: string, stock: number, productId?: string): View {
   const presets = [1, 2, 5, 10, 20, 50].filter((q) => q <= stock);
   if (stock < 1_000_000 && stock > 0 && !presets.includes(stock)) presets.push(stock); // exact max
   presets.sort((a, b) => a - b);
@@ -455,7 +455,7 @@ export function quantityPickerView(variantId: string, stock: number): View {
   });
   kb.row();
   kb.text("✏️ Custom amount", cb("crt", "qtycustom", variantId)).row();
-  backToMenuRow(kb);
+  navRow(kb, productId ? cb("shp", "prod", productId) : cb("shp", "home", 1));
   const cap = stock >= 1_000_000 ? "" : ` (max ${stock} available)`;
   return { text: `🔢 <b>How many do you want?</b>${cap}`, kb };
 }

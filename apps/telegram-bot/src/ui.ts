@@ -44,6 +44,11 @@ export function backToMenuRow(kb: InlineKeyboard): InlineKeyboard {
   return kb.row().text("🏠 Menu", cb("mnu", "home"));
 }
 
+/** A "◀️ Back" (one step) + "🏠 Menu" row for drill-down views. */
+export function navRow(kb: InlineKeyboard, backData: string): InlineKeyboard {
+  return kb.row().text("◀️ Back", backData).text("🏠 Menu", cb("mnu", "home"));
+}
+
 /** ◀️ x/y ▶️ pagination row (Bot UX doc §1). */
 export function paginationRow(
   kb: InlineKeyboard,
