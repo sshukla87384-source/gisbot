@@ -376,16 +376,36 @@ export function settingsView(user: BotUser): View {
 }
 
 export function helpView(): View {
-  const kb = new InlineKeyboard();
+  const kb = new InlineKeyboard()
+    .add(sbtn("🛍 Shop", cb("shp", "home", 1), "success")).row()
+    .text("💰 Wallet", cb("wal", "view")).text("📦 My Orders", cb("ord", "list", 1)).row()
+    .text("🎫 Support", cb("sup", "home")).row();
   backToMenuRow(kb);
   return {
     text: [
-      "❓ <b>Help</b>",
+      header(`❓ ${bold("Help & Commands")}`),
       "",
-      "• Browse 🛍 Shop or 📂 Categories, tap a product, add to 🛒 Cart.",
-      "• Pay by UPI, crypto, or wallet — instant items are delivered in seconds.",
-      "• Delivered keys live forever in 🔑 My Licenses.",
-      "• Problems? Open a 🎫 Support ticket — a human replies here in chat.",
+      `🧭 ${bold("Commands you can type")}`,
+      "/start — open the main menu",
+      "/menu — main menu",
+      "/shop — browse all products",
+      "/cart — view your cart",
+      "/orders — your orders & delivered items",
+      "/wallet — balance, deposit & history",
+      "/support — get help / open a ticket",
+      "/help — this help screen",
+      "",
+      `🛒 ${bold("How to buy")}`,
+      "1. Open 🛍 Shop and tap a product.",
+      "2. Tap ⚡ Buy and choose the quantity.",
+      "3. Pay from your 💰 Wallet, or with Binance (USDT) / UPI.",
+      "4. Instant products arrive here in seconds and are saved in 🔑 My Licenses.",
+      "",
+      `💰 ${bold("Wallet")}`,
+      "Deposit any amount with Binance (USDT) and pay instantly at checkout. Open 💰 Wallet → ➕ Top up.",
+      "",
+      `🆘 ${bold("Need a human?")}`,
+      "Tap 🎫 Support to open a ticket — we reply right here in chat.",
     ].join("\n"),
     kb,
   };

@@ -725,20 +725,28 @@ export function createBot(): Bot<Ctx> {
           if (!uid) { await ctx.reply("Wallet deposits aren't configured yet."); break; }
           await ctx.reply(
             [
-              "💳 <b>Add funds — Binance (USDT)</b>",
+              "💳 <b>Add funds to your Wallet — Binance (USDT)</b>",
+              "━━━━━━━━━━━━━━━━━━━━",
+              "Deposit <b>any amount</b> — it is credited to your wallet automatically after we verify your Order ID.",
               "",
-              `Send <b>any amount</b> of USDT to Binance UID: <code>${uid}</code>`,
+              "<b>Step 1.</b> Open the <b>Binance</b> app → <b>Pay</b> → <b>Send</b>.",
+              "<b>Step 2.</b> Send USDT to our Binance UID:",
+              `        👉 <code>${uid}</code>  (tap to copy)`,
+              "<b>Step 3.</b> Enter the amount you want to deposit and confirm the transfer.",
+              "<b>Step 4.</b> Open the completed payment in Binance and copy its <b>Order ID</b> (the long number in the transaction details).",
+              "<b>Step 5.</b> Come back here, tap the button below, and paste the <b>Order ID</b>.",
               "",
-              "Then tap the button and paste your Binance <b>Order ID</b> — your wallet is credited with the exact amount received.",
+              "✅ We read the exact USDT amount you sent and credit your wallet instantly.",
+              "⚠️ Send only <b>USDT</b>. Each Order ID can be used once.",
             ].join("\n"),
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I've deposited — enter Order ID", "wal:freetxn").row().text("🏠 Menu", "mnu:home") },
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I have deposited — enter Order ID", "wal:freetxn").row().text("🏠 Menu", "mnu:home") },
           );
           break;
         }
         case "wal:freetxn":
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "wallet_free_txn";
-          await ctx.reply("🔎 Paste your Binance <b>Order ID</b> to credit your deposit:", { parse_mode: "HTML" });
+          await ctx.reply("🔎 Paste your Binance <b>Order ID</b> now (from the completed payment in Binance → Pay → History). We will verify it and credit your wallet instantly:", { parse_mode: "HTML" });
           break;
         case "api:home":
           await render(ctx, await views.apiKeysView(user), true);
