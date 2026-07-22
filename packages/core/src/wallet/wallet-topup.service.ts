@@ -88,3 +88,47 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
   await prisma.walletTopup.update({ where: { id: topup.id }, data: { status: "CREDITED", creditedAt: new Date() } });
   return { ok: true, newBalanceMinor, amountMinor: topup.amountMinor, currency: topup.currency };
 }
+
+/**
+ * FREE-AMOUNT deposit: the customer sends any USDT amount to the UID, then
+ * submits their Binance Order ID. We look it up, read the ACTUAL amount paid,
+ * convert to the user's wallet currency, and credit it. Dedup by transaction.
+ */
+export async function creditFreeTopup(userId: string, txnId: string): Promise<TopupVerify> {
+  const cfg = loadConfig();
+  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) return { ok: false, reason: "NO_API" };
+  const clean = txnId.trim();
+  const [dupTopup, dupOrder] = await Promise.all([
+    prisma.walletTopup.findFirst({ where: { binanceTxnId: clean }, select: { id: true } }),
+    prisma.order.findFirst({ where: { binanceTxnId: clean }, select: { id: true } }),
+  ]);
+  if (dupTopup || dupOrder) return { ok: false, reason: "ALREADY_USED" };
+
+  let txns;
+  try {
+    txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+  } catch {
+    return { ok: false, reason: "NOT_FOUND" };
+  }
+  const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
+  if (!txn || txn.currency !== "USDT" || Math.abs(parseFloat(txn.amount)) <= 0) return { ok: false, reason: "NOT_FOUND" };
+
+  const usdt = Math.abs(parseFloat(txn.amount));
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const creditMinor = user.currency === "USD"
+    ? Math.round(usdt * 100)
+    : Math.round(usdt * cfg.BINANCE_USDT_INR_RATE * 100);
+
+  const topup = await prisma.walletTopup.create({
+    data: {
+      userId, amountMinor: creditMinor, currency: user.currency, binanceAsset: "USDT",
+      binanceAmount: usdt.toFixed(2), binanceTxnId: clean, status: "CREDITED",
+      creditedAt: new Date(), expiresAt: new Date(),
+    },
+  });
+  const newBalanceMinor = await adjustWallet({
+    userId, amountMinor: BigInt(creditMinor), type: "DEPOSIT",
+    note: `Binance deposit (txn ${clean})`, idempotencyKey: `topup:${topup.id}`,
+  });
+  return { ok: true, newBalanceMinor, amountMinor: creditMinor, currency: user.currency };
+}

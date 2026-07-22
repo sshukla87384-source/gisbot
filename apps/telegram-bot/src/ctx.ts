@@ -25,6 +25,7 @@ export interface SessionData {
     | "admin_wallet_adj"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
+    | "wallet_free_txn"
     | "api_key_name"
     | "upi_ref"
     | "buy_qty"

@@ -10,6 +10,7 @@ import {
   verifyBinanceByTxnId,
   createWalletTopup,
   verifyTopupByTxn,
+  creditFreeTopup,
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
@@ -340,6 +341,21 @@ export function createBot(): Bot<Ctx> {
       const notified = await notifyAdminsForApproval(ctx, orderId, "UPI", ref);
       if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref}.`).catch(() => undefined);
       return ctx.reply("✅ Thanks! We've received your UPI reference. Your order will be delivered right after we verify — usually within minutes.");
+    }
+    if (awaiting === "wallet_free_txn") {
+      const txn = ctx.message.text.trim().slice(0, 128);
+      const r = await creditFreeTopup(ctx.user.id, txn);
+      if (r.ok) return ctx.reply(`✅ Deposited ${fmt(r.amountMinor, r.currency)} to your wallet! New balance: <b>${fmt(r.newBalanceMinor, r.currency)}</b>.`, { parse_mode: "HTML" });
+      const msg: Record<string, string> = {
+        NOT_FOUND: "❌ That Order ID wasn't found in Binance Pay history.",
+        ALREADY_USED: "❌ That Order ID was already used.",
+        NO_API: "⚠️ Auto-verify is off — we've logged it and support will credit you.",
+        AMOUNT_MISMATCH: "❌ Could not read the amount.",
+        NOT_PENDING: "❌ Could not process.",
+        WRONG_USER: "❌ That deposit isn't yours.",
+      };
+      await createTicket(ctx.user.id, "PAYMENT_ISSUE", `Wallet deposit — Order ID ${txn} (${r.ok ? "ok" : r.reason}).`).catch(() => undefined);
+      return ctx.reply(msg[r.reason] ?? "❌ Could not verify — support will check.");
     }
     if (awaiting === "wallet_topup_amount") {
       const rupees = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
@@ -699,16 +715,26 @@ export function createBot(): Bot<Ctx> {
         case "wal:hist":
           await render(ctx, await views.walletHistoryView(user, intArg(args, 0, 1)), true);
           break;
-        case "wal:topup":
+        case "wal:topup": {
           await ctx.answerCallbackQuery();
-          ctx.session.awaiting = "wallet_topup_amount";
-          await ctx.reply(`💳 How much do you want to add? Send an amount in ${user.currency} (e.g. <code>500</code>):`, { parse_mode: "HTML" });
+          const uid = config.BINANCE_PAY_UID;
+          if (!uid) { await ctx.reply("Wallet deposits aren't configured yet."); break; }
+          await ctx.reply(
+            [
+              "💳 <b>Add funds — Binance (USDT)</b>",
+              "",
+              `Send <b>any amount</b> of USDT to Binance UID: <code>${uid}</code>`,
+              "",
+              "Then tap the button and paste your Binance <b>Order ID</b> — your wallet is credited with the exact amount received.",
+            ].join("\n"),
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I've deposited — enter Order ID", "wal:freetxn").row().text("🏠 Menu", "mnu:home") },
+          );
           break;
-        case "wal:topuptxn":
+        }
+        case "wal:freetxn":
           await ctx.answerCallbackQuery();
-          if (!ctx.session.walletTopupId) { await ctx.reply("This top-up expired. Tap ➕ Top up again."); break; }
-          ctx.session.awaiting = "wallet_topup_txn";
-          await ctx.reply("🔎 Paste your Binance <b>Order ID</b> to confirm the top-up:", { parse_mode: "HTML" });
+          ctx.session.awaiting = "wallet_free_txn";
+          await ctx.reply("🔎 Paste your Binance <b>Order ID</b> to credit your deposit:", { parse_mode: "HTML" });
           break;
         case "api:home":
           await render(ctx, await views.apiKeysView(user), true);

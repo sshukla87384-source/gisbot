@@ -222,6 +222,8 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   if (view.allAvailable && enough) {
     kb.add(sbtn(`💰 Pay ${fmt(view.subtotalMinor, view.currency)} from Wallet`, cb("ord", "paywallet"), "success")).row();
+  } else if (view.allAvailable && wallet.balanceMinor > 0n) {
+    kb.add(sbtn("➕ Add funds to Wallet", cb("wal", "topup"), "primary")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {
