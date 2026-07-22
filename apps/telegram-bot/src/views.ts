@@ -368,7 +368,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
 
 export async function supportHomeView(user: BotUser): Promise<View> {
   const tickets = await listTickets(user.id, 1);
-  const kb = new InlineKeyboard().text("🆕 New Ticket", cb("sup", "new")).row();
+  const kb = new InlineKeyboard().add(sbtn("💬 Chat with Support", cb("sup", "chat"), "success")).row().text("🆕 New Ticket", cb("sup", "new")).row();
   for (const t of tickets.items.slice(0, 5)) {
     kb.text(`#${t.ticketNumber} · ${t.status} · ${t.subject.slice(0, 20)}`, cb("mnu", "noop")).row();
   }
@@ -381,7 +381,8 @@ export async function supportHomeView(user: BotUser): Promise<View> {
       "• Your delivered items live in 📦 My Orders — tap an order to view them.",
       "• Pay with UPI, Binance (USDT) or your wallet.",
       "",
-      "Need a human? Tap 🆕 New Ticket below.",
+      "💬 Tap <b>Chat with Support</b> to message our team live — we reply right here.",
+      "Or open a 🆕 Ticket for a tracked request.",
     ].join("\n"),
     kb,
   };

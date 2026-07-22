@@ -34,6 +34,7 @@ import {
   getCustomEmojiRegistry,
   setCustomEmojiEntry,
   removeCustomEmojiEntry,
+  dmUser,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -557,6 +558,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   switch (action) {
     case "home": return sendPanel(ctx, true);
     case "sales": return salesView(ctx);
+    case "dm":
+      ctx.session.dmTarget = id;
+      ctx.session.awaiting = "admin_dm_reply";
+      await askStep(ctx, "↩️ Type your reply — it will be sent to the customer as a Support message:");
+      return;
     case "emoji": return emojiRegistryView(ctx);
     case "emojiadd":
       ctx.session.awaiting = "admin_emoji_capture";
@@ -1086,6 +1092,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
     await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_dm_reply") {
+    const target = ctx.session.dmTarget ?? ""; ctx.session.dmTarget = undefined;
+    if (!target) { await ctx.reply("No customer selected."); return true; }
+    const ok = await dmUser(target, text.trim().slice(0, 3000));
+    await ctx.reply(ok ? "✅ Reply sent to the customer." : "❌ Couldn't reach that customer.");
     return true;
   }
   if (awaiting === "admin_emoji_capture") {

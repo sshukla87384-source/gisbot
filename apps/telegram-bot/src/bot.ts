@@ -26,6 +26,7 @@ import {
   createTicket,
   getProductIdBySlug,
   getRedis,
+  enqueueAdminAlert,
   removeItem,
   resolveTelegramUser,
   revealDelivery,
@@ -457,6 +458,19 @@ export function createBot(): Bot<Ctx> {
         parse_mode: "HTML",
       });
     }
+    if (awaiting === "support_chat") {
+      const msg = ctx.message.text.trim().slice(0, 2000);
+      const who = ctx.user.telegramHandle ? `@${ctx.user.telegramHandle}` : (ctx.user.firstName ?? String(ctx.from?.id ?? ""));
+      const safe = msg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      await enqueueAdminAlert(
+        `💬 <b>Support chat</b> — from ${escapeHtml(who)} (id <code>${ctx.from?.id}</code>):\n${safe}`,
+        [{ text: "↩️ Reply", callbackData: `adm:dm:${ctx.user.id}` }],
+      );
+      ctx.session.awaiting = "support_chat"; // stay in chat
+      return ctx.reply("✅ Sent to our team — we'll reply here shortly. (🔚 tap End chat to exit)", {
+        reply_markup: new InlineKeyboard().text("🔚 End chat", "sup:endchat"),
+      });
+    }
     // Don't pop the menu on random text — only /start, /menu or buttons open it.
     return ctx.reply("Tap /menu 🏠 to open the menu, or use /shop to browse.");
   });
@@ -861,6 +875,18 @@ export function createBot(): Bot<Ctx> {
         case "sup:new":
           ctx.session.awaiting = "ticket";
           await ctx.reply("🎫 Describe your issue in one message:");
+          break;
+        case "sup:chat":
+          ctx.session.awaiting = "support_chat";
+          await ctx.reply(
+            "💬 <b>Live Support Chat</b>\nType your message and our team will reply here. You can keep sending messages.\nTap 🔚 End chat when you're done.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔚 End chat", "sup:endchat") },
+          );
+          break;
+        case "sup:endchat":
+          ctx.session.awaiting = null;
+          await ctx.answerCallbackQuery({ text: "Chat ended" });
+          await render(ctx, await views.menuView(user), false);
           break;
 
         case "prf:view":

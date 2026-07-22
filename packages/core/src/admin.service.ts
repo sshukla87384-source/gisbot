@@ -566,3 +566,13 @@ export async function removeCustomEmojiEntry(name: string): Promise<void> {
   delete cur[name];
   await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
 }
+
+// ───────────── Support live chat relay ─────────────
+/** Deliver a support reply from an admin to a customer by user id. */
+export async function dmUser(userId: string, text: string): Promise<boolean> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { telegramId: true } });
+  if (!u?.telegramId) return false;
+  const safe = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  await enqueueTelegramMessage(u.telegramId, `💬 <b>Support</b>\n${safe}`);
+  return true;
+}
