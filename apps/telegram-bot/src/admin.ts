@@ -25,6 +25,8 @@ import {
   setAdminPasscode,
   isAdminPasscodeConfigured,
   getSalesDashboard,
+  adminRefundOrder,
+  adminReplaceOrderItem,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -217,6 +219,12 @@ async function orderView(ctx: Ctx, orderId: string): Promise<void> {
     kb.text("✅ Confirm payment", cb("adm", "confirm", o.id)).row();
     kb.text("🔎 Verify by Order ID", cb("adm", "txn", o.id)).row();
     kb.text("✖️ Cancel order", cb("adm", "cancel", o.id)).row();
+  }
+  if (["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK", "PARTIALLY_REFUNDED"].includes(o.status)) {
+    if (o.items.some((i) => i.type === "LICENSE_KEY" || i.type === "DIGITAL_ACCOUNT")) {
+      kb.text("🔄 Replace an item", cb("adm", "replace", o.id)).row();
+    }
+    kb.add(sbtn("↩️ Refund to wallet", cb("adm", "refund", o.id), "danger")).row();
   }
   kb.text("◀️ Back", cb("adm", "orders"));
   await show(ctx, lines.join("\n"), kb, true);
@@ -468,6 +476,18 @@ async function salesView(ctx: Ctx): Promise<void> {
   await show(ctx, text, new InlineKeyboard().text("↻ Refresh", cb("adm", "sales")).text("◀️ Back", cb("adm", "home")), true);
 }
 
+async function replaceItemsView(ctx: Ctx, orderId: string): Promise<void> {
+  const o = await getAdminOrder(orderId);
+  if (!o) { await orderView(ctx, orderId); return; }
+  const kb = new InlineKeyboard();
+  const auto = o.items.filter((i) => i.type === "LICENSE_KEY" || i.type === "DIGITAL_ACCOUNT");
+  for (const i of auto) {
+    kb.text(`🔄 ${i.name}${i.variant.trim().toLowerCase() === "standard" ? "" : ` · ${i.variant}`}`, cb("adm", "repl", i.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "ord", orderId));
+  await show(ctx, auto.length ? `🔄 <b>Replace an item</b> — order <b>${escapeHtml(o.orderNumber)}</b>\nTap the item to deliver a fresh one from stock.` : "No auto-delivery items to replace on this order.", kb, true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -486,6 +506,19 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   switch (action) {
     case "home": return sendPanel(ctx, true);
     case "sales": return salesView(ctx);
+    case "refund": {
+      const r = await adminRefundOrder(id, String(ctx.from?.id ?? ""));
+      if (r.ok) await ctx.reply(r.refundedMinor ? `↩️ Refunded ${fmt(r.refundedMinor, r.currency ?? "USD")} to the customer's wallet.` : "↩️ Order marked refunded (nothing was paid).");
+      else await ctx.reply(r.reason === "ALREADY" ? "Already refunded/cancelled." : "Order not found.");
+      return orderView(ctx, id);
+    }
+    case "replace": return replaceItemsView(ctx, id);
+    case "repl": {
+      const r = await adminReplaceOrderItem(id);
+      if (r.ok) await ctx.reply("🔄 Replacement delivered to the customer from stock. ✅");
+      else await ctx.reply(r.reason === "NO_STOCK" ? "❌ No stock available to replace with. Add stock keys first." : r.reason === "NOT_AUTOMATIC" ? "This item isn't an auto-delivery product." : "Item not found.");
+      return;
+    }
     case "logoutall": {
       const redis = getRedis();
       const members = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);

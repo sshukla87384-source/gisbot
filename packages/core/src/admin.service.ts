@@ -80,18 +80,21 @@ export async function listRecentOrders(limit = 10): Promise<OrderBrief[]> {
 }
 
 export async function getAdminOrder(orderId: string): Promise<
-  | (OrderBrief & { items: Array<{ name: string; variant: string; qty: number }>; userLabel: string })
+  | (OrderBrief & { items: Array<{ id: string; name: string; variant: string; qty: number; type: string; fulfilled: boolean }>; userLabel: string })
   | null
 > {
   const o = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { items: true, user: { select: { firstName: true, telegramHandle: true, telegramId: true } } },
+    include: {
+      items: { include: { variant: { include: { product: { select: { type: true } } } } } },
+      user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
+    },
   });
   if (!o) return null;
   return {
     id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, currency: o.currency,
     binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
-    items: o.items.map((i) => ({ name: i.productNameSnap, variant: i.variantNameSnap, qty: i.quantity })),
+    items: o.items.map((i) => ({ id: i.id, name: i.productNameSnap, variant: i.variantNameSnap, qty: i.quantity, type: i.variant.product.type, fulfilled: i.fulfilledAt !== null })),
     userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
   };
 }

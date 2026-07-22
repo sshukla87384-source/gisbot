@@ -329,3 +329,54 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   }
   return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
 }
+
+export interface ReplaceResult { ok: boolean; reason?: string }
+
+/**
+ * Admin action: replace a delivered AUTOMATIC item with a fresh unit from stock.
+ * Detaches the faulty key/account, assigns a new AVAILABLE one, and delivers it.
+ * Atomic — if there's no stock, nothing changes.
+ */
+export async function adminReplaceOrderItem(orderItemId: string): Promise<ReplaceResult> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const item = await prisma.orderItem.findUnique({
+    where: { id: orderItemId },
+    include: { order: { include: { user: { select: { telegramId: true } } } }, variant: { include: { product: true } } },
+  });
+  if (!item) return { ok: false, reason: "NOT_FOUND" };
+  const type = item.variant.product.type;
+  if (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT") return { ok: false, reason: "NOT_AUTOMATIC" };
+
+  try {
+    const payload = await prisma.$transaction(async (tx) => {
+      if (type === "LICENSE_KEY") {
+        // Detach the faulty key so the 1:1 slot is free, then assign a fresh one.
+        await tx.licenseKey.updateMany({ where: { orderItemId: item.id }, data: { orderItemId: null, status: "DISABLED" } });
+        const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, false);
+        return { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
+      }
+      // DIGITAL_ACCOUNT: free the old slot(s), then assign a fresh account.
+      const olds = await tx.accountAssignment.findMany({ where: { orderItemId: item.id } });
+      for (const a of olds) {
+        await tx.accountAssignment.delete({ where: { id: a.id } });
+        await tx.digitalAccount.update({ where: { id: a.accountId }, data: { usedSlots: { decrement: 1 }, status: "AVAILABLE" } }).catch(() => undefined);
+      }
+      const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, false);
+      return { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
+    });
+
+    await prisma.orderItem.update({
+      where: { id: item.id },
+      data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+    });
+    if (item.order.user.telegramId !== null) {
+      await enqueueTelegramMessage(
+        item.order.user.telegramId,
+        `🔄 <b>Replacement delivered</b>\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide)}`,
+      );
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "NO_STOCK" };
+  }
+}
