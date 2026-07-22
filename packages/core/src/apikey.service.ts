@@ -6,7 +6,7 @@ import { getRedis } from "./redis.js";
 const KEY_PREFIX = "gis_live_";
 
 /** Scopes a developer key can hold (read-only public API v1). */
-export const API_SCOPES = ["catalog:read", "orders:read", "analytics:read"] as const;
+export const API_SCOPES = ["catalog:read", "orders:read", "orders:write", "wallet:read", "analytics:read"] as const;
 export type ApiScope = (typeof API_SCOPES)[number];
 
 export interface CreatedApiKey {
@@ -45,6 +45,7 @@ export interface VerifiedApiKey {
   name: string;
   scopes: string[];
   rateLimitPerMin: number;
+  ownerUserId: string | null;
 }
 
 export async function verifyApiKey(raw: string): Promise<VerifiedApiKey | null> {
@@ -53,7 +54,7 @@ export async function verifyApiKey(raw: string): Promise<VerifiedApiKey | null> 
   const rec = await prisma.apiKey.findUnique({ where: { keyHash: sha256Hex(value) } });
   if (!rec || rec.revokedAt) return null;
   if (rec.expiresAt && rec.expiresAt.getTime() < Date.now()) return null;
-  return { id: rec.id, name: rec.name, scopes: rec.scopes, rateLimitPerMin: rec.rateLimitPerMin };
+  return { id: rec.id, name: rec.name, scopes: rec.scopes, rateLimitPerMin: rec.rateLimitPerMin, ownerUserId: rec.ownerUserId };
 }
 
 /** Fixed-window per-minute limiter in Redis. Returns true if within budget. */

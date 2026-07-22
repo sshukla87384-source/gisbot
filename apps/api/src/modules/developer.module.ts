@@ -1,8 +1,10 @@
-import { getProductView, listCategories, listProducts } from "@gis/core";
+import { addToCart, checkoutWithWallet, clearCart, getProductView, getWallet, listCategories, listProducts } from "@gis/core";
 import { prisma, type Currency } from "@gis/database";
-import { Controller, Get, Module, Param, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiSecurity, ApiTags } from "@nestjs/swagger";
-import { notFound } from "../common/errors.js";
+import { isCoreError } from "@gis/shared";
+import { z } from "zod";
+import { ApiError, forbidden, notFound } from "../common/errors.js";
 import { DeveloperApiGuard, Scopes, type DeveloperRequest } from "../common/developer.guard.js";
 import { Public } from "../common/permissions.decorator.js";
 
@@ -16,6 +18,12 @@ function currencyOf(q: unknown): Currency {
  * Base path: /api/v1/developer   ·   Docs: /api/v1/developer/docs
  * Auth: send your key as the `X-API-Key` header (or `Authorization: Bearer`).
  */
+
+const purchaseSchema = z.object({
+  variantId: z.string().min(1),
+  quantity: z.number().int().min(1).max(99).optional().default(1),
+});
+
 @ApiTags("developer")
 @ApiSecurity("apiKey")
 @Public()
@@ -78,9 +86,10 @@ export class DeveloperController {
 
   @Scopes("orders:read")
   @Get("orders/:orderNumber")
-  async order(@Param("orderNumber") orderNumber: string) {
-    const o = await prisma.order.findUnique({
-      where: { orderNumber },
+  async order(@Param("orderNumber") orderNumber: string, @Req() req: DeveloperRequest) {
+    const ownerId = req.apiKey?.ownerUserId ?? null;
+    const o = await prisma.order.findFirst({
+      where: { orderNumber, ...(ownerId ? { userId: ownerId } : {}) },
       include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true } } },
     });
     if (!o) throw notFound("Order");
@@ -93,6 +102,56 @@ export class DeveloperController {
       paidAt: o.paidAt,
       items: o.items.map((i) => ({ product: i.productNameSnap, variant: i.variantNameSnap, quantity: i.quantity })),
     };
+  }
+
+  /** Your wallet balance (the account this key is linked to). */
+  @Scopes("wallet:read")
+  @Get("wallet")
+  async wallet(@Req() req: DeveloperRequest) {
+    const userId = req.apiKey?.ownerUserId;
+    if (!userId) throw forbidden("This API key isn't linked to a user account.");
+    const w = await getWallet(userId);
+    return { balanceMinor: Number(w.balanceMinor), currency: w.currency };
+  }
+
+  /**
+   * Purchase a variant, paid from your wallet balance. Delivers instantly for
+   * auto-fulfilled products (secrets are returned in the response).
+   * Body: { "variantId": "...", "quantity": 1 }
+   */
+  @Scopes("orders:write")
+  @Post("orders")
+  async purchase(@Body() body: unknown, @Req() req: DeveloperRequest) {
+    const userId = req.apiKey?.ownerUserId;
+    if (!userId) throw forbidden("This API key isn't linked to a user account, so it can't purchase.");
+    const parsed = purchaseSchema.safeParse(body);
+    if (!parsed.success) throw new ApiError(400, "VALIDATION_FAILED", parsed.error.issues[0]?.message ?? "Invalid body.");
+    const { variantId, quantity } = parsed.data;
+    try {
+      await clearCart(userId);
+      await addToCart(userId, variantId, quantity);
+      const r = await checkoutWithWallet(userId);
+      return {
+        orderNumber: r.orderNumber,
+        status: r.status,
+        currency: r.currency,
+        totalMinor: r.totalMinor,
+        pendingManualItems: r.pendingManualItems,
+        items: r.deliveries.map((d) => ({
+          product: d.productName,
+          variant: d.variantName,
+          kind: d.kind,
+          secret: d.secret,
+          activationGuide: d.activationGuide,
+        })),
+      };
+    } catch (e) {
+      if (isCoreError(e)) {
+        const status = e.code === "INSUFFICIENT_BALANCE" ? 402 : 400;
+        throw new ApiError(status, e.code, e.message);
+      }
+      throw e;
+    }
   }
 }
 
