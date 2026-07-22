@@ -7,6 +7,7 @@ import {
   getButtonConfig,
   getCartCoupon,
   getBnplStatus,
+  getReferralConfig,
   listCategories,
   listOrders,
   listOrderItems,
@@ -330,19 +331,36 @@ export async function walletHistoryView(user: BotUser, page: number): Promise<Vi
 }
 
 export async function referralView(user: BotUser, botUsername: string): Promise<View> {
-  const stats = await getReferralStats(user.id);
+  const [stats, cfg] = await Promise.all([getReferralStats(user.id), getReferralConfig()]);
   const link = `https://t.me/${botUsername}?start=ref_${user.referralCode}`;
-  const kb = new InlineKeyboard();
+  const store = loadConfig().STORE_NAME;
+  const shareText = `🎁 Join ${store} — instant digital products at the best prices! Use my link:`;
+  const kb = new InlineKeyboard()
+    .url("📤 Share my link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`)
+    .row();
   backToMenuRow(kb);
   return {
     text: [
-      header(`👥 ${bold("Referral Program")}`),
+      header(`🎁 ${bold("Refer & Earn")}`),
       "",
-      `Your link:\n<code>${link}</code>`,
+      "Invite friends and earn <b>real wallet rewards</b> on everything they buy! 💸",
+      HR,
+      `🎯 <b>How it works</b>`,
+      "1️⃣ Share your personal link below.",
+      "2️⃣ Your friend taps it and starts the bot.",
+      "3️⃣ Every time they buy, you earn a % of their order — paid straight to your wallet.",
       "",
-      `Invited: <b>${stats.invited}</b> · Purchased: <b>${stats.purchased}</b> · Earned: <b>${fmt(stats.earnedMinor, user.currency)}</b>`,
+      `💰 <b>Reward scheme</b>`,
+      `• Friend's <b>first purchase</b>: you earn <b>${cfg.firstPct}%</b>`,
+      `• <b>Every purchase after that</b>: you earn <b>${cfg.repeatPct}%</b>`,
+      `• Rewards are held for <b>${cfg.holdHours}h</b> (anti-fraud), then auto-credited to your 💰 Wallet.`,
+      `• No limit — the more friends buy, the more you earn. Spend rewards on any product.`,
+      HR,
+      `📊 <b>Your progress</b>`,
+      `👥 Invited: <b>${num(stats.invited)}</b>  ·  🛍 Purchased: <b>${num(stats.purchased)}</b>  ·  💰 Earned: <b>${fmt(stats.earnedMinor, user.currency)}</b>`,
       "",
-      "Rewards are credited to your wallet after your friend's first purchase clears the 48 h hold.",
+      `🔗 <b>Your link</b> (tap to copy)`,
+      `<code>${link}</code>`,
     ].join("\n"),
     kb,
   };
@@ -414,7 +432,7 @@ export function helpView(): View {
       "/support — 🎫 help & live support",
       "/help — ❓ this guide",
       "",
-      `More on the menu: 👥 Referral (invite &amp; earn), 💱 Currency, 🌐 Language, 🧑‍💻 Developer API.`,
+      `More on the menu: 🎁 Refer &amp; Earn (invite friends, earn %), 💱 Currency, 🌐 Language, 🧑‍💻 Developer API.`,
       "",
       `🛒 ${bold("How to buy")}`,
       "1. Open 🛍 Shop and tap a product.",
