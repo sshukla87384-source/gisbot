@@ -110,7 +110,7 @@ export async function listProducts(opts: {
     const pages = Math.max(1, Math.ceil(total / size));
     const products = await prisma.product.findMany({
       where,
-      orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
+      orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
       skip: (page - 1) * size,
       take: size,
       include: {

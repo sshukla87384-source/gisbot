@@ -279,6 +279,12 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         `🎉 <b>Payment received!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${money}. Delivering now… 🚀`,
       );
       for (const d of outcome.deliveries) await enqueueTelegramMessage(d.telegramId, d.text);
+      if (outcome.deliveries.length > 0) {
+        await enqueueTelegramMessage(
+          outcome.telegramId,
+          `🎁 <b>Thank you for your purchase!</b>\nWe truly appreciate your business at ${loadConfig().STORE_NAME}. 💙`,
+        );
+      }
       if (outcome.pendingManual > 0) {
         await enqueueTelegramMessage(
           outcome.telegramId,

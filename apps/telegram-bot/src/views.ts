@@ -39,7 +39,7 @@ export async function menuView(user: BotUser): Promise<View> {
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
-  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 10, userId: user.id });
+  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;

@@ -10,6 +10,7 @@ import {
   setUserPrice,
   removeUserPrice,
   listProductUserPrices,
+  setProductPinRank,
   type PriceChannel,
   createApiKey,
   listApiKeys,
@@ -231,6 +232,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
+  kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
@@ -372,6 +374,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "prods": return productsView(ctx);
     case "prod": return productView(ctx, id);
     case "cprice": return customPriceView(ctx, id);
+    case "cpin":
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_pin";
+      await askStep(ctx, "📌 Send a priority number — <b>higher shows higher up</b> in the shop (e.g. <code>100</code> pins to the top). Send <code>0</code> to unpin.");
+      return;
     case "cpadd":
       ctx.session.priceProductId = id;
       ctx.session.priceUserId = undefined;
@@ -738,6 +745,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_pin") {
+    const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
+    const rank = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    if (!Number.isFinite(rank)) { await askStep(ctx, "Please send a whole number, e.g. 100 (or 0 to unpin)."); ctx.session.awaiting = "admin_pin"; return true; }
+    await setProductPinRank(pid, rank);
+    await ctx.reply(rank > 0 ? `📌 Pinned with priority <b>${rank}</b> — it now shows nearer the top.` : "📌 Unpinned — back to default order.", { parse_mode: "HTML" });
+    await productView(ctx, pid);
+    return true;
+  }
   if (awaiting === "admin_price_user") {
     const found = await resolveUserByTelegramId(text.trim());
     if (!found) { await askStep(ctx, "❌ No customer found. Send their @username or Telegram numeric ID (they must have used the bot)."); ctx.session.awaiting = "admin_price_user"; return true; }

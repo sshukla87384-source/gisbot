@@ -154,13 +154,19 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; name: string; status: string; iconEmoji: string | null; onSalePct: number | null }
+export interface ProductBrief { id: string; name: string; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number }
 
 export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
   const rows = await prisma.product.findMany({
-    where: { deletedAt: null }, orderBy: [{ status: "asc" }, { createdAt: "desc" }], take: limit,
+    where: { deletedAt: null }, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], take: limit,
   });
-  return rows.map((p) => ({ id: p.id, name: p.name, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp }));
+  return rows.map((p) => ({ id: p.id, name: p.name, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank }));
+}
+
+/** Pin a product to the top / a chosen priority. Higher rank = higher in the list; 0 = unpinned. */
+export async function setProductPinRank(productId: string, pinRank: number): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { pinRank: Math.max(0, Math.round(pinRank)) } });
+  await invalidate("cat:*");
 }
 
 export async function adminDeleteProduct(id: string): Promise<void> {

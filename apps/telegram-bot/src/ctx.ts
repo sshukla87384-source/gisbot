@@ -25,6 +25,7 @@ export interface SessionData {
     | "admin_wallet_adj"
     | "admin_price_user"
     | "admin_price_amount"
+    | "admin_pin"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"

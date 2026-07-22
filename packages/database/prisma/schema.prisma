@@ -487,6 +487,7 @@ model Product {
   announcedAt     DateTime? // set when auto-announced to bot users (dedupe)
   isFeatured      Boolean         @default(false)
   sortOrder       Int             @default(0)
+  pinRank         Int             @default(0) // higher = higher in the shop list; 0 = unpinned
   variants        ProductVariant[]
   couponsScoped   Coupon[]        @relation("CouponProducts")
   createdAt       DateTime        @default(now())
