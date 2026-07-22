@@ -109,3 +109,14 @@ export async function getReferralStats(userId: string): Promise<{
   ]);
   return { invited, purchased, earnedMinor: BigInt(rewards._sum.amountMinor ?? 0) };
 }
+
+/** "Share & earn" nudge shown after a successful purchase (null if not configurable). */
+export function referralNudgeMessage(referralCode: string | null | undefined, botUsername: string | null | undefined): string | null {
+  if (!botUsername || !referralCode) return null;
+  const link = `https://t.me/${botUsername}?start=ref_${referralCode}`;
+  return [
+    "💛 <b>Enjoyed your purchase? Share &amp; earn!</b>",
+    "Invite friends with your personal link and earn wallet rewards when they make their first purchase:",
+    `<code>${link}</code>`,
+  ].join("\n");
+}

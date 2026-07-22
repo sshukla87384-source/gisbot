@@ -8,6 +8,7 @@ import {
   applyCouponToCart,
   removeCouponFromCart,
   couponReason,
+  referralNudgeMessage,
   clearCart,
   createGatewayCheckout,
   createBinanceManualCheckout,
@@ -588,6 +589,8 @@ export function createBot(): Bot<Ctx> {
               `🕐 ${result.pendingManualItems} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
             );
           }
+          const nudge = referralNudgeMessage(user.referralCode, ctx.me.username);
+          if (nudge) await ctx.reply(nudge, { parse_mode: "HTML" });
           break;
         }
         case "ord:paygw": {

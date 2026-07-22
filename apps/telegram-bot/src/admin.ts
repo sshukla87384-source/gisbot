@@ -24,6 +24,7 @@ import {
   verifyAdminPasscode,
   setAdminPasscode,
   isAdminPasscodeConfigured,
+  getSalesDashboard,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -147,7 +148,8 @@ async function guard(ctx: Ctx): Promise<boolean> {
 function panelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("➕ Add product", cb("adm", "addp")).row()
-    .text("📊 Dashboard", cb("adm", "stats")).text("🧾 Pending", cb("adm", "orders")).row()
+    .text("📊 Dashboard", cb("adm", "stats")).text("📈 Sales", cb("adm", "sales")).row()
+    .text("🧾 Pending", cb("adm", "orders")).row()
     .text("🗂 Recent orders", cb("adm", "recent")).text("📦 Products", cb("adm", "prods")).row()
     .text("📢 Broadcast", cb("adm", "bc")).text("📣 Groups", cb("adm", "groups")).row()
     .text("💰 Adjust wallet", cb("adm", "walletadj")).row()
@@ -442,6 +444,30 @@ async function renameButtonsView(ctx: Ctx): Promise<void> {
   await show(ctx, "🔤 <b>Rename menu buttons</b>\nTap a button, then send the new label. Include a <b>premium emoji</b> and it becomes the button's icon 🎨. Send <code>reset</code> to restore the default.", kb, true);
 }
 
+async function salesView(ctx: Ctx): Promise<void> {
+  const d = await getSalesDashboard();
+  const money = (rec: Record<string, number>): string => {
+    const parts = Object.entries(rec).map(([c, v]) => fmt(v, c));
+    return parts.length ? parts.join(" · ") : "—";
+  };
+  const top = d.topProducts.length
+    ? d.topProducts.map((p, i) => `${i + 1}. ${escapeHtml(p.name)} — ${p.qty}×`).join("\n")
+    : "No sales yet.";
+  const text = [
+    "📈 <b>Sales Dashboard</b>",
+    "",
+    `💵 <b>Revenue today:</b> ${money(d.revenueTodayMinor)}`,
+    `📅 <b>Revenue (7 days):</b> ${money(d.revenue7dMinor)}`,
+    `🧾 Orders — today: <b>${d.ordersToday}</b> · 7d: <b>${d.orders7d}</b>`,
+    "",
+    "🔥 <b>Top products (30 days)</b>",
+    top,
+    "",
+    `👥 Buyers: <b>${d.buyers}</b> · Repeat: <b>${d.repeatBuyers}</b> (<b>${d.repeatRatePct}%</b>)`,
+  ].join("\n");
+  await show(ctx, text, new InlineKeyboard().text("↻ Refresh", cb("adm", "sales")).text("◀️ Back", cb("adm", "home")), true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -459,6 +485,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
+    case "sales": return salesView(ctx);
     case "logoutall": {
       const redis = getRedis();
       const members = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);

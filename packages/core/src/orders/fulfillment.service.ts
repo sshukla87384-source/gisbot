@@ -5,6 +5,7 @@ import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyManualOrder } from "./manual-pay.service.js";
+import { referralNudgeMessage } from "../users/user.service.js";
 
 /**
  * Webhook-driven fulfillment (PRD §6.1 steps 6-13, Security doc §5).
@@ -249,6 +250,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         orderId: order.id,
         buyerHandle: order.user.telegramHandle,
         buyerFirst: order.user.firstName,
+        buyerReferral: order.user.referralCode,
         orderNumber: order.orderNumber,
         totalMinor: order.totalMinor,
         currency: order.currency,
@@ -286,6 +288,8 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
           outcome.telegramId,
           thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME),
         );
+        const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
+        if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
       }
       if (outcome.pendingManual > 0) {
         await enqueueTelegramMessage(

@@ -1,4 +1,4 @@
-import { adjustWallet, dispatchDueBroadcasts, enqueueAdminAlert, getRedis } from "@gis/core";
+import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdminAlert, getRedis } from "@gis/core";
 import { prisma } from "@gis/database";
 
 /**
@@ -170,6 +170,7 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(60, "broadcasts", 55, runScheduledBroadcasts),
     every(600, "holds", 590, releaseHolds),
     every(3600, "lowstock", 3590, lowStockAlerts),
+    every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     every(86_400, "reconcile", 86_390, reconcileWallets),
   ];
 }

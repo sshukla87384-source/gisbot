@@ -482,3 +482,60 @@ export async function verifyAdminPasscode(plain: string, envPasscode?: string | 
   if (dbHash) return _pcHash(plain.trim()) === dbHash;
   return !!envPasscode && plain === envPasscode;
 }
+
+// ───────────── Sales dashboard ─────────────
+export interface SalesDashboard {
+  revenueTodayMinor: Record<string, number>;
+  revenue7dMinor: Record<string, number>;
+  ordersToday: number;
+  orders7d: number;
+  topProducts: Array<{ name: string; qty: number }>;
+  buyers: number;
+  repeatBuyers: number;
+  repeatRatePct: number;
+}
+
+const PAID_STATUSES = ["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK", "PARTIALLY_REFUNDED"] as const;
+
+export async function getSalesDashboard(): Promise<SalesDashboard> {
+  const now = Date.now();
+  const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
+  const start7d = new Date(now - 7 * 86_400_000);
+  const start30d = new Date(now - 30 * 86_400_000);
+
+  const paid7d = await prisma.order.findMany({
+    where: { paidAt: { gte: start7d }, status: { in: [...PAID_STATUSES] } },
+    select: { currency: true, walletUsedMinor: true, totalMinor: true, paidAt: true },
+  });
+  const revenueTodayMinor: Record<string, number> = {};
+  const revenue7dMinor: Record<string, number> = {};
+  let ordersToday = 0;
+  for (const o of paid7d) {
+    const val = o.walletUsedMinor + o.totalMinor;
+    revenue7dMinor[o.currency] = (revenue7dMinor[o.currency] ?? 0) + val;
+    if (o.paidAt && o.paidAt >= startToday) {
+      revenueTodayMinor[o.currency] = (revenueTodayMinor[o.currency] ?? 0) + val;
+      ordersToday++;
+    }
+  }
+
+  const topRows = await prisma.orderItem.groupBy({
+    by: ["productNameSnap"],
+    where: { order: { paidAt: { gte: start30d }, status: { in: [...PAID_STATUSES] } } },
+    _sum: { quantity: true },
+    orderBy: { _sum: { quantity: "desc" } },
+    take: 5,
+  });
+  const topProducts = topRows.map((r) => ({ name: r.productNameSnap, qty: r._sum.quantity ?? 0 }));
+
+  const byUser = await prisma.order.groupBy({
+    by: ["userId"],
+    where: { paidAt: { not: null }, status: { in: [...PAID_STATUSES] } },
+    _count: { _all: true },
+  });
+  const buyers = byUser.length;
+  const repeatBuyers = byUser.filter((u) => u._count._all >= 2).length;
+  const repeatRatePct = buyers ? Math.round((repeatBuyers / buyers) * 100) : 0;
+
+  return { revenueTodayMinor, revenue7dMinor, ordersToday, orders7d: paid7d.length, topProducts, buyers, repeatBuyers, repeatRatePct };
+}

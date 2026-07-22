@@ -12,6 +12,7 @@ export * from "./orders/order.service.js";
 export * from "./support/ticket.service.js";
 export * from "./orders/manual-pay.service.js";
 export * from "./orders/coupon.service.js";
+export * from "./orders/maintenance.service.js";
 export * from "./orders/stars.service.js";
 export * from "./orders/binance-poll.service.js";
 export * from "./broadcast.service.js";
