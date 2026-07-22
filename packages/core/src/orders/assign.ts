@@ -183,6 +183,22 @@ export function buildDeliveryText(
   return lines.join("\n");
 }
 
+/** Friendly display name for greetings: @handle, else first name, else "there". */
+export function greetName(u: { telegramHandle?: string | null; firstName?: string | null }): string {
+  if (u.telegramHandle) return `@${u.telegramHandle}`;
+  const f = (u.firstName ?? "").trim();
+  return f ? f.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "there";
+}
+
+/** Warm, respectful, personalised thank-you sent after a successful purchase. */
+export function thankYouMessage(u: { telegramHandle?: string | null; firstName?: string | null }, storeName: string): string {
+  return [
+    `🎁 <b>Thank you so much, ${greetName(u)}!</b> 🙏`,
+    `It's truly an honour to serve you. We deeply appreciate your trust in ${storeName}.`,
+    `Wishing you the very best — enjoy your purchase! 💙`,
+  ].join("\n");
+}
+
 /** Orders with more than this many delivered items get a .txt file instead of one long chat message. */
 export const DELIVERY_FILE_THRESHOLD = 15;
 

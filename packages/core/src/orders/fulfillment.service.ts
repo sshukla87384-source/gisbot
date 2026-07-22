@@ -3,7 +3,7 @@ import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyManualOrder } from "./manual-pay.service.js";
 
 /**
@@ -247,6 +247,8 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       return {
         kind: "fulfilled" as const,
         orderId: order.id,
+        buyerHandle: order.user.telegramHandle,
+        buyerFirst: order.user.firstName,
         orderNumber: order.orderNumber,
         totalMinor: order.totalMinor,
         currency: order.currency,
@@ -282,7 +284,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       if (outcome.deliveries.length > 0) {
         await enqueueTelegramMessage(
           outcome.telegramId,
-          `🎁 <b>Thank you for your purchase!</b>\nWe truly appreciate your business at ${loadConfig().STORE_NAME}. 💙`,
+          thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME),
         );
       }
       if (outcome.pendingManual > 0) {

@@ -4,6 +4,7 @@ import {
   adjustWallet,
   changeQty,
   checkoutWithWallet,
+  greetName,
   clearCart,
   createGatewayCheckout,
   createBinanceManualCheckout,
@@ -272,7 +273,7 @@ export function createBot(): Bot<Ctx> {
     try {
       const r = await confirmStarsPayment(orderId);
       await ctx.reply(
-        successCard("Payment Received", [`✅ Paid with ⭐ Telegram Stars`, `📦 Delivered ${num(r.delivered)} item(s)`, `🎁 Thank you for your purchase!`]),
+        successCard("Payment Received", [`✅ Paid with ⭐ Telegram Stars`, `📦 Delivered ${num(r.delivered)} item(s)`, `🙏 Thank you so much, ${greetName(ctx.user)} — it is an honour to serve you!`]),
         { parse_mode: "HTML" },
       );
     } catch {
@@ -551,7 +552,7 @@ export function createBot(): Bot<Ctx> {
               `✅ Payment confirmed`,
               `📦 Order <b>${result.orderNumber}</b>`,
               `💰 Amount ${fmt(result.totalMinor, result.currency)}`,
-              `🎁 Thank you for your purchase!`,
+              `🙏 Thank you so much, ${greetName(user)} — it is an honour to serve you!`,
             ]),
             { parse_mode: "HTML" },
           );

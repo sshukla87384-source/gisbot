@@ -2,7 +2,7 @@ import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, priceCart, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -216,7 +216,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       await tx.order.update({ where: { id: order.id }, data: { status: finalStatus, ...(finalStatus === "COMPLETED" ? { completedAt: new Date() } : {}) } });
       await tx.auditLog.create({ data: { actorId, actorType: "ADMIN", action: "order.confirm.manual", entityType: "Order", entityId: order.id, after: { finalStatus, delivered: deliveries.length } } });
 
-      return { kind: "done" as const, orderId: order.id, telegramId: order.user.telegramId, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
+      return { kind: "done" as const, orderId: order.id, telegramId: order.user.telegramId, buyerHandle: order.user.telegramHandle, buyerFirst: order.user.firstName, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
     },
     { timeout: 20_000 },
   );
@@ -235,7 +235,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     } else if (outcome.deliveries.length > 1) {
       await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber));
     }
-    if (outcome.deliveries.length > 0) await enqueueTelegramMessage(outcome.telegramId, `🎁 <b>Thank you for your purchase!</b>\nWe truly appreciate your business at ${loadConfig().STORE_NAME}. 💙`);
+    if (outcome.deliveries.length > 0) await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🕐 ${outcome.pendingManual} item(s) are being prepared (~12 h).`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
   }
@@ -286,7 +286,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   const item = await prisma.orderItem.findUnique({
     where: { id: orderItemId },
-    include: { order: { include: { user: { select: { telegramId: true } } } }, variant: { include: { product: true } } },
+    include: { order: { include: { user: { select: { telegramId: true, telegramHandle: true, firstName: true } } } }, variant: { include: { product: true } } },
   });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
   if (item.fulfilledAt) return { ok: false, reason: "ALREADY_DELIVERED", orderNumber: item.order.orderNumber };
@@ -307,7 +307,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   const tgId = item.order.user.telegramId;
   if (tgId !== null) {
     await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide));
-    await enqueueTelegramMessage(tgId, `🎁 <b>Thank you for your purchase!</b>\nWe truly appreciate your business at ${loadConfig().STORE_NAME}. 💙`);
+    await enqueueTelegramMessage(tgId, thankYouMessage(item.order.user, loadConfig().STORE_NAME));
   }
   return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
 }
