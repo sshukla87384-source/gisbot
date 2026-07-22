@@ -380,6 +380,25 @@ export async function listProductUserPrices(productId: string): Promise<Array<{ 
   return rows.map((r) => ({ userId: r.userId, label: labelOf.get(r.userId) ?? r.userId, amountMinor: r.amountMinor, channel: r.channel as PriceChannel }));
 }
 
+/** Set the public (RETAIL) price for ALL variants of a product, in USD and/or INR. This is the price everyone sees. */
+export async function setProductPublicPrice(productId: string, prices: { usdMinor?: number; inrMinor?: number }): Promise<void> {
+  const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
+  const variants = await prisma.productVariant.findMany({ where: { productId, deletedAt: null } });
+  const entries: Array<["USD" | "INR", number]> = [];
+  if (prices.usdMinor && prices.usdMinor > 0) entries.push(["USD", prices.usdMinor]);
+  if (prices.inrMinor && prices.inrMinor > 0) entries.push(["INR", prices.inrMinor]);
+  for (const v of variants) {
+    for (const [currency, amt] of entries) {
+      await prisma.variantPrice.upsert({
+        where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } },
+        create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt },
+        update: { amountMinor: amt },
+      });
+    }
+  }
+  await invalidate("cat:*");
+}
+
 /** Set the default store price (INR + derived USD) for all variants of a product. */
 export async function setStoreDefaultPrice(productId: string, amountMinorInr: number): Promise<void> {
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });

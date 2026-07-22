@@ -9,7 +9,7 @@ import {
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
-import { Api, GrammyError } from "grammy";
+import { Api, GrammyError, InputFile } from "grammy";
 import { Resend } from "resend";
 import { startCronJobs } from "./cron.js";
 import { startWebhookServer } from "./webhook-server.js";
@@ -46,7 +46,11 @@ async function main(): Promise<void> {
           ? { inline_keyboard: [job.data.buttons.map((b) => (styled && b.style ? { text: b.text, url: b.url, style: b.style } : { text: b.text, url: b.url }))] }
           : undefined;
         let msg;
-        if (job.data.photo) {
+        if (job.data.document) {
+          const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
+          const file = new InputFile(Buffer.from(job.data.document.content, "utf8"), job.data.document.filename);
+          msg = await telegram.sendDocument(job.data.telegramId, file, { caption, parse_mode: "HTML", reply_markup });
+        } else if (job.data.photo) {
           // Caption limit is 1024 chars; trim defensively.
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
           msg = await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML", reply_markup });

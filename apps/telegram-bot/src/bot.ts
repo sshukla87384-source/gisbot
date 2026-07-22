@@ -11,6 +11,9 @@ import {
   createWalletTopup,
   verifyTopupByTxn,
   creditFreeTopup,
+  buildCombinedDeliveryText,
+  buildDeliveryTxt,
+  DELIVERY_FILE_THRESHOLD,
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
@@ -548,7 +551,7 @@ export function createBot(): Bot<Ctx> {
             ]),
             { parse_mode: "HTML" },
           );
-          for (const d of result.deliveries) await sendDelivery(ctx, d);
+          await deliverAll(ctx, result.deliveries, result.orderNumber);
           if (result.pendingManualItems > 0) {
             await ctx.reply(
               `🕐 ${result.pendingManualItems} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
@@ -808,6 +811,29 @@ export function createBot(): Bot<Ctx> {
 
 async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
   await sendRevealed(ctx, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide);
+}
+
+/**
+ * Deliver a whole order in ONE message (never a burst). For 1 item we keep the
+ * rich single-item card; for 2..threshold we send one combined message; for
+ * large orders (> threshold) we attach a .txt file with all the keys.
+ */
+async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?: string): Promise<void> {
+  if (deliveries.length === 0) return;
+  if (deliveries.length === 1) { await sendDelivery(ctx, deliveries[0]!); return; }
+  const lines = deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide }));
+  const menu = new InlineKeyboard().text("🏠 Menu", "mnu:home");
+  if (deliveries.length > DELIVERY_FILE_THRESHOLD) {
+    const txt = buildDeliveryTxt(lines, orderNumber);
+    const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
+    await ctx.replyWithDocument(file, {
+      caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
+      parse_mode: "HTML",
+      reply_markup: menu,
+    });
+    return;
+  }
+  await ctx.reply(buildCombinedDeliveryText(lines, orderNumber), { parse_mode: "HTML", reply_markup: menu });
 }
 
 async function sendRevealed(

@@ -2,8 +2,8 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
-import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage } from "../queues.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText } from "./assign.js";
+import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./assign.js";
 
 /**
  * Webhook-driven fulfillment (PRD §6.1 steps 6-13, Security doc §5).
@@ -12,10 +12,7 @@ import { assignAccountSlot, assignLicenseKey, buildDeliveryText } from "./assign
  * UNIQUE inventory↔orderItem constraints.
  */
 
-interface QueuedDelivery {
-  telegramId: bigint;
-  text: string;
-}
+type QueuedDelivery = DeliveryLine;
 
 async function getSettingInt(key: string, fallback: number): Promise<number> {
   const row = await prisma.setting.findUnique({ where: { key } });
@@ -155,10 +152,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               },
             });
             if (order.user.telegramId !== null) {
-              deliveries.push({
-                telegramId: order.user.telegramId,
-                text: buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, guide),
-              });
+              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide });
             }
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
@@ -176,10 +170,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               },
             });
             if (order.user.telegramId !== null) {
-              deliveries.push({
-                telegramId: order.user.telegramId,
-                text: buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, guide),
-              });
+              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide });
             }
           }
         } catch {
@@ -278,7 +269,14 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         outcome.telegramId,
         `🎉 <b>Payment received!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${money}. Delivering now… 🚀`,
       );
-      for (const d of outcome.deliveries) await enqueueTelegramMessage(d.telegramId, d.text);
+      if (outcome.deliveries.length === 1) {
+        const d = outcome.deliveries[0]!;
+        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide));
+      } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
+        await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`);
+      } else if (outcome.deliveries.length > 1) {
+        await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber));
+      }
       if (outcome.deliveries.length > 0) {
         await enqueueTelegramMessage(
           outcome.telegramId,

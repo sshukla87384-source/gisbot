@@ -11,6 +11,7 @@ import {
   removeUserPrice,
   listProductUserPrices,
   setProductPinRank,
+  setProductPublicPrice,
   type PriceChannel,
   createApiKey,
   listApiKeys,
@@ -231,7 +232,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
-  kb.text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
+  kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
@@ -373,6 +374,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "ord": return orderView(ctx, id);
     case "prods": return productsView(ctx);
     case "prod": return productView(ctx, id);
+    case "pprice":
+      ctx.session.admProductId = id;
+      ctx.session.pubUsdMinor = undefined;
+      ctx.session.awaiting = "admin_pubprice_usd";
+      await askStep(ctx, "💵 New <b>USD</b> price for everyone (applies to all variants), e.g. <code>9.99</code>. Send <code>0</code> to skip USD.");
+      return;
     case "cprice": return customPriceView(ctx, id);
     case "cpin":
       ctx.session.admProductId = id;
@@ -745,6 +752,25 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_pubprice_usd") {
+    const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    ctx.session.pubUsdMinor = Number.isFinite(val) && val > 0 ? Math.round(val * 100) : 0;
+    ctx.session.awaiting = "admin_pubprice_inr";
+    await askStep(ctx, "💵 New <b>INR</b> price, e.g. <code>499</code>. Send <code>0</code> to skip INR.");
+    return true;
+  }
+  if (awaiting === "admin_pubprice_inr") {
+    const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
+    const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    const inrMinor = Number.isFinite(val) && val > 0 ? Math.round(val * 100) : 0;
+    const usdMinor = ctx.session.pubUsdMinor ?? 0; ctx.session.pubUsdMinor = undefined;
+    if (usdMinor <= 0 && inrMinor <= 0) { await ctx.reply("No price set (both were 0)."); await productView(ctx, pid); return true; }
+    await setProductPublicPrice(pid, { usdMinor, inrMinor });
+    const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
+    await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
+    await productView(ctx, pid);
+    return true;
+  }
   if (awaiting === "admin_pin") {
     const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
     const rank = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);

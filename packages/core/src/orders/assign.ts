@@ -182,3 +182,54 @@ export function buildDeliveryText(
   lines.push("", "💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
   return lines.join("\n");
 }
+
+/** Orders with more than this many delivered items get a .txt file instead of one long chat message. */
+export const DELIVERY_FILE_THRESHOLD = 15;
+
+export interface DeliveryLine {
+  productName: string;
+  variantName: string;
+  payload: DeliveryPayload;
+  activationGuide?: string | null;
+}
+
+/** One consolidated HTML message for a whole multi-item order (used when count ≤ threshold). */
+export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: string): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const out: string[] = [`🎉🎊 <b>Your order is delivered!</b> 🥳  (${items.length} item${items.length === 1 ? "" : "s"})`];
+  if (orderNumber) out.push(`🧾 Order <b>${esc(orderNumber)}</b>`);
+  out.push("");
+  items.forEach((it, i) => {
+    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(it.variantName)}`;
+    out.push(`<b>${i + 1}.</b> 📦 <b>${esc(it.productName)}</b>${vn}`);
+    const p = it.payload;
+    if (p.key) out.push(`   🔑 <code>${esc(p.key)}</code>`);
+    if (p.username) out.push(`   👤 <code>${esc(p.username)}</code>`);
+    if (p.password) out.push(`   🔒 <tg-spoiler>${esc(p.password)}</tg-spoiler>`);
+    if (p.expiresAt) out.push(`   ⏳ ${p.expiresAt.slice(0, 10)}`);
+    out.push("");
+  });
+  out.push("💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
+  return out.join("\n");
+}
+
+/** Plaintext body for the .txt attachment sent for large orders (> threshold). */
+export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): string {
+  const out: string[] = [];
+  out.push(`ORDER DELIVERY${orderNumber ? ` — ${orderNumber}` : ""}`);
+  out.push(`${items.length} item(s)`);
+  out.push("=".repeat(40), "");
+  items.forEach((it, i) => {
+    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
+    out.push(`${i + 1}) ${it.productName}${vn}`);
+    const p = it.payload;
+    if (p.key) out.push(`   Key: ${p.key}`);
+    if (p.username) out.push(`   Login: ${p.username}`);
+    if (p.password) out.push(`   Password: ${p.password}`);
+    if (p.expiresAt) out.push(`   Valid until: ${p.expiresAt.slice(0, 10)}`);
+    if (it.activationGuide) out.push(`   Note: ${it.activationGuide}`);
+    out.push("");
+  });
+  out.push("Saved in My Licenses. Problem? Open a Support ticket in the bot.");
+  return out.join("\n");
+}

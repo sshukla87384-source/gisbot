@@ -29,6 +29,7 @@ export interface OutboxJob {
   photo?: string; // optional image URL → sent as photo with text as caption
   buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
   pin?: boolean; // pin the sent message in the chat
+  document?: { filename: string; content: string }; // optional .txt attachment; text becomes the caption
 }
 export interface OutboxOptions {
   photo?: string;
@@ -94,6 +95,20 @@ export async function enqueueTelegramMessage(
     ...(opts.photo ? { photo: opts.photo } : {}),
     ...(opts.buttons && opts.buttons.length > 0 ? { buttons: opts.buttons } : {}),
     ...(opts.pin ? { pin: true } : {}),
+  } satisfies OutboxJob);
+}
+
+/** Send a text file (e.g. a large order's keys) as a Telegram document, with a caption. */
+export async function enqueueTelegramDocument(
+  telegramId: bigint | string,
+  filename: string,
+  content: string,
+  caption: string,
+): Promise<void> {
+  await getQueue(QUEUE_NAMES.outbox).add("send", {
+    telegramId: telegramId.toString(),
+    text: caption,
+    document: { filename, content },
   } satisfies OutboxJob);
 }
 
