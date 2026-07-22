@@ -84,6 +84,12 @@ export async function listApiKeys(): Promise<
   });
 }
 
+/** Update the scopes of an existing key in place (keeps the same key value). Invalid scopes are dropped. */
+export async function setApiKeyScopes(id: string, scopes: string[]): Promise<void> {
+  const clean = scopes.filter((sc) => (API_SCOPES as readonly string[]).includes(sc));
+  await prisma.apiKey.update({ where: { id }, data: { scopes: clean } });
+}
+
 export async function revokeApiKey(id: string): Promise<void> {
   await prisma.apiKey.update({ where: { id }, data: { revokedAt: new Date() } });
 }

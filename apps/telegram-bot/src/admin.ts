@@ -18,6 +18,7 @@ import {
   type PriceChannel,
   createApiKey,
   listApiKeys,
+  setApiKeyScopes,
   revokeApiKey,
   announceProduct,
   announceFlashSale,
@@ -289,8 +290,12 @@ async function apiKeysView(ctx: Ctx): Promise<void> {
   const lines = ["🔑 <b>Developer API keys</b>", ""];
   for (const k of keys.slice(0, 15)) {
     const state = k.revokedAt ? "🚫 revoked" : "🟢 active";
-    lines.push(`• <b>${k.name}</b> — <code>${k.prefix}…</code> · ${state} · ${k.callCount} calls`);
-    if (!k.revokedAt) kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("adm", "apirevoke", k.id)).row();
+    lines.push(`• <b>${k.name}</b> — <code>${k.prefix}…</code> · ${state} · ${k.callCount} calls\n  scopes: ${k.scopes.join(", ")}`);
+    if (!k.revokedAt) {
+      const hasPurchase = k.scopes.includes("orders:write") && k.scopes.includes("wallet:read");
+      if (!hasPurchase) kb.text(`⬆️ Enable purchasing — ${k.name.slice(0, 14)}`, cb("adm", "apiup", k.id)).row();
+      kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("adm", "apirevoke", k.id)).row();
+    }
   }
   if (keys.length === 0) lines.push("No keys yet. Create one to give partners read-only API access.");
   kb.text("◀️ Back", cb("adm", "home"));
@@ -592,6 +597,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "apikeys": return apiKeysView(ctx);
+    case "apiup":
+      await setApiKeyScopes(id, ["catalog:read", "orders:read", "orders:write", "wallet:read"]);
+      await ctx.reply("⬆️ Purchasing + wallet access enabled on that key. It works immediately — no need to regenerate.");
+      return apiKeysView(ctx);
     case "apinew": {
       ctx.session.awaiting = "admin_api_name";
       await askStep(ctx, "🔑 <b>New API key</b>\nSend a <b>name</b> for it (e.g. <code>Acme Integration</code>):");
