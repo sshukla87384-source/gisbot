@@ -546,3 +546,23 @@ export async function getSalesDashboard(): Promise<SalesDashboard> {
 
   return { revenueTodayMinor, revenue7dMinor, ordersToday, orders7d: paid7d.length, topProducts, buyers, repeatBuyers, repeatRatePct };
 }
+
+// ───────────── Admin-managed custom emoji registry ─────────────
+export interface CustomEmojiEntry { id: string; glyph: string }
+
+export async function getCustomEmojiRegistry(): Promise<Record<string, CustomEmojiEntry>> {
+  const row = await prisma.setting.findUnique({ where: { key: "ui.custom_emoji" } });
+  return (row?.value as Record<string, CustomEmojiEntry> | undefined) ?? {};
+}
+
+export async function setCustomEmojiEntry(name: string, id: string, glyph: string): Promise<void> {
+  const cur = await getCustomEmojiRegistry();
+  cur[name.trim().toLowerCase().slice(0, 24)] = { id, glyph };
+  await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
+}
+
+export async function removeCustomEmojiEntry(name: string): Promise<void> {
+  const cur = await getCustomEmojiRegistry();
+  delete cur[name];
+  await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
+}

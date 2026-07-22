@@ -1,15 +1,18 @@
 import { createServer } from "node:http";
 import { loadConfig } from "@gis/config";
 import { ensureDbObjects, prisma } from "@gis/database";
-import { getRedis } from "@gis/core";
+import { getRedis, getCustomEmojiRegistry } from "@gis/core";
 import { webhookCallback } from "grammy";
 import { createBot } from "./bot.js";
+import { setDynamicEmojis } from "./emoji.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   await ensureDbObjects();
 
   const bot = createBot();
+  // Load admin-registered custom emoji so e() renders them across the UI.
+  try { setDynamicEmojis(await getCustomEmojiRegistry()); } catch { /* non-fatal */ }
   await bot.api.setMyCommands([
     { command: "start", description: "Open the store" },
     { command: "shop", description: "Browse products" },

@@ -34,6 +34,8 @@ export interface SessionData {
     | "admin_ref_first"
     | "admin_ref_repeat"
     | "admin_bnpl"
+    | "admin_emoji_capture"
+    | "admin_emoji_name"
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"
@@ -73,6 +75,8 @@ export interface SessionData {
   bcBtnText?: string;
   bcBtnUrl?: string;
   btnKey?: string;
+  pendEmojiId?: string;
+  pendEmojiGlyph?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

@@ -31,6 +31,9 @@ import {
   setReferralRate,
   setBnplLimit,
   getBnplStatus,
+  getCustomEmojiRegistry,
+  setCustomEmojiEntry,
+  removeCustomEmojiEntry,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -67,6 +70,7 @@ import { InlineKeyboard } from "grammy";
 import type { Ctx } from "./ctx.js";
 import { escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
+import { setDynamicEmojis } from "./emoji.js";
 
 const ATTEMPT_WINDOW_SEC = 15 * 60;
 const MAX_ATTEMPTS = 5;
@@ -163,6 +167,7 @@ function panelKeyboard(): InlineKeyboard {
     .text("🔑 Change passcode", cb("adm", "chpass")).row()
     .text("🎁 Referral %", cb("adm", "refrates")).row()
     .text("🕒 BNPL limit", cb("adm", "bnpl")).row()
+    .text("🎨 Custom emoji", cb("adm", "emoji")).row()
     .text("🔑 API keys", cb("adm", "apikeys")).text("🧪 Test Binance", cb("adm", "bintest")).row()
     .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout all", cb("adm", "logoutall"), "danger")).row();
 }
@@ -511,6 +516,29 @@ async function refRatesView(ctx: Ctx): Promise<void> {
   ].join("\n"), kb, true);
 }
 
+const EMOJI_NAME_HINTS = "wallet, cart, vip, diamond, fire, gift, rocket, star, bolt, shop, money, chart, home, support";
+
+async function emojiRegistryView(ctx: Ctx): Promise<void> {
+  const reg = await getCustomEmojiRegistry();
+  const names = Object.keys(reg);
+  const kb = new InlineKeyboard().text("➕ Add emoji", cb("adm", "emojiadd")).row();
+  for (const n of names.slice(0, 20)) kb.text(`✖️ ${n}`, cb("adm", "emojirm", n)).row();
+  kb.text("◀️ Back", cb("adm", "home"));
+  const preview = names.length
+    ? names.map((n) => `• <b>${escapeHtml(n)}</b>: <tg-emoji emoji-id="${reg[n]!.id}">${reg[n]!.glyph}</tg-emoji>`).join("\n")
+    : "No custom emoji added yet.";
+  await show(ctx, [
+    "🎨 <b>Custom emoji</b>",
+    "",
+    "Add your Telegram premium emoji here to use them across the bot UI (menu, headers, buttons where supported).",
+    `Use these names to theme built-in spots: <i>${EMOJI_NAME_HINTS}</i>`,
+    "",
+    preview,
+    "",
+    "Tap ➕ Add emoji, then send one premium emoji.",
+  ].join("\n"), kb, true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -529,6 +557,16 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   switch (action) {
     case "home": return sendPanel(ctx, true);
     case "sales": return salesView(ctx);
+    case "emoji": return emojiRegistryView(ctx);
+    case "emojiadd":
+      ctx.session.awaiting = "admin_emoji_capture";
+      await askStep(ctx, "🎨 Send <b>one premium emoji</b> (from your Telegram Premium keyboard). I'll capture it.");
+      return;
+    case "emojirm":
+      await removeCustomEmojiEntry(id);
+      setDynamicEmojis(await getCustomEmojiRegistry());
+      await ctx.reply(`✖️ Removed <b>${escapeHtml(id)}</b>.`, { parse_mode: "HTML" });
+      return emojiRegistryView(ctx);
     case "bnpl":
       ctx.session.awaiting = "admin_bnpl";
       await askStep(ctx, "🕒 Set a customer's <b>Pay Later (BNPL) limit</b>.\nSend: <code>&lt;@user or id&gt; &lt;amount&gt;</code> in their currency.\nExample: <code>@john 50</code> (or <code>0</code> to disable).");
@@ -1048,6 +1086,27 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
     await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_emoji_capture") {
+    const ents = ((ctx.message?.entities ?? []) as Array<{ type: string; offset: number; length: number; custom_emoji_id?: string }>).filter((e) => e.type === "custom_emoji");
+    const first = ents[0];
+    if (!first?.custom_emoji_id) { await askStep(ctx, "That wasn't a premium emoji. Send a single premium emoji (needs Telegram Premium)."); ctx.session.awaiting = "admin_emoji_capture"; return true; }
+    ctx.session.pendEmojiId = first.custom_emoji_id;
+    ctx.session.pendEmojiGlyph = text.slice(first.offset, first.offset + first.length) || "✨";
+    ctx.session.awaiting = "admin_emoji_name";
+    await askStep(ctx, `✅ Captured! Now send a short <b>name</b> for it (e.g. <code>fire</code>, <code>vip</code>). Use a built-in name to theme that spot: <i>${escapeHtml(EMOJI_NAME_HINTS)}</i>`);
+    return true;
+  }
+  if (awaiting === "admin_emoji_name") {
+    const name = text.trim().toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24);
+    const eid = ctx.session.pendEmojiId; const glyph = ctx.session.pendEmojiGlyph ?? "✨";
+    ctx.session.pendEmojiId = ctx.session.pendEmojiGlyph = undefined;
+    if (!name || !eid) { await ctx.reply("Please send a valid name (letters/numbers)."); return true; }
+    await setCustomEmojiEntry(name, eid, glyph);
+    setDynamicEmojis(await getCustomEmojiRegistry());
+    await ctx.reply(`✅ Saved <b>${escapeHtml(name)}</b> → <tg-emoji emoji-id="${eid}">${glyph}</tg-emoji>. It now shows across the bot.`, { parse_mode: "HTML" }).catch(() => ctx.reply(`✅ Saved ${name}.`));
+    await emojiRegistryView(ctx);
     return true;
   }
   if (awaiting === "admin_bnpl") {

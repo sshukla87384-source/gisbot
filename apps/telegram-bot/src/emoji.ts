@@ -30,8 +30,19 @@ function ids(): Record<string, string> {
   return idMap;
 }
 
-/** Premium emoji: custom entity if configured, else Unicode fallback. */
+/** Admin-registered custom emoji (loaded from DB at startup, refreshed on change). */
+let dynamic: Record<string, { id: string; glyph: string }> = {};
+export function setDynamicEmojis(map: Record<string, { id: string; glyph: string }>): void {
+  dynamic = map ?? {};
+}
+export function listDynamicEmojis(): Record<string, { id: string; glyph: string }> {
+  return dynamic;
+}
+
+/** Premium emoji: admin-registered entity → configured entity → Unicode fallback. */
 export function e(name: string): string {
+  const d = dynamic[name];
+  if (d) return `<tg-emoji emoji-id="${d.id}">${d.glyph}</tg-emoji>`;
   const fb = FALLBACK[name] ?? "";
   const id = ids()[name];
   return id ? `<tg-emoji emoji-id="${id}">${fb}</tg-emoji>` : fb;
