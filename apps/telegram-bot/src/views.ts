@@ -458,6 +458,7 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
   if (active.length > 0) kb.text(`📋 My API keys (${active.length})`, cb("api", "list")).row();
+  if (active.length > 0) kb.text("📦 API Orders", cb("api", "orders")).text("💰 API Balance", cb("api", "balance")).row();
   kb.text("📖 API Documentation", cb("api", "docs")).row();
   backToMenuRow(kb);
   return {
@@ -487,6 +488,33 @@ export async function apiKeysListView(user: BotUser): Promise<View> {
   }
   navRow(kb, cb("api", "home"));
   return { text: lines.join("\n"), kb };
+}
+
+export async function apiOrdersView(user: BotUser): Promise<View> {
+  const result = await listOrders(user.id, 1);
+  const statusEmoji: Record<string, string> = { COMPLETED: "✅", PAID: "💳", PENDING_FULFILLMENT: "🕐", PENDING_PAYMENT: "⌛", CANCELLED: "🚫", EXPIRED: "⌛", REFUNDED: "↩️", PARTIALLY_REFUNDED: "↩️" };
+  const kb = new InlineKeyboard();
+  const lines = [header(`📦 ${bold("API Orders")}`), "", "Recent orders on your account (including those placed via the API):", ""];
+  if (result.items.length === 0) lines.push("No orders yet.");
+  for (const o of result.items.slice(0, 15)) lines.push(`${statusEmoji[o.status] ?? "•"} <code>${o.orderNumber}</code> · ${fmt(o.totalPaidMinor, o.currency)} · ${o.status}`);
+  navRow(kb, cb("api", "home"));
+  return { text: lines.join("\n"), kb };
+}
+
+export async function apiBalanceView(user: BotUser): Promise<View> {
+  const wallet = await getWallet(user.id);
+  const kb = new InlineKeyboard().text("➕ Top up", cb("wal", "topup")).row();
+  navRow(kb, cb("api", "home"));
+  return {
+    text: [
+      header(`💰 ${bold("API Balance")}`),
+      "",
+      `Available: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+      "",
+      "This is the balance the API spends when you place an order (<code>POST /orders</code>). Fetch it programmatically at <code>GET /balance</code>. Top up via ➕ Top up.",
+    ].join("\n"),
+    kb,
+  };
 }
 
 export function apiDocsView(): View {

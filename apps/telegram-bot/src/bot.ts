@@ -859,6 +859,12 @@ export function createBot(): Bot<Ctx> {
         case "api:docs":
           await render(ctx, views.apiDocsView(), true);
           break;
+        case "api:orders":
+          await render(ctx, await views.apiOrdersView(user), true);
+          break;
+        case "api:balance":
+          await render(ctx, await views.apiBalanceView(user), true);
+          break;
         case "api:new":
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "api_key_name";
