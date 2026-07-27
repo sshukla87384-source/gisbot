@@ -56,6 +56,7 @@ import {
   listPendingPaymentOrders,
   listProductsBrief,
   listProductsPage,
+  getProductBriefById,
   listRecentOrders,
   listCategoriesBrief,
   listPostTargets,
@@ -338,8 +339,7 @@ async function productsView(ctx: Ctx, page = 1): Promise<void> {
 }
 
 async function productView(ctx: Ctx, productId: string): Promise<void> {
-  const prods = await listProductsBrief(200);
-  const p = prods.find((x) => x.id === productId);
+  const p = await getProductBriefById(productId);
   if (!p) { await productsView(ctx); return; }
   const kb = new InlineKeyboard();
   if (p.status === "ACTIVE") kb.add(sbtn("👁 Shown — tap to Hide", cb("adm", "ppause", p.id), "primary"));
@@ -459,8 +459,7 @@ async function manualDeliverView(ctx: Ctx, orderId: string): Promise<void> {
 }
 
 async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
-  const prods = await listProductsBrief(200);
-  const p = prods.find((x) => x.id === productId);
+  const p = await getProductBriefById(productId);
   const rows = await listProductUserPrices(productId);
   const kb = new InlineKeyboard();
   kb.text("➕ Add custom price", cb("adm", "cpadd", productId)).row();
@@ -858,16 +857,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     case "cprice": return customPriceView(ctx, id);
     case "pmode": {
-      const prods = await listProductsBrief(200);
-      const cur = prods.find((x) => x.id === id)?.fulfillmentMode ?? "AUTOMATIC";
+      const cur = (await getProductBriefById(id))?.fulfillmentMode ?? "AUTOMATIC";
       const next = cur === "MANUAL" ? "AUTOMATIC" : "MANUAL";
       await setProductFulfillmentMode(id, next);
       await ctx.reply(`⚙️ Delivery mode set to <b>${next}</b>.`, { parse_mode: "HTML" });
       return productView(ctx, id);
     }
     case "ppw": {
-      const prods = await listProductsBrief(200);
-      const cur = prods.find((x) => x.id === id)?.allowPwChange ?? false;
+      const cur = (await getProductBriefById(id))?.allowPwChange ?? false;
       await setProductPasswordChange(id, !cur);
       await ctx.reply(!cur ? "🔓 Customers can now change this account's password." : "🔒 Customers are told not to change this account's password.");
       return productView(ctx, id);
@@ -1112,8 +1109,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "bcprod": return broadcastProductPicker(ctx);
     case "bcpick": {
-      const prods = await listProductsBrief(200);
-      const p = prods.find((x) => x.id === id);
+      const p = await getProductBriefById(id);
       const uname = loadConfig().BOT_USERNAME;
       if (p && uname) { ctx.session.bcBtnText = "⚡ Buy Now"; ctx.session.bcBtnUrl = `https://t.me/${uname}?start=p_${p.slug}`; }
       return finishBroadcast(ctx);
