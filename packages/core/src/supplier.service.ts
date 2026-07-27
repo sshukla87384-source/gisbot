@@ -92,6 +92,19 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       lastNote = `${path || "/"} → parsed 0 products`;
     } catch (e) { lastNote = `${path || "/"} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
   }
+  // Fallback: some reseller APIs (e.g. Supabase functions) return the catalog via POST + an action.
+  for (const body of [{ action: "products" }, { action: "list_products" }, { action: "catalog" }, { action: "list" }, { type: "products" }]) {
+    try {
+      const res = await supFetch(s, "", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) { lastNote = `POST ${JSON.stringify(body)} → HTTP ${res.status} ${text.slice(0, 100)}`; continue; }
+      let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
+      const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
+      const products = parseProductArray(Array.isArray(arr) ? arr : []);
+      if (products.length > 0) return { products, path: `POST ${JSON.stringify(body)}`, raw: text.slice(0, 400), note: "ok" };
+      lastRaw = text.slice(0, 400);
+    } catch (e) { lastNote = `POST → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+  }
   return { products: [], path: "", raw: lastRaw, note: lastNote };
 }
 
