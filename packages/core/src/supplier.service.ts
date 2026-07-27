@@ -8,7 +8,7 @@ import { announceProduct, sendBroadcast } from "./broadcast.service.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: string; markupBp: number; active: boolean }
-export interface SupplierProduct { ref: string; name: string; description: string; priceMinor: number; stock: number | null }
+export interface SupplierProduct { ref: string; name: string; description: string; note: string; priceMinor: number; stock: number | null }
 
 const authHeaders = (key: string): Record<string, string> => ({ Authorization: `Bearer ${key}`, "X-API-Key": key, Accept: "application/json" });
 
@@ -68,7 +68,8 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
     .map((p) => ({
       ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid", "_id"]),
       name: pickStr(p, ["name", "title", "product", "label", "productName"]) || "Product",
-      description: pickStr(p, ["description", "desc", "details", "info"]),
+      description: pickStr(p, ["description", "desc", "details", "info", "about", "content", "body", "long_description", "longDescription", "summary"]),
+      note: pickStr(p, ["note", "notes", "instructions", "instruction", "warranty", "terms", "guide", "activation", "how_to_use", "howToUse", "delivery_note", "deliveryNote"]),
       priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price", "sell_price", "sellPrice"]) ?? 0) * 100),
       stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count"]),
     }))
@@ -183,7 +184,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
     const existing = await prisma.product.findFirst({ where: { supplierId: s.id, supplierRef: p.ref }, include: { variants: true } });
     if (existing) {
       // Visibility follows supplier stock: shown when >0, hidden when 0.
-      await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null, status: inStock ? "ACTIVE" : "PAUSED" } });
+      await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null, activationGuide: p.note.slice(0, 2000) || null, status: inStock ? "ACTIVE" : "PAUSED" } });
       const v = existing.variants[0];
       if (v) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
         await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
@@ -195,6 +196,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
       const created = await prisma.product.create({
         data: {
           slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
+          activationGuide: p.note.slice(0, 2000) || null,
           type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
           supplierId: s.id, supplierRef: p.ref,
           variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
