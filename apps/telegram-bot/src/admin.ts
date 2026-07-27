@@ -76,6 +76,11 @@ import {
   testSupplier,
   syncSupplierProducts,
   fulfillFromSupplier,
+  listRecentUsers,
+  getUserSummary,
+  setUserBanned,
+  adjustUserWalletById,
+  getUserById,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
 } from "@gis/core";
@@ -172,25 +177,56 @@ async function guard(ctx: Ctx): Promise<boolean> {
 
 function panelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    // ── Catalog ──
-    .add(sbtn("➕ Add Product", cb("adm", "addp"), "success"), sbtn("📦 Products", cb("adm", "prods"), "primary")).row()
-    // ── Insights ──
-    .add(sbtn("📊 Dashboard", cb("adm", "stats"), "primary"), sbtn("📈 Sales", cb("adm", "sales"), "primary")).row()
-    // ── Orders ──
-    .add(sbtn("🧾 Pending Orders", cb("adm", "orders"), "primary"), sbtn("🗂 Recent", cb("adm", "recent"), "primary")).row()
-    // ── Marketing ──
-    .add(sbtn("📢 Broadcast", cb("adm", "bc"), "primary"), sbtn("📣 Groups", cb("adm", "groups"), "primary")).row()
-    .add(sbtn("🎁 Referral %", cb("adm", "refrates"), "primary"), sbtn("🎨 Emoji", cb("adm", "emoji"), "primary")).row()
-    // ── Customers ──
-    .add(sbtn("💰 Adjust Wallet", cb("adm", "walletadj"), "primary"), sbtn("🕒 BNPL Limit", cb("adm", "bnpl"), "primary")).row()
-    // ── Customize & integrations ──
-    .add(sbtn("🔤 Rename Buttons", cb("adm", "btns"), "primary"), sbtn("📋 Delivery Note", cb("adm", "delnote"), "primary")).row()
-    .add(sbtn("🔗 Set Binance API", cb("adm", "binapi"), "primary"), sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
-    .add(sbtn("🏭 Suppliers", cb("adm", "sups"), "primary")).row()
-    .add(sbtn("🔑 API Keys", cb("adm", "apikeys"), "primary")).row()
-    // ── Security ──
-    .add(sbtn("🔑 Passcode", cb("adm", "chpass"), "primary"), sbtn("🔐 Web Login", cb("adm", "webpass"), "primary")).row()
-    .add(sbtn("🚪 Logout", cb("adm", "logout"), "danger"), sbtn("🚪 Logout All", cb("adm", "logoutall"), "danger")).row();
+    .add(sbtn("🛍 Products", cb("adm", "m_prod"), "primary"), sbtn("👥 Users", cb("adm", "m_users"), "primary")).row()
+    .add(sbtn("🧾 Orders", cb("adm", "m_orders"), "primary"), sbtn("📊 Stats", cb("adm", "m_stats"), "primary")).row()
+    .add(sbtn("💳 Payments & APIs", cb("adm", "m_pay"), "primary")).row()
+    .add(sbtn("📣 Marketing", cb("adm", "m_mkt"), "primary"), sbtn("🎨 Content & Style", cb("adm", "m_content"), "primary")).row()
+    .add(sbtn("🔐 Security", cb("adm", "m_sec"), "primary")).row()
+    .add(sbtn("↻ Refresh", cb("adm", "home"), "success")).row();
+}
+
+function submenu(title: string, subtitle: string, rows: Array<Array<[string, string, "primary" | "success" | "danger"]>>): { text: string; kb: InlineKeyboard } {
+  const kb = new InlineKeyboard();
+  for (const r of rows) { for (const [label, data, style] of r) kb.add(sbtn(label, data, style)); kb.row(); }
+  kb.text("◀️ Back", cb("adm", "home"));
+  return { text: `${title}\n<i>${subtitle}</i>`, kb };
+}
+
+async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
+  const M: Record<string, { title: string; subtitle: string; rows: Array<Array<[string, string, "primary" | "success" | "danger"]>> }> = {
+    m_prod: { title: "🛍 <b>Products Management</b>", subtitle: "Add and manage your catalog", rows: [
+      [["➕ Add Product", cb("adm", "addp"), "success"]],
+      [["📦 All Products", cb("adm", "prods"), "primary"]],
+    ] },
+    m_orders: { title: "🧾 <b>Orders</b>", subtitle: "Review and fulfil orders", rows: [
+      [["🧾 Pending", cb("adm", "orders"), "primary"], ["🗂 Recent", cb("adm", "recent"), "primary"]],
+    ] },
+    m_stats: { title: "📊 <b>Stats</b>", subtitle: "Your store at a glance", rows: [
+      [["📊 Dashboard", cb("adm", "stats"), "primary"], ["📈 Sales", cb("adm", "sales"), "primary"]],
+    ] },
+    m_pay: { title: "💳 <b>Payments & APIs</b>", subtitle: "Payment providers & suppliers", rows: [
+      [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
+      [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
+      [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
+    ] },
+    m_mkt: { title: "📣 <b>Marketing</b>", subtitle: "Reach & reward customers", rows: [
+      [["📢 Broadcast", cb("adm", "bc"), "primary"], ["📣 Groups", cb("adm", "groups"), "primary"]],
+      [["🎁 Referral %", cb("adm", "refrates"), "primary"], ["🕒 BNPL Limit", cb("adm", "bnpl"), "primary"]],
+    ] },
+    m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
+      [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
+      [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
+    ] },
+    m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
+      [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
+      [["🚪 Logout", cb("adm", "logout"), "danger"], ["🚪 Logout All", cb("adm", "logoutall"), "danger"]],
+    ] },
+  };
+  const m = M[route];
+  if (!m) return false;
+  const { text, kb } = submenu(m.title, m.subtitle, m.rows);
+  await show(ctx, text, kb, true);
+  return true;
 }
 
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
@@ -588,6 +624,39 @@ async function suppliersView(ctx: Ctx): Promise<void> {
   await show(ctx, lines.join("\n"), kb, true);
 }
 
+async function usersMenuView(ctx: Ctx): Promise<void> {
+  const kb = new InlineKeyboard()
+    .add(sbtn("📋 View Users", cb("adm", "uview"), "primary")).row()
+    .add(sbtn("🔎 Customer Lookup", cb("adm", "ulook"), "primary")).row()
+    .text("◀️ Back", cb("adm", "home"));
+  await show(ctx, "👥 <b>Users Management</b>\n<i>View, look up, credit/debit or ban customers</i>", kb, true);
+}
+
+async function usersListView(ctx: Ctx): Promise<void> {
+  const users = await listRecentUsers(12);
+  const kb = new InlineKeyboard();
+  for (const u of users) {
+    kb.text(`${u.status === "BANNED" ? "🚫 " : ""}${u.label} · ${(u.balanceMinor / 100).toFixed(2)} ${u.currency} · ${u.orders}🧾`, cb("adm", "uinfo", u.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "m_users"));
+  await show(ctx, users.length ? "📋 <b>Recent users</b>\nTap one to manage." : "No users yet.", kb, true);
+}
+
+async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
+  const u = await getUserById(userId);
+  if (!u) { await ctx.reply("User not found."); return usersMenuView(ctx); }
+  const kb = new InlineKeyboard()
+    .add(sbtn("➕ Add Balance", cb("adm", "uadd", u.id), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", u.id), "danger")).row()
+    .add(u.status === "BANNED" ? sbtn("✅ Unban User", cb("adm", "uunban", u.id), "success") : sbtn("🚫 Ban User", cb("adm", "uban", u.id), "danger")).row()
+    .text("◀️ Back", cb("adm", "uview"));
+  await show(ctx, [
+    `👤 <b>${escapeHtml(u.label)}</b>`,
+    `Status: <b>${u.status}</b>`,
+    `Wallet: <b>${(u.balanceMinor / 100).toFixed(2)} ${u.currency}</b>`,
+    `Orders: <b>${u.orders}</b>`,
+  ].join("\n"), kb, true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -605,6 +674,32 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
+    case "m_prod": case "m_orders": case "m_stats": case "m_pay": case "m_mkt": case "m_content": case "m_sec":
+      await showSubmenu(ctx, `m_${action.slice(2)}`);
+      return;
+    case "m_users": return usersMenuView(ctx);
+    case "uview": return usersListView(ctx);
+    case "uinfo": return userDetailView(ctx, id);
+    case "ulook":
+      ctx.session.awaiting = "admin_user_lookup";
+      await askStep(ctx, "🔎 Send the customer's @username or Telegram ID:");
+      return;
+    case "uadd":
+      ctx.session.userTarget = id; ctx.session.awaiting = "admin_user_addbal";
+      await askStep(ctx, "➕ Amount to <b>add</b> to their wallet (their currency, e.g. 10):");
+      return;
+    case "udeduct":
+      ctx.session.userTarget = id; ctx.session.awaiting = "admin_user_deductbal";
+      await askStep(ctx, "➖ Amount to <b>deduct</b> from their wallet (e.g. 10):");
+      return;
+    case "uban":
+      await setUserBanned(id, true);
+      await ctx.reply("🚫 User banned — they can no longer use the bot.");
+      return userDetailView(ctx, id);
+    case "uunban":
+      await setUserBanned(id, false);
+      await ctx.reply("✅ User unbanned.");
+      return userDetailView(ctx, id);
     case "sales": return salesView(ctx);
     case "sups": return suppliersView(ctx);
     case "supadd":
@@ -1359,6 +1454,22 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_user_lookup") {
+    const u = await getUserSummary(text.trim());
+    if (!u) { await ctx.reply("❌ No customer found. Send their @username or Telegram numeric ID."); return true; }
+    await userDetailView(ctx, u.id);
+    return true;
+  }
+  if (awaiting === "admin_user_addbal" || awaiting === "admin_user_deductbal") {
+    const target = ctx.session.userTarget ?? ""; ctx.session.userTarget = undefined;
+    const sign = awaiting === "admin_user_deductbal" ? -1 : 1;
+    const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!target || !Number.isFinite(val) || val <= 0) { await ctx.reply("Please send a valid amount, e.g. 10."); return true; }
+    const r = await adjustUserWalletById(target, sign * Math.round(val * 100), String(ctx.from?.id ?? ""));
+    await ctx.reply(r.ok ? `✅ ${sign > 0 ? "Added" : "Deducted"} ${val.toFixed(2)}. New balance: <b>${(Number(r.newBalanceMinor) / 100).toFixed(2)} ${r.currency}</b>.` : "❌ Could not adjust.", { parse_mode: "HTML" });
+    await userDetailView(ctx, target);
+    return true;
+  }
   if (awaiting === "admin_wallet_adj") {
     const parts = text.split(/\s+/);
     const identifier = parts[0] ?? "";

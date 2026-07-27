@@ -129,6 +129,11 @@ export function createBot(): Bot<Ctx> {
     });
     ctx.user = user;
     ctx.session.isNewUser = isNew;
+    // Banned users can't use the bot.
+    if ((user as { status?: string }).status === "BANNED") {
+      await ctx.reply("🚫 Your access has been suspended. Contact support if you think this is a mistake.").catch(() => undefined);
+      return;
+    }
     await next();
   });
 

@@ -673,3 +673,67 @@ export async function deliveryInstructionsMessage(): Promise<string | null> {
   const html = (await getDeliveryInstructions()).trim();
   return html ? `📋 <b>Important — please read</b>\n${html}` : null;
 }
+
+// ───────────── Users management ─────────────
+export interface UserRow { id: string; label: string; balanceMinor: number; currency: string; status: string; orders: number }
+
+export async function listRecentUsers(limit = 12): Promise<UserRow[]> {
+  const users = await prisma.user.findMany({
+    orderBy: { createdAt: "desc" }, take: limit,
+    include: { wallet: true, _count: { select: { orders: true } } },
+  });
+  return users.map((u) => ({
+    id: u.id,
+    label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+    balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
+    currency: u.wallet?.currency ?? u.currency,
+    status: u.status,
+    orders: u._count.orders,
+  }));
+}
+
+export async function getUserSummary(identifier: string): Promise<UserRow | null> {
+  const id = identifier.trim().replace(/^@/, "");
+  const u = /^\d+$/.test(id)
+    ? await prisma.user.findUnique({ where: { telegramId: BigInt(id) }, include: { wallet: true, _count: { select: { orders: true } } } })
+    : await prisma.user.findFirst({ where: { telegramHandle: id }, include: { wallet: true, _count: { select: { orders: true } } } });
+  if (!u) return null;
+  return {
+    id: u.id,
+    label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+    balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
+    currency: u.wallet?.currency ?? u.currency,
+    status: u.status,
+    orders: u._count.orders,
+  };
+}
+
+export async function getUserById(userId: string): Promise<UserRow | null> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, include: { wallet: true, _count: { select: { orders: true } } } });
+  if (!u) return null;
+  return {
+    id: u.id,
+    label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+    balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
+    currency: u.wallet?.currency ?? u.currency,
+    status: u.status,
+    orders: u._count.orders,
+  };
+}
+
+export async function setUserBanned(userId: string, banned: boolean): Promise<void> {
+  await prisma.user.update({ where: { id: userId }, data: { status: banned ? "BANNED" : "ACTIVE" } });
+}
+
+/** Add or deduct a user's wallet balance by user id (admin). Positive = add, negative = deduct. */
+export async function adjustUserWalletById(userId: string, amountMinor: number, actorId?: string): Promise<{ ok: boolean; newBalanceMinor?: bigint; currency?: string }> {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) return { ok: false };
+  const newBalanceMinor = await adjustWallet({ userId, amountMinor: BigInt(amountMinor), type: "ADJUSTMENT", note: "admin adjustment (bot)", actorId });
+  const w = await prisma.wallet.findUnique({ where: { userId } });
+  const currency = w?.currency ?? user.currency;
+  if (user.telegramId !== null) {
+    await enqueueTelegramMessage(user.telegramId, `💳 Your wallet was ${amountMinor >= 0 ? "credited" : "debited"} by an admin. New balance: <b>${(Number(newBalanceMinor) / 100).toFixed(2)} ${currency}</b>.`);
+  }
+  return { ok: true, newBalanceMinor, currency };
+}
