@@ -3,6 +3,7 @@ import { prisma } from "@gis/database";
 import { encryptSecret, decryptSecret } from "@gis/shared";
 import { invalidate } from "./redis.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
+import { announceProduct, sendBroadcast } from "./broadcast.service.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -174,6 +175,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
   let cat = await prisma.category.findFirst({ where: { slug: "uncategorized" } });
   if (!cat) cat = await prisma.category.create({ data: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 } });
   let added = 0, updated = 0;
+  const newIds: string[] = [];
   for (const p of prods) {
     const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
     const inrMinor = Math.round(priceMinor * rate);
@@ -190,7 +192,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
     } else {
       if (!inStock) continue; // don't import out-of-stock products
       const slug = `sup-${s.id.slice(0, 6)}-${p.ref}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60);
-      await prisma.product.create({
+      const created = await prisma.product.create({
         data: {
           slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
           type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
@@ -198,10 +200,28 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
           variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
         },
       });
+      newIds.push(created.id);
       added++;
     }
   }
   await invalidate("cat:*");
+  // Notify customers about new products: announce individually if few, else one summary.
+  if (newIds.length > 0) {
+    if (newIds.length <= 3) {
+      for (const pid of newIds) await announceProduct(pid, { createdById: "supplier-sync", force: true }).catch(() => undefined);
+    } else {
+      const uname = loadConfig().BOT_USERNAME;
+      await sendBroadcast({
+        title: "",
+        body: `🆕 <b>${newIds.length} new products just added!</b>\nBrowse the shop and grab them before they're gone. 🔥`,
+        bodyIsHtml: true,
+        segment: "all",
+        buttonText: uname ? "🛒 Browse shop" : undefined,
+        buttonUrl: uname ? `https://t.me/${uname}?start=menu` : undefined,
+        createdById: "supplier-sync",
+      }).catch(() => undefined);
+    }
+  }
   return { added, updated };
 }
 
