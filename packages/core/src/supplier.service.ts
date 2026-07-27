@@ -190,7 +190,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
       await prisma.product.create({
         data: {
           slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
-          type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
+          type: "MANUAL_SERVICE", status: "PAUSED", fulfillmentMode: "MANUAL", categoryId: cat.id,
           supplierId: s.id, supplierRef: p.ref,
           variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
         },
@@ -200,6 +200,22 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
   }
   await invalidate("cat:*");
   return { added, updated };
+}
+
+/** List a supplier's imported products (for the show/hide picker). */
+export async function listSupplierProducts(supplierId: string, limit = 30): Promise<Array<{ id: string; name: string; visible: boolean; priceMinor: number }>> {
+  const rows = await prisma.product.findMany({
+    where: { supplierId, deletedAt: null },
+    orderBy: { name: "asc" }, take: limit,
+    include: { variants: { include: { prices: { where: { currency: "USD", tier: { name: "RETAIL" } } } } } },
+  });
+  return rows.map((p) => ({ id: p.id, name: p.name, visible: p.status === "ACTIVE", priceMinor: p.variants[0]?.prices[0]?.amountMinor ?? 0 }));
+}
+
+/** Show/hide a supplier product in the shop. */
+export async function setSupplierProductVisible(productId: string, visible: boolean): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { status: visible ? "ACTIVE" : "PAUSED" } });
+  await invalidate("cat:*");
 }
 
 /** Fulfill an order item by buying from its linked supplier and delivering the key. */

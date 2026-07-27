@@ -76,6 +76,8 @@ import {
   testSupplier,
   syncSupplierProducts,
   fulfillFromSupplier,
+  listSupplierProducts,
+  setSupplierProductVisible,
   listRecentUsers,
   getUserSummary,
   setUserBanned,
@@ -618,7 +620,8 @@ async function suppliersView(ctx: Ctx): Promise<void> {
   const sups = await listSuppliers();
   const kb = new InlineKeyboard().add(sbtn("➕ Add supplier", cb("adm", "supadd"), "success")).row();
   for (const su of sups) {
-    kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text(`🧪 Test`, cb("adm", "suptest", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
+    kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text("📂 Products", cb("adm", "supprods", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
+    kb.text(`🧪 Test connection — ${su.name.slice(0, 18)}`, cb("adm", "suptest", su.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
   const lines = ["🏭 <b>Suppliers</b>", "", "Connect an external supplier API — sync their catalog into your shop with your markup; buyers pay your price and the key is bought from the supplier and delivered automatically.", ""];
@@ -658,6 +661,19 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
     `Wallet: <b>${(u.balanceMinor / 100).toFixed(2)} ${u.currency}</b>`,
     `Orders: <b>${u.orders}</b>`,
   ].join("\n"), kb, true);
+}
+
+async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void> {
+  const prods = await listSupplierProducts(supplierId, 30);
+  const kb = new InlineKeyboard();
+  for (const p of prods) {
+    kb.text(`${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 34)} · $${(p.priceMinor / 100).toFixed(2)}`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "sups"));
+  const shown = prods.filter((p) => p.visible).length;
+  await show(ctx, prods.length
+    ? `📂 <b>Supplier products</b> (${shown}/${prods.length} shown)\nTap to show 👁 / hide 🙈 in your shop. New synced products start hidden.`
+    : "No products synced yet — tap 🔄 Sync on the supplier first.", kb, true);
 }
 
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
@@ -716,6 +732,17 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_sup_name";
       await askStep(ctx, "🏭 <b>Add supplier</b>\nStep 1/4 — send a <b>name</b> for this supplier:");
       return;
+    case "supprods": return supplierProductsView(ctx, id);
+    case "sptog": {
+      const [supId, prodId] = id.split("~");
+      if (supId && prodId) {
+        const prods = await listSupplierProducts(supId, 200);
+        const cur = prods.find((x) => x.id === prodId)?.visible ?? false;
+        await setSupplierProductVisible(prodId, !cur);
+        await supplierProductsView(ctx, supId);
+      }
+      return;
+    }
     case "supsync": {
       await ctx.reply("🔄 Syncing catalog…");
       const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; err?: string }));
