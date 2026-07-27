@@ -143,17 +143,20 @@ export async function testSupplier(id: string): Promise<{ ok: boolean; detail: s
 }
 
 /** Place an order at the supplier and return the delivered key(s). Deducts the supplier-side balance. */
-const KEY_FIELD_RE = /(key|code|serial|license|cred|account|token|secret|login|user|email|pass|pin|voucher|card|otp|delivered|value|content|data)/i;
-const STATUS_WORDS = /^(true|false|ok|success|failed|failure|error|pending|completed|done|processing|active)$/i;
+const KEY_FIELD_RE = /(licen[sc]e|serial|voucher|redeem|coupon|activation|cd[_-]?key|game[_-]?key|product[_-]?key|\bkey\b|\bcode\b|\bcodes\b|credential|secret|\btoken\b|login|username|\buser\b|email|password|\bpass\b|\bpin\b|delivered|download|content)/i;
+// Never treat these as the delivered key even if they contain "key"/"id".
+const EXCLUDE_FIELD_RE = /(idempoten|request|trace|order[_-]?id|orderid|txn|transaction|invoice|reference|\bref\b|\bid\b|status|message|success|error|created|updated|timestamp)/i;
+const STATUS_WORDS = /^(true|false|ok|yes|no|success|failed|failure|error|pending|completed|done|processing|active|null|none|n\/a)$/i;
 
 /** Deeply extract delivered credential strings from any supplier order response shape. */
-function extractDeliveredKeys(j: any): string[] {
+function extractDeliveredKeys(j: any, exclude: string[] = []): string[] {
   const out: string[] = [];
+  const bad = (v: string): boolean => v.startsWith("sup-") || exclude.some((e) => e && v === e);
   const walk = (node: any, keyName?: string): void => {
     if (node === null || node === undefined) return;
     if (typeof node === "string") {
       const v = node.trim();
-      if (v.length >= 3 && keyName && KEY_FIELD_RE.test(keyName) && !STATUS_WORDS.test(v)) out.push(v);
+      if (v.length >= 4 && keyName && KEY_FIELD_RE.test(keyName) && !EXCLUDE_FIELD_RE.test(keyName) && !STATUS_WORDS.test(v) && !bad(v)) out.push(v);
       return;
     }
     if (typeof node === "number") return;
@@ -161,7 +164,6 @@ function extractDeliveredKeys(j: any): string[] {
     if (typeof node === "object") { for (const [k, val] of Object.entries(node)) walk(val, k); return; }
   };
   walk(j);
-  if (out.length === 0 && typeof j === "string" && j.trim().length >= 3) out.push(j.trim());
   return [...new Set(out)];
 }
 
@@ -170,15 +172,16 @@ export async function placeSupplierOrder(supplierId: string, ref: string, qty = 
   if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
   try {
     const pid: string | number = /^\d+$/.test(ref) ? Number(ref) : ref;
+    const idem = `sup-${supplierId}-${ref}-${Date.now()}`;
     const res = await supFetch(s, "/orders", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": `sup-${supplierId}-${ref}-${Date.now()}` },
+      headers: { "Content-Type": "application/json", "Idempotency-Key": idem },
       body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty }),
     });
     const rawText = await res.text().catch(() => "");
     if (!res.ok) return { ok: false, keys: [], reason: `${res.status} ${rawText.slice(0, 200)}`, raw: rawText.slice(0, 500) };
     let j: any; try { j = JSON.parse(rawText); } catch { j = rawText; }
-    const out = extractDeliveredKeys(j);
+    const out = extractDeliveredKeys(j, [idem, String(ref), s.id]);
     return { ok: out.length > 0, keys: out, reason: out.length ? undefined : "NO_KEY_IN_RESPONSE", raw: rawText.slice(0, 500) };
   } catch (e) { return { ok: false, keys: [], reason: String(e instanceof Error ? e.message : e).slice(0, 200) }; }
 }
