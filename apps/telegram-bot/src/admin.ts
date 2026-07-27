@@ -78,6 +78,7 @@ import {
   fulfillFromSupplier,
   listSupplierProducts,
   setSupplierProductVisible,
+  setAllSupplierProductsVisible,
   listRecentUsers,
   getUserSummary,
   setUserBanned,
@@ -666,6 +667,7 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
 async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void> {
   const prods = await listSupplierProducts(supplierId, 30);
   const kb = new InlineKeyboard();
+  kb.add(sbtn("👁 Show all", cb("adm", "spall", `${supplierId}~1`), "success"), sbtn("🙈 Hide all", cb("adm", "spall", `${supplierId}~0`), "danger")).row();
   for (const p of prods) {
     kb.text(`${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 34)} · $${(p.priceMinor / 100).toFixed(2)}`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
   }
@@ -733,6 +735,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "🏭 <b>Add supplier</b>\nStep 1/4 — send a <b>name</b> for this supplier:");
       return;
     case "supprods": return supplierProductsView(ctx, id);
+    case "spall": {
+      const [supId, on] = id.split("~");
+      if (supId) { const n = await setAllSupplierProductsVisible(supId, on === "1"); await ctx.reply(`${on === "1" ? "👁 Showing" : "🙈 Hidden"} ${n} product(s).`); await supplierProductsView(ctx, supId); }
+      return;
+    }
     case "sptog": {
       const [supId, prodId] = id.split("~");
       if (supId && prodId) {

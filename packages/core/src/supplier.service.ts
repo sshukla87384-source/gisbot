@@ -243,6 +243,13 @@ export async function setSupplierProductVisible(productId: string, visible: bool
   await invalidate("cat:*");
 }
 
+/** Show or hide ALL of a supplier's products at once. */
+export async function setAllSupplierProductsVisible(supplierId: string, visible: boolean): Promise<number> {
+  const r = await prisma.product.updateMany({ where: { supplierId, deletedAt: null }, data: { status: visible ? "ACTIVE" : "PAUSED" } });
+  await invalidate("cat:*");
+  return r.count;
+}
+
 /** Fulfill an order item by buying from its linked supplier and delivering the key. */
 export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: boolean; reason?: string }> {
   const item = await prisma.orderItem.findUnique({ where: { id: orderItemId }, include: { variant: { include: { product: true } } } });
