@@ -2,7 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
 import { adjustWallet } from "./wallet.service.js";
-import { fetchPayTransactions } from "../orders/binance-poll.service.js";
+import { fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
 
 function toUsdt(amountMinor: number, currency: Currency): string {
   const cfg = loadConfig();
@@ -60,11 +60,12 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
   ]);
   if (dupTopup || dupOrder) return { ok: false, reason: "ALREADY_USED" };
 
-  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) return { ok: false, reason: "NO_API" };
+  const creds = await getBinanceCreds();
+  if (!creds) return { ok: false, reason: "NO_API" };
 
   let txns;
   try {
-    txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+    txns = await fetchPayTransactions(creds.key, creds.secret);
   } catch {
     return { ok: false, reason: "NOT_FOUND" };
   }
@@ -96,7 +97,8 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
  */
 export async function creditFreeTopup(userId: string, txnId: string): Promise<TopupVerify> {
   const cfg = loadConfig();
-  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) return { ok: false, reason: "NO_API" };
+  const creds = await getBinanceCreds();
+  if (!creds) return { ok: false, reason: "NO_API" };
   const clean = txnId.trim();
   const [dupTopup, dupOrder] = await Promise.all([
     prisma.walletTopup.findFirst({ where: { binanceTxnId: clean }, select: { id: true } }),
@@ -106,7 +108,7 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
 
   let txns;
   try {
-    txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+    txns = await fetchPayTransactions(creds.key, creds.secret);
   } catch {
     return { ok: false, reason: "NOT_FOUND" };
   }

@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { encryptSecret, decryptSecret } from "@gis/shared";
 import { prisma } from "@gis/database";
 import { createHmac } from "node:crypto";
 import { enqueueAdminAlert } from "../queues.js";
@@ -36,6 +37,27 @@ export async function fetchPayTransactions(apiKey: string, apiSecret: string): P
   return json.data ?? [];
 }
 
+/** Binance API credentials — admin-set (encrypted in DB) preferred, else .env. */
+export async function getBinanceCreds(): Promise<{ key: string; secret: string } | null> {
+  const cfg = loadConfig();
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: "binance.api" } });
+    const v = row?.value as { keyEnc?: string; secretEnc?: string } | null | undefined;
+    if (v?.keyEnc && v?.secretEnc) {
+      return { key: decryptSecret(v.keyEnc, cfg.ENCRYPTION_MASTER_KEY), secret: decryptSecret(v.secretEnc, cfg.ENCRYPTION_MASTER_KEY) };
+    }
+  } catch { /* fall back to env */ }
+  if (cfg.BINANCE_API_KEY && cfg.BINANCE_API_SECRET) return { key: cfg.BINANCE_API_KEY, secret: cfg.BINANCE_API_SECRET };
+  return null;
+}
+
+/** Admin: set the Binance API key/secret from the bot (stored encrypted). */
+export async function setBinanceCreds(key: string, secret: string): Promise<void> {
+  const cfg = loadConfig();
+  const value = { keyEnc: encryptSecret(key.trim(), cfg.ENCRYPTION_MASTER_KEY), secretEnc: encryptSecret(secret.trim(), cfg.ENCRYPTION_MASTER_KEY) };
+  await prisma.setting.upsert({ where: { key: "binance.api" }, create: { key: "binance.api", value }, update: { value } });
+}
+
 async function alertApiFailureThrottled(msg: string): Promise<void> {
   try {
     const first = await getRedis().set("binance:apierr", "1", "EX", 1800, "NX"); // once / 30 min
@@ -45,12 +67,12 @@ async function alertApiFailureThrottled(msg: string): Promise<void> {
 
 /** Diagnostic: verify the Binance API key can read Pay history. */
 export async function testBinanceApi(): Promise<{ ok: boolean; detail: string }> {
-  const cfg = loadConfig();
-  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) {
-    return { ok: false, detail: "BINANCE_API_KEY / BINANCE_API_SECRET are not set in .env." };
+  const creds = await getBinanceCreds();
+  if (!creds) {
+    return { ok: false, detail: "No Binance API key/secret set. Set them in /Shriji → 🔗 Binance API (or .env)." };
   }
   try {
-    const txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+    const txns = await fetchPayTransactions(creds.key, creds.secret);
     const sample = txns.slice(0, 3).map((t) => `${t.amount} ${t.currency}`).join("; ");
     return { ok: true, detail: `OK ✅ — read ${txns.length} recent Pay transaction(s). ${sample ? `Latest: ${sample}` : "(none yet)"}` };
   } catch (e) {
@@ -64,8 +86,8 @@ export async function testBinanceApi(): Promise<{ ok: boolean; detail: string }>
  * funds. Each transaction settles at most one order (binanceTxnId dedupe).
  */
 export async function pollBinancePayments(): Promise<number> {
-  const cfg = loadConfig();
-  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) return 0;
+  const creds = await getBinanceCreds();
+  if (!creds) return 0;
 
   const pending = await prisma.order.findMany({
     where: { status: "PENDING_PAYMENT", binanceAsset: "USDT", expiresAt: { gt: new Date() } },
@@ -75,7 +97,7 @@ export async function pollBinancePayments(): Promise<number> {
 
   let txns: PayTxn[];
   try {
-    txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+    txns = await fetchPayTransactions(creds.key, creds.secret);
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("binance poll failed", { error: String(e) });
@@ -127,7 +149,6 @@ export type BinanceVerifyResult =
  * no key it returns { ok:false, reason:"NO_API" } so the caller can fall back.
  */
 export async function verifyBinanceByTxnId(orderId: string, txnId: string, expectedUserId?: string): Promise<BinanceVerifyResult> {
-  const cfg = loadConfig();
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true, userId: true },
@@ -140,11 +161,12 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string, expec
   const dup = await prisma.order.findFirst({ where: { binanceTxnId: clean }, select: { id: true } });
   if (dup) return { ok: false, reason: "ALREADY_USED" };
 
-  if (!cfg.BINANCE_API_KEY || !cfg.BINANCE_API_SECRET) return { ok: false, reason: "NO_API" };
+  const creds = await getBinanceCreds();
+  if (!creds) return { ok: false, reason: "NO_API" };
 
   let txns: PayTxn[];
   try {
-    txns = await fetchPayTransactions(cfg.BINANCE_API_KEY, cfg.BINANCE_API_SECRET);
+    txns = await fetchPayTransactions(creds.key, creds.secret);
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("binance verify fetch failed", { error: String(e) });

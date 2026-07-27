@@ -48,6 +48,8 @@ export interface SessionData {
     | "admin_web_email"
     | "admin_web_pass"
     | "admin_delivery_note"
+    | "admin_binance_key"
+    | "admin_binance_secret"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -84,6 +86,7 @@ export interface SessionData {
   pendEmojiGlyph?: string;
   dmTarget?: string;
   webAdminEmail?: string;
+  binanceKeyTmp?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

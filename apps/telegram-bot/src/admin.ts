@@ -68,6 +68,7 @@ import {
   setProductDescription,
   setProductStatus,
   testBinanceApi,
+  setBinanceCreds,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
 } from "@gis/core";
@@ -177,7 +178,7 @@ function panelKeyboard(): InlineKeyboard {
     .add(sbtn("💰 Adjust Wallet", cb("adm", "walletadj"), "primary"), sbtn("🕒 BNPL Limit", cb("adm", "bnpl"), "primary")).row()
     // ── Customize & integrations ──
     .add(sbtn("🔤 Rename Buttons", cb("adm", "btns"), "primary"), sbtn("📋 Delivery Note", cb("adm", "delnote"), "primary")).row()
-    .add(sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
+    .add(sbtn("🔗 Set Binance API", cb("adm", "binapi"), "primary"), sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
     .add(sbtn("🔑 API Keys", cb("adm", "apikeys"), "primary")).row()
     // ── Security ──
     .add(sbtn("🔑 Passcode", cb("adm", "chpass"), "primary"), sbtn("🔐 Web Login", cb("adm", "webpass"), "primary")).row()
@@ -844,6 +845,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
+    case "binapi":
+      ctx.session.awaiting = "admin_binance_key";
+      await askStep(ctx, "🔗 <b>Set Binance API</b>\nSend your Binance <b>API Key</b> (read-only key with Pay/Wallet read access). Your messages are deleted after.");
+      return;
     case "bintest": {
       await ctx.reply("🧪 Testing Binance API…");
       const r = await testBinanceApi();
@@ -1081,6 +1086,25 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_binance_key") {
+    await ctx.deleteMessage().catch(() => undefined);
+    ctx.session.binanceKeyTmp = text.trim();
+    ctx.session.awaiting = "admin_binance_secret";
+    await askStep(ctx, "🔗 Now send your Binance <b>API Secret</b>:");
+    return true;
+  }
+  if (awaiting === "admin_binance_secret") {
+    await ctx.deleteMessage().catch(() => undefined);
+    const key = ctx.session.binanceKeyTmp ?? ""; ctx.session.binanceKeyTmp = undefined;
+    const secret = text.trim();
+    if (!key || !secret) { await ctx.reply("Missing key or secret — tap 🔗 Set Binance API to retry."); return true; }
+    await setBinanceCreds(key, secret);
+    await ctx.reply("🔐 Saved (encrypted). Testing the connection…");
+    const r = await testBinanceApi();
+    await ctx.reply(r.ok ? `✅ ${r.detail}` : `❌ ${r.detail}`);
+    await sendPanel(ctx, false);
+    return true;
+  }
   if (awaiting === "admin_delivery_note") {
     if (text.trim() === "-") { await setDeliveryInstructions(""); await ctx.reply("🧹 Delivery instructions cleared."); await sendPanel(ctx, false); return true; }
     await setDeliveryInstructions(composeBroadcastHtml(ctx));
