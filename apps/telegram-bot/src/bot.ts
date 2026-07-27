@@ -31,6 +31,7 @@ import {
   removeItem,
   resolveTelegramUser,
   revealDelivery,
+  revealOrderDeliveries,
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
@@ -810,6 +811,14 @@ export function createBot(): Bot<Ctx> {
         case "lic:view": {
           const revealed = await revealDelivery(user.id, args[0] ?? "");
           await sendRevealed(ctx, revealed.productName, revealed.variantName, revealed.payload);
+          break;
+        }
+        case "ord:reveal": {
+          await ctx.answerCallbackQuery({ text: "Fetching your keys…" });
+          const all = await revealOrderDeliveries(user.id, args[0] ?? "");
+          const ds = all.map((r) => ({ orderItemId: "", productName: r.productName, variantName: r.variantName, kind: (r.payload.kind === "DIGITAL_ACCOUNT" ? "DIGITAL_ACCOUNT" : "LICENSE_KEY") as "LICENSE_KEY" | "DIGITAL_ACCOUNT", secret: { key: r.payload.key, username: r.payload.username, password: r.payload.password, expiresAt: r.payload.expiresAt }, activationGuide: null }));
+          if (ds.length === 0) { await ctx.reply("No delivered keys found for this order."); break; }
+          await deliverAll(ctx, ds, args[0] ?? "");
           break;
         }
 

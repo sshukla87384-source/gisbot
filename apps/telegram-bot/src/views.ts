@@ -570,16 +570,31 @@ export function currencyView(user: BotUser): View {
 export async function orderDetailView(user: BotUser, orderId: string): Promise<View> {
   const items = await listOrderItems(user.id, orderId);
   const kb = new InlineKeyboard();
+  if (items.length === 0) {
+    kb.text("◀️ Orders", cb("ord", "list", 1));
+    backToMenuRow(kb);
+    return { text: "No delivered items in this order yet.", kb };
+  }
+  // Group identical products so a 15× order isn't 15 buttons.
+  const groups = new Map<string, { name: string; count: number; firstId: string }>();
   for (const it of items) {
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
-    kb.text(`🔑 ${it.productName}${vn}`, cb("lic", "view", it.orderItemId)).row();
+    const label = `${it.productName}${vn}`;
+    const g = groups.get(label);
+    if (g) g.count++;
+    else groups.set(label, { name: label, count: 1, firstId: it.orderItemId });
+  }
+  const lines = ["📦 <b>Order items</b>", ""];
+  for (const g of groups.values()) lines.push(`🔑 ${escapeHtml(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`);
+  if (items.length > 10) {
+    kb.add(sbtn(`📄 Get all ${items.length} keys`, cb("ord", "reveal", orderId), "success")).row();
+  } else {
+    for (const g of groups.values()) kb.text(`🔑 View ${g.name.slice(0, 26)}${g.count > 1 ? ` (×${g.count})` : ""}`, cb("lic", "view", g.firstId)).row();
+    if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
   }
   kb.text("◀️ Orders", cb("ord", "list", 1));
   backToMenuRow(kb);
-  return {
-    text: items.length > 0 ? "📦 <b>Order items</b>\nTap to view your delivered details:" : "No delivered items in this order yet.",
-    kb,
-  };
+  return { text: lines.join("\n"), kb };
 }
 
 export function quantityPickerView(variantId: string, stock: number, productId?: string): View {

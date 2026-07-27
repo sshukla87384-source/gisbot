@@ -92,6 +92,15 @@ export interface RevealedDelivery {
  * Re-reveal a delivered secret to its owner. Ownership enforced in the query;
  * every reveal is audit-logged (Security doc §4).
  */
+export async function revealOrderDeliveries(userId: string, orderId: string): Promise<RevealedDelivery[]> {
+  const items = await prisma.orderItem.findMany({
+    where: { orderId, order: { userId }, fulfilledAt: { not: null }, deliveryPayloadEncrypted: { not: null } },
+    orderBy: { fulfilledAt: "asc" },
+  });
+  const key = loadConfig().ENCRYPTION_MASTER_KEY;
+  return items.map((i) => ({ productName: i.productNameSnap, variantName: i.variantNameSnap, payload: JSON.parse(decryptSecret(i.deliveryPayloadEncrypted as string, key)) as RevealedDelivery["payload"] }));
+}
+
 export async function revealDelivery(userId: string, orderItemId: string): Promise<RevealedDelivery> {
   const item = await prisma.orderItem.findFirst({
     where: { id: orderItemId, order: { userId } },

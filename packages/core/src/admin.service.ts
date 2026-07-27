@@ -5,7 +5,7 @@ import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
-import { invalidate } from "./redis.js";
+import { invalidate, cached } from "./redis.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -16,6 +16,7 @@ export async function getAdminStats(): Promise<{
   pendingPayments: number;
   lowStockVariants: number;
 }> {
+  return cached("admin:stats", 20, async () => {
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const [users, activeProducts, ordersToday, paidToday, pendingPayments] = await Promise.all([
@@ -43,6 +44,7 @@ export async function getAdminStats(): Promise<{
     pendingPayments,
     lowStockVariants: Number(low[0]?.c ?? 0n),
   };
+  });
 }
 
 export interface OrderBrief {
