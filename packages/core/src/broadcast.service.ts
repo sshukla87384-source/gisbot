@@ -192,17 +192,24 @@ export async function announceProduct(
   }));
   const cheapest = pick.length > 0 ? pick.reduce((a, b) => (b.minor < a.minor ? b : a)) : null;
 
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "🆕 ";
-  const title = `${icon}${p.name}`;
-  const lines = ["🆕 Just added & in stock!", "", p.description ?? "Grab it now."];
-  if (cheapest) lines.push(`\n${onSale ? "🔥 Flash sale — " : ""}from ${fmtMinor(cheapest.minor, cheapest.currency)}`);
+  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
+  const lines = [
+    `${icon}${nameDisp}`,
+    onSale ? "🔥 <b>Flash sale — just added!</b>" : "🆕 <b>Just added & in stock!</b>",
+    ...(descDisp ? ["", descDisp] : []),
+  ];
+  if (cheapest) lines.push("", `💵 <b>${onSale ? "Sale price " : "Price "}from ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
 
-  const buttonText = onSale ? "⚡ Buy Now — 🔥 Deal" : "⚡ Buy Now";
+  const buttonText = onSale ? "🛒 Buy now — 🔥 Deal" : "🛒 Buy now";
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
 
   const res = await sendBroadcast({
-    title,
+    title: "",
     body: lines.join("\n"),
+    bodyIsHtml: true,
     segment: "all",
     imageUrl: p.imageUrl ?? undefined,
     buttonText: buttonUrl ? buttonText : undefined,
@@ -300,8 +307,10 @@ export async function announceRestock(
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "💎 ";
   const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
   const lines = [
     `${icon}${nameDisp}`,
+    ...(descDisp ? ["", descDisp, ""] : [""]),
     `➕ Added: <b>${qtyAdded}</b>`,
     `📦 Current stock: <b>${currentStock}</b>`,
   ];
