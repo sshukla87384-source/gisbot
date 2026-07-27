@@ -153,7 +153,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     stockStr,
     "",
     ...(user.isVip ? [`${e("vip")} <b>VIP price applied</b>`] : []),
-    p.fulfillmentMode === "AUTOMATIC" ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
+    (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked) ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
     p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : ""),
     HR,

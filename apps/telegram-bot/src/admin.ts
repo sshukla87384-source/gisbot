@@ -55,6 +55,7 @@ import {
   getRedis,
   listPendingPaymentOrders,
   listProductsBrief,
+  listProductsPage,
   listRecentOrders,
   listCategoriesBrief,
   listPostTargets,
@@ -316,16 +317,22 @@ async function orderView(ctx: Ctx, orderId: string): Promise<void> {
   await show(ctx, lines.join("\n"), kb, true);
 }
 
-async function productsView(ctx: Ctx): Promise<void> {
-  const prods = await listProductsBrief(20);
+async function productsView(ctx: Ctx, page = 1): Promise<void> {
+  const result = await listProductsPage(page, 20);
   const kb = new InlineKeyboard();
-  for (const p of prods) {
-    const tag = p.status === "ACTIVE" ? "🟢" : "⚪️";
+  for (const p of result.items) {
+    const tag = p.status === "ACTIVE" ? "🟢" : "🙈";
     const sale = p.onSalePct ? " 🔥" : "";
     kb.text(`${tag} ${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.name}${sale}`, cb("adm", "prod", p.id)).row();
   }
+  if (result.pages > 1) {
+    const nav: Array<ReturnType<typeof sbtn>> = [];
+    if (result.page > 1) nav.push(sbtn("◀️ Prev", cb("adm", "prods", String(result.page - 1)), "primary"));
+    if (result.page < result.pages) nav.push(sbtn("Next ▶️", cb("adm", "prods", String(result.page + 1)), "primary"));
+    if (nav.length) kb.add(...nav).row();
+  }
   kb.text("◀️ Back", cb("adm", "home"));
-  await show(ctx, prods.length ? "📦 <b>Products</b>" : "No products yet.", kb, true);
+  await show(ctx, result.total ? `📦 <b>Products</b> — ${result.total} total (page ${result.page}/${result.pages})\n🟢 shown · 🙈 hidden` : "No products yet.", kb, true);
 }
 
 async function productView(ctx: Ctx, productId: string): Promise<void> {
@@ -830,7 +837,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "orders": return ordersView(ctx, true);
     case "recent": return ordersView(ctx, false);
     case "ord": return orderView(ctx, id);
-    case "prods": return productsView(ctx);
+    case "prods": return productsView(ctx, id ? Number.parseInt(id, 10) || 1 : 1);
     case "prod": return productView(ctx, id);
     case "pprice":
       ctx.session.admProductId = id;

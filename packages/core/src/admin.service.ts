@@ -160,11 +160,24 @@ export async function adjustUserWallet(
 
 export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean }
 
+type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean };
+function toBrief(p: PRow): ProductBrief {
+  return { id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange };
+}
+
 export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
   const rows = await prisma.product.findMany({
     where: { deletedAt: null }, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], take: limit,
   });
-  return rows.map((p) => ({ id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange }));
+  return rows.map(toBrief);
+}
+
+/** Paginated product list for the admin panel (shows ALL products across pages). */
+export async function listProductsPage(page = 1, pageSize = 20): Promise<{ items: ProductBrief[]; page: number; pages: number; total: number }> {
+  const where = { deletedAt: null };
+  const total = await prisma.product.count({ where });
+  const rows = await prisma.product.findMany({ where, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], skip: (Math.max(1, page) - 1) * pageSize, take: pageSize });
+  return { items: rows.map(toBrief), page: Math.max(1, page), pages: Math.max(1, Math.ceil(total / pageSize)), total };
 }
 
 /** Pin a product to the top / a chosen priority. Higher rank = higher in the list; 0 = unpinned. */

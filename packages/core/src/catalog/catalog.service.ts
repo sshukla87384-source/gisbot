@@ -51,6 +51,7 @@ export interface ProductView {
   fulfillmentMode: string;
   activationGuide: string | null;
   isPlatform: boolean;
+  supplierBacked: boolean;
   variants: VariantView[];
 }
 
@@ -210,6 +211,7 @@ export async function getProductView(productId: string, currency: Currency, user
     fulfillmentMode: p.fulfillmentMode,
     activationGuide: p.activationGuide,
     isPlatform: p.resellerId === null,
+    supplierBacked: p.supplierId !== null,
     variants,
   };
 }
