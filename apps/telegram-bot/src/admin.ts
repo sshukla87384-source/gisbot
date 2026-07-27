@@ -330,8 +330,8 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   const p = prods.find((x) => x.id === productId);
   if (!p) { await productsView(ctx); return; }
   const kb = new InlineKeyboard();
-  if (p.status === "ACTIVE") kb.text("⏸ Pause", cb("adm", "ppause", p.id));
-  else kb.text("🟢 Activate", cb("adm", "pactive", p.id));
+  if (p.status === "ACTIVE") kb.add(sbtn("👁 Shown — tap to Hide", cb("adm", "ppause", p.id), "primary"));
+  else kb.add(sbtn("🙈 Hidden — tap to Show", cb("adm", "pactive", p.id), "success"));
   kb.text("📣 Announce", cb("adm", "announce", p.id)).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
@@ -345,7 +345,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
-  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\nStatus: ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
+  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible in bot</b>" : "🙈 <b>Hidden from bot</b>"} · ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
   await show(ctx, text, kb, true);
 }
 
@@ -894,11 +894,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "pactive": {
       await setProductStatus(id, "ACTIVE");
+      await ctx.reply("👁 Now visible — customers can see and buy this product.").catch(() => undefined);
       const ann = await announceProduct(id, { createdById: "bot-admin", force: true });
       await ctx.reply(`🟢 Activated.${ann.announced ? ` 📣 Notified ${ann.targets ?? 0} users with a ⚡ Buy Now button.` : ""}`);
       return productView(ctx, id);
     }
-    case "ppause": { await setProductStatus(id, "PAUSED"); await ctx.reply("⏸ Paused."); return productView(ctx, id); }
+    case "ppause": { await setProductStatus(id, "PAUSED"); await ctx.reply("🙈 Hidden — customers can no longer see or buy this product."); return productView(ctx, id); }
     case "announce": {
       const r = await announceProduct(id, { createdById: "bot-admin", force: true });
       await ctx.reply(r.announced ? `📣 Announced to ${r.targets ?? 0} users.` : "⚠️ Product must be ACTIVE to announce.");
