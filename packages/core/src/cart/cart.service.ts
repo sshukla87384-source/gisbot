@@ -1,5 +1,6 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
+import { effectivePriceMinor } from "../pricing.js";
 
 export interface CartLine {
   itemId: string;
@@ -70,7 +71,7 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
         include: {
           variant: {
             include: {
-              product: { select: { name: true, status: true, type: true, deletedAt: true } },
+              product: true,
               prices: { where: { currency, tier: { name: "RETAIL" } } },
             },
           },
@@ -79,8 +80,16 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
     },
   });
 
+  // Per-user custom price overrides (DIRECT beats BOTH), applied to the shown/charged price.
+  const productIds = (cart?.items ?? []).map((i) => i.variant.productId);
+  const overrides = await prisma.userPrice.findMany({ where: { userId, productId: { in: productIds }, channel: { in: ["DIRECT", "BOTH"] } } });
+  const overrideByProduct = new Map<string, number>();
+  for (const o of overrides) { const cur = overrideByProduct.get(o.productId); if (cur === undefined || o.channel === "DIRECT") overrideByProduct.set(o.productId, o.amountMinor); }
+
   const lines: CartLine[] = (cart?.items ?? []).map((item) => {
-    const price = item.variant.prices[0]?.amountMinor ?? null;
+    const base = item.variant.prices[0]?.amountMinor ?? null;
+    const override = overrideByProduct.get(item.variant.productId);
+    const price = base === null ? null : (override ?? effectivePriceMinor(base, item.variant.product));
     const available =
       item.variant.isActive &&
       item.variant.deletedAt === null &&

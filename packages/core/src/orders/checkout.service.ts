@@ -66,59 +66,34 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
             },
           });
 
-          if (line.fulfillmentMode === "MANUAL") {
-            pendingManualItems++;
-            continue;
+          // Auto-deliver from available stock whenever stock exists — regardless of the
+          // coarse fulfillment mode — so any product with keys/accounts is delivered instantly.
+          let delivered = false;
+          try {
+            if (line.productType === "DIGITAL_ACCOUNT") {
+              const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);
+              const payload = { kind: "DIGITAL_ACCOUNT", ...creds, expiresAt: creds.expiresAt?.toISOString() };
+              await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
+              deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "DIGITAL_ACCOUNT", secret: { username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
+              delivered = true;
+            } else {
+              const { key, expiresAt } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
+              const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
+              await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
+              deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "LICENSE_KEY", secret: { key, expiresAt: expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
+              delivered = true;
+            }
+          } catch {
+            delivered = false; // no stock available
           }
-
-          if (line.productType === "LICENSE_KEY") {
-            const { key, expiresAt } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
-            const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
-            await tx.orderItem.update({
-              where: { id: item.id },
-              data: {
-                fulfilledAt: new Date(),
-                deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
-              },
-            });
-            deliveries.push({
-              orderItemId: item.id,
-              productName: line.productName,
-              variantName: line.variantName,
-              kind: "LICENSE_KEY",
-              secret: { key, expiresAt: expiresAt?.toISOString() },
-              activationGuide: line.activationGuide,
-              allowPwChange: line.allowPwChange,
-            });
-          } else if (line.productType === "DIGITAL_ACCOUNT") {
-            const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);
-            const payload = { kind: "DIGITAL_ACCOUNT", ...creds, expiresAt: creds.expiresAt?.toISOString() };
-            await tx.orderItem.update({
-              where: { id: item.id },
-              data: {
-                fulfilledAt: new Date(),
-                deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
-              },
-            });
-            deliveries.push({
-              orderItemId: item.id,
-              productName: line.productName,
-              variantName: line.variantName,
-              kind: "DIGITAL_ACCOUNT",
-              secret: {
-                username: creds.username,
-                password: creds.password,
-                expiresAt: creds.expiresAt?.toISOString(),
-              },
-              activationGuide: line.activationGuide,
-              allowPwChange: line.allowPwChange,
-            });
-          } else {
-            // DOWNLOAD / SUBSCRIPTION / MANUAL_SERVICE automatic flows arrive
-            // with their delivery mechanisms in later phases; route to manual
-            // fulfillment rather than failing the paid order.
+          if (!delivered) {
+            // Automatic key/account products with no stock must NOT charge — abort the order.
+            if (line.fulfillmentMode !== "MANUAL" && (line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT")) {
+              throw new CoreError("OUT_OF_STOCK", `${line.productName} is out of stock`);
+            }
+            // Manual / supplier / service items: route to manual (supplier auto-buy runs post-payment).
             pendingManualItems++;
-            await tx.orderItem.update({ where: { id: item.id }, data: { fulfillmentMode: "MANUAL" } });
+            if (line.fulfillmentMode !== "MANUAL") await tx.orderItem.update({ where: { id: item.id }, data: { fulfillmentMode: "MANUAL" } });
           }
         }
       }

@@ -680,7 +680,7 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   const kb = new InlineKeyboard();
   kb.add(sbtn("👁 Show all", cb("adm", "spall", `${supplierId}~1`), "success"), sbtn("🙈 Hide all", cb("adm", "spall", `${supplierId}~0`), "danger")).row();
   for (const p of prods) {
-    kb.text(`${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 34)} · $${(p.priceMinor / 100).toFixed(2)}`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
+    kb.text(`${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 30)} · $${(p.priceMinor / 100).toFixed(2)} · ${p.stock === null ? "∞" : p.stock} left`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
   }
   kb.text("◀️ Back", cb("adm", "sups"));
   const shown = prods.filter((p) => p.visible).length;

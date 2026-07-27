@@ -970,15 +970,30 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
   const menu = new InlineKeyboard().text("🏠 Menu", "mnu:home");
   if (deliveries.length > DELIVERY_FILE_THRESHOLD) {
     const txt = buildDeliveryTxt(lines, orderNumber);
-    const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
-    await ctx.replyWithDocument(file, {
-      caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
-      parse_mode: "HTML",
-      reply_markup: menu,
-    });
-    return;
+    try {
+      const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
+      await ctx.replyWithDocument(file, {
+        caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
+        reply_markup: menu,
+      });
+      return;
+    } catch {
+      // Fallback: if the file send fails, deliver the keys as text messages (chunked under Telegram's 4096 limit).
+      const chunks: string[] = [];
+      let buf = "🎉 Your order is delivered:\n";
+      for (const l of lines) {
+        const row = `\n${l.productName}: ${l.payload.key ?? [l.payload.username, l.payload.password].filter(Boolean).join(" / ")}`;
+        if ((buf + row).length > 3800) { chunks.push(buf); buf = ""; }
+        buf += row;
+      }
+      if (buf.trim()) chunks.push(buf);
+      for (let i = 0; i < chunks.length; i++) await ctx.reply(chunks[i]!, i === chunks.length - 1 ? { reply_markup: menu } : {}).catch(() => undefined);
+      return;
+    }
   }
-  await ctx.reply(buildCombinedDeliveryText(lines, orderNumber), { parse_mode: "HTML", reply_markup: menu });
+  await ctx.reply(buildCombinedDeliveryText(lines, orderNumber), { parse_mode: "HTML", reply_markup: menu }).catch(async () => {
+    await ctx.reply(buildCombinedDeliveryText(lines, orderNumber).replace(/<[^>]+>/g, ""), { reply_markup: menu }).catch(() => undefined);
+  });
 }
 
 async function sendRevealed(

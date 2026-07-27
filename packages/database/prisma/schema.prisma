@@ -488,6 +488,7 @@ model Product {
   allowPasswordChange Boolean @default(false) // account products: may the buyer change the password?
   supplierId      String? // if set, this product is fulfilled via an external supplier API
   supplierRef     String? // external product id at the supplier
+  supplierStock   Int? // last-known supplier stock (null = unknown/unlimited)
   priceLocked     Boolean @default(false) // admin set a custom price — sync won't overwrite it
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
