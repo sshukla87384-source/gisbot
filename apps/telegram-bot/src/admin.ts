@@ -318,8 +318,10 @@ async function orderView(ctx: Ctx, orderId: string): Promise<void> {
 }
 
 async function productsView(ctx: Ctx, page = 1): Promise<void> {
-  const result = await listProductsPage(page, 20);
+  const search = ctx.session.prodSearch;
+  const result = await listProductsPage(page, 20, search);
   const kb = new InlineKeyboard();
+  kb.add(sbtn(search ? `🔎 “${search}” — clear` : "🔎 Search products", cb("adm", search ? "prodsclr" : "prodsrch"), "primary")).row();
   for (const p of result.items) {
     const tag = p.status === "ACTIVE" ? "🟢" : "🙈";
     const sale = p.onSalePct ? " 🔥" : "";
@@ -332,7 +334,7 @@ async function productsView(ctx: Ctx, page = 1): Promise<void> {
     if (nav.length) kb.add(...nav).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
-  await show(ctx, result.total ? `📦 <b>Products</b> — ${result.total} total (page ${result.page}/${result.pages})\n🟢 shown · 🙈 hidden` : "No products yet.", kb, true);
+  await show(ctx, result.total ? `📦 <b>Products</b>${search ? ` matching “${escapeHtml(search)}”` : ""} — ${result.total} total (page ${result.page}/${result.pages})\n🟢 shown · 🙈 hidden` : (search ? "No products match that search." : "No products yet."), kb, true);
 }
 
 async function productView(ctx: Ctx, productId: string): Promise<void> {
@@ -840,6 +842,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "recent": return ordersView(ctx, false);
     case "ord": return orderView(ctx, id);
     case "prods": return productsView(ctx, id ? Number.parseInt(id, 10) || 1 : 1);
+    case "prodsrch":
+      ctx.session.awaiting = "admin_prod_search";
+      await askStep(ctx, "🔎 Send part of the product name to search:");
+      return;
+    case "prodsclr":
+      ctx.session.prodSearch = undefined;
+      return productsView(ctx, 1);
     case "prod": return productView(ctx, id);
     case "pprice":
       ctx.session.admProductId = id;
@@ -1512,6 +1521,11 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setFlashHeadline(composeBroadcastHtml(ctx));
     await ctx.reply("✅ Flash sale headline saved — it'll lead every flash-sale announcement.");
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_prod_search") {
+    ctx.session.prodSearch = text.trim().slice(0, 60) || undefined;
+    await productsView(ctx, 1);
     return true;
   }
   if (awaiting === "admin_user_lookup") {

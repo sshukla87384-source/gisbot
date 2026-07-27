@@ -173,8 +173,8 @@ export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
 }
 
 /** Paginated product list for the admin panel (shows ALL products across pages). */
-export async function listProductsPage(page = 1, pageSize = 20): Promise<{ items: ProductBrief[]; page: number; pages: number; total: number }> {
-  const where = { deletedAt: null };
+export async function listProductsPage(page = 1, pageSize = 20, search?: string): Promise<{ items: ProductBrief[]; page: number; pages: number; total: number }> {
+  const where = { deletedAt: null, ...(search && search.trim() ? { name: { contains: search.trim(), mode: "insensitive" as const } } : {}) };
   const total = await prisma.product.count({ where });
   const rows = await prisma.product.findMany({ where, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], skip: (Math.max(1, page) - 1) * pageSize, take: pageSize });
   return { items: rows.map(toBrief), page: Math.max(1, page), pages: Math.max(1, Math.ceil(total / pageSize)), total };

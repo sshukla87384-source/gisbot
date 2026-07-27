@@ -58,6 +58,7 @@ export interface SessionData {
     | "admin_user_lookup"
     | "admin_user_addbal"
     | "admin_user_deductbal"
+    | "admin_prod_search"
     | "admin_flash_headline"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
@@ -98,6 +99,7 @@ export interface SessionData {
   binanceKeyTmp?: string;
   supDraft?: { name?: string; url?: string; key?: string };
   userTarget?: string;
+  prodSearch?: string;
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */
