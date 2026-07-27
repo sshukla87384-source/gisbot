@@ -41,18 +41,54 @@ async function getJson(s: SupplierRow, path: string): Promise<any> {
   return res.json();
 }
 
-export async function fetchSupplierProducts(s: SupplierRow): Promise<SupplierProduct[]> {
-  const json = await getJson(s, "/products");
-  const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? []);
+const PRODUCT_PATHS = ["/products", "/product", "/products/list", "/catalog", "/items", "/list", "/api/products", "/api/v1/products", "/listProducts", "/getProducts", ""];
+
+function parseProductArray(arr: any[]): SupplierProduct[] {
   return arr
     .map((p) => ({
-      ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid"]),
-      name: pickStr(p, ["name", "title", "product", "label"]) || "Product",
+      ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid", "_id"]),
+      name: pickStr(p, ["name", "title", "product", "label", "productName"]) || "Product",
       description: pickStr(p, ["description", "desc", "details", "info"]),
-      priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price"]) ?? 0) * 100),
-      stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock"]),
+      priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price", "sell_price", "sellPrice"]) ?? 0) * 100),
+      stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count"]),
     }))
     .filter((p) => p.ref && p.priceMinor > 0);
+}
+
+/** Try common product endpoints; return the parsed products, plus the path used and a raw sample for diagnostics. */
+async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string }> {
+  let lastRaw = "";
+  let lastNote = "";
+  for (const path of PRODUCT_PATHS) {
+    try {
+      const res = await fetch(`${s.baseUrl}${path}`, { headers: authHeaders(decKey(s)) });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) { lastNote = `${path || "/"} → HTTP ${res.status} ${text.slice(0, 120)}`; continue; }
+      let json: any;
+      try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); lastNote = `${path || "/"} → non-JSON response`; continue; }
+      const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
+      const products = parseProductArray(Array.isArray(arr) ? arr : []);
+      if (products.length > 0) return { products, path: path || "/", raw: text.slice(0, 400), note: "ok" };
+      lastRaw = text.slice(0, 400);
+      lastNote = `${path || "/"} → parsed 0 products`;
+    } catch (e) { lastNote = `${path || "/"} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+  }
+  return { products: [], path: "", raw: lastRaw, note: lastNote };
+}
+
+export async function fetchSupplierProducts(s: SupplierRow): Promise<SupplierProduct[]> {
+  return (await probeProducts(s)).products;
+}
+
+/** Diagnostic for the admin: which endpoint worked, or the raw response so we can map fields. */
+export async function diagnoseSupplier(id: string): Promise<{ ok: boolean; detail: string }> {
+  const s = await prisma.supplier.findUnique({ where: { id } });
+  if (!s) return { ok: false, detail: "Supplier not found." };
+  const r = await probeProducts(s);
+  if (r.products.length > 0) {
+    return { ok: true, detail: `OK ✅ — endpoint ${r.path} returned ${r.products.length} product(s). e.g. ${r.products.slice(0, 2).map((p) => `${p.name} @ ${(p.priceMinor / 100).toFixed(2)}`).join("; ")}` };
+  }
+  return { ok: false, detail: `Couldn't read products. Last attempt: ${r.note}\nRaw response sample:\n${r.raw || "(empty)"}` };
 }
 
 export async function getSupplierBalance(s: SupplierRow): Promise<number | null> {
@@ -63,11 +99,12 @@ export async function getSupplierBalance(s: SupplierRow): Promise<number | null>
 export async function testSupplier(id: string): Promise<{ ok: boolean; detail: string }> {
   const s = await prisma.supplier.findUnique({ where: { id } });
   if (!s) return { ok: false, detail: "Supplier not found." };
-  try {
-    const prods = await fetchSupplierProducts(s);
-    const bal = await getSupplierBalance(s);
-    return { ok: true, detail: `OK ✅ — ${prods.length} product(s) visible${bal !== null ? ` · balance ${bal}` : ""}.` };
-  } catch (e) { return { ok: false, detail: String(e instanceof Error ? e.message : e).slice(0, 300) }; }
+  const probe = await probeProducts(s);
+  const bal = await getSupplierBalance(s).catch(() => null);
+  if (probe.products.length > 0) {
+    return { ok: true, detail: `OK ✅ — endpoint ${probe.path}, ${probe.products.length} product(s)${bal !== null ? ` · balance ${bal}` : ""}.` };
+  }
+  return { ok: false, detail: `No products read. ${probe.note}\nRaw sample:\n${(probe.raw || "(empty)").slice(0, 300)}` };
 }
 
 /** Place an order at the supplier and return the delivered key(s). Deducts the supplier-side balance. */
