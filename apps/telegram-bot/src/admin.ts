@@ -66,6 +66,7 @@ import {
   setProductImage,
   setProductName,
   setProductDescription,
+  setProductActivationGuide,
   setProductStatus,
   testBinanceApi,
   setBinanceCreds,
@@ -296,6 +297,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
+  kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
   if (p.type === "DIGITAL_ACCOUNT") kb.text(`🔐 Password change: ${p.allowPwChange ? "✅ Allowed → disallow" : "🚫 Not allowed → allow"}`, cb("adm", "ppw", p.id)).row();
@@ -835,6 +837,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "✏️ Send the new <b>description</b> (one feature per line looks best):");
       return;
     }
+    case "pguide": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_guide";
+      await askStep(ctx, "📄 Send the <b>delivery instructions</b> for this product (shown with the key on delivery). Send <code>-</code> to clear.");
+      return;
+    }
     case "keys": return variantsForKeys(ctx, id);
     case "kv": {
       ctx.session.awaiting = "admin_addkeys";
@@ -1113,6 +1121,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (!text) { await ctx.reply("Please send a name."); return true; }
     await setProductName(pid, text, hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : null);
     await ctx.reply("✅ Name updated." + (hasCustomEmoji(ctx) ? " (premium emoji kept 🎨)" : ""));
+    await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_p_guide") {
+    const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
+    await setProductActivationGuide(pid, text.trim() === "-" ? "" : text);
+    await ctx.reply(text.trim() === "-" ? "🧹 Delivery instructions cleared." : "✅ Delivery instructions updated for this product.");
     await productView(ctx, pid);
     return true;
   }

@@ -187,6 +187,13 @@ export async function setProductDescription(productId: string, description: stri
   await invalidate("cat:*");
 }
 
+/** Per-product delivery instructions (shown with the key on delivery). Empty clears it. */
+export async function setProductActivationGuide(productId: string, guide: string): Promise<void> {
+  const g = guide.trim().slice(0, 2000);
+  await prisma.product.update({ where: { id: productId }, data: { activationGuide: g || null } });
+  await invalidate("cat:*");
+}
+
 // ───────────── Customisable button labels ─────────────
 
 export const BUTTON_LABEL_KEYS = ["shop", "orders", "wallet", "support", "referral", "currency", "language", "developer"] as const;

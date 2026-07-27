@@ -21,6 +21,7 @@ export interface SessionData {
     | "admin_p_image"
     | "admin_p_editname"
     | "admin_p_editdesc"
+    | "admin_p_guide"
     | "admin_api_name"
     | "admin_wallet_adj"
     | "admin_price_user"
