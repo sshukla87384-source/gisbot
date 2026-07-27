@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
 import { effectivePriceMinor, isSaleActive } from "./pricing.js";
+import { getProductView } from "./catalog/catalog.service.js";
 
 export type BroadcastSegment = "all" | "customers" | "resellers";
 export type BroadcastRecurrence = "none" | "daily" | "weekly";
@@ -289,24 +290,31 @@ export async function announceRestock(
   if (!p || p.status !== "ACTIVE" || p.deletedAt || qtyAdded <= 0) return { announced: false };
 
   const cfg = loadConfig();
-  const all = p.variants.flatMap((v) => v.prices);
-  const inr = all.filter((pr) => pr.currency === "INR");
-  const picks = (inr.length > 0 ? inr : all).map((pr) => ({ currency: pr.currency, minor: effectivePriceMinor(pr.amountMinor, p) }));
-  const cheapest = picks.length > 0 ? picks.reduce((a, b) => (b.minor < a.minor ? b : a)) : null;
+  // Live current stock + cheapest price (USD-first, matching the store's primary currency).
+  const view = await getProductView(productId, "USD").catch(() => null);
+  const UNLIMITED = 1_000_000;
+  const currentStock = view ? view.variants.reduce((sum, v) => sum + (v.stock >= UNLIMITED ? 0 : v.stock), 0) : qtyAdded;
+  const pricedMinors = view ? view.variants.map((v) => v.priceMinor).filter((n): n is number => n !== null) : [];
+  const cheapestMinor = pricedMinors.length > 0 ? Math.min(...pricedMinors) : null;
 
-  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "📦 ";
-  const title = `🔥 RESTOCKED — ${icon}${p.name}`;
-  const lines = [`📦 ${qtyAdded} added — now in stock!`];
-  if (cheapest) lines.push(`💎 from ${fmtMinor(cheapest.minor, cheapest.currency)}`);
-  lines.push("", "⚡ Instant delivery • Grab it now!");
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "💎 ";
+  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const lines = [
+    `${icon}${nameDisp}`,
+    `➕ Added: <b>${qtyAdded}</b>`,
+    `📦 Current stock: <b>${currentStock}</b>`,
+  ];
+  if (cheapestMinor !== null) lines.push(`💵 Price: <b>${fmtMinor(cheapestMinor, "USD")}</b>`);
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
   const res = await sendBroadcast({
-    title,
+    title: "",
     body: lines.join("\n"),
+    bodyIsHtml: true,
     segment: "all",
     imageUrl: p.imageUrl ?? undefined,
-    buttonText: buttonUrl ? "⚡ Buy Now" : undefined,
+    buttonText: buttonUrl ? "🛒 Buy now" : undefined,
     buttonUrl,
     createdById: opts.createdById,
   });
