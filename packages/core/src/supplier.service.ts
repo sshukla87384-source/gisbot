@@ -1,0 +1,145 @@
+import { loadConfig } from "@gis/config";
+import { prisma } from "@gis/database";
+import { encryptSecret, decryptSecret } from "@gis/shared";
+import { invalidate } from "./redis.js";
+import { manualFulfillItem } from "./orders/manual-pay.service.js";
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: string; markupBp: number; active: boolean }
+export interface SupplierProduct { ref: string; name: string; description: string; priceMinor: number; stock: number | null }
+
+const authHeaders = (key: string): Record<string, string> => ({ Authorization: `Bearer ${key}`, "X-API-Key": key, Accept: "application/json" });
+const decKey = (s: SupplierRow): string => decryptSecret(s.apiKeyEnc, loadConfig().ENCRYPTION_MASTER_KEY);
+
+function pickStr(o: any, keys: string[]): string {
+  for (const k of keys) { const v = o?.[k]; if (typeof v === "string" && v.trim()) return v; if (typeof v === "number") return String(v); }
+  return "";
+}
+function pickNum(o: any, keys: string[]): number | null {
+  for (const k of keys) { const v = o?.[k]; if (typeof v === "number") return v; if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v); }
+  return null;
+}
+
+// ── CRUD ──
+export async function addSupplier(name: string, baseUrl: string, apiKey: string, markupPct = 20): Promise<{ id: string }> {
+  const enc = encryptSecret(apiKey.trim(), loadConfig().ENCRYPTION_MASTER_KEY);
+  const s = await prisma.supplier.create({ data: { name: name.slice(0, 80), baseUrl: baseUrl.trim().replace(/\/$/, ""), apiKeyEnc: enc, markupBp: Math.max(0, Math.round(markupPct * 100)) } });
+  return { id: s.id };
+}
+export async function listSuppliers(): Promise<Array<{ id: string; name: string; markupBp: number; active: boolean; baseUrl: string }>> {
+  const rows = await prisma.supplier.findMany({ orderBy: { createdAt: "asc" } });
+  return rows.map((r) => ({ id: r.id, name: r.name, markupBp: r.markupBp, active: r.active, baseUrl: r.baseUrl }));
+}
+export async function removeSupplier(id: string): Promise<void> { await prisma.supplier.delete({ where: { id } }).catch(() => undefined); }
+export async function setSupplierMarkup(id: string, pct: number): Promise<void> { await prisma.supplier.update({ where: { id }, data: { markupBp: Math.max(0, Math.round(pct * 100)) } }); }
+
+// ── HTTP (tolerant to common REST shapes) ──
+async function getJson(s: SupplierRow, path: string): Promise<any> {
+  const res = await fetch(`${s.baseUrl}${path}`, { headers: authHeaders(decKey(s)) });
+  if (!res.ok) throw new Error(`${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+  return res.json();
+}
+
+export async function fetchSupplierProducts(s: SupplierRow): Promise<SupplierProduct[]> {
+  const json = await getJson(s, "/products");
+  const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? []);
+  return arr
+    .map((p) => ({
+      ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid"]),
+      name: pickStr(p, ["name", "title", "product", "label"]) || "Product",
+      description: pickStr(p, ["description", "desc", "details", "info"]),
+      priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price"]) ?? 0) * 100),
+      stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock"]),
+    }))
+    .filter((p) => p.ref && p.priceMinor > 0);
+}
+
+export async function getSupplierBalance(s: SupplierRow): Promise<number | null> {
+  try { const j = await getJson(s, "/balance"); return pickNum(j, ["balance", "amount", "credit", "wallet", "funds"]) ?? pickNum(j.data ?? {}, ["balance", "amount"]); }
+  catch { return null; }
+}
+
+export async function testSupplier(id: string): Promise<{ ok: boolean; detail: string }> {
+  const s = await prisma.supplier.findUnique({ where: { id } });
+  if (!s) return { ok: false, detail: "Supplier not found." };
+  try {
+    const prods = await fetchSupplierProducts(s);
+    const bal = await getSupplierBalance(s);
+    return { ok: true, detail: `OK ✅ — ${prods.length} product(s) visible${bal !== null ? ` · balance ${bal}` : ""}.` };
+  } catch (e) { return { ok: false, detail: String(e instanceof Error ? e.message : e).slice(0, 300) }; }
+}
+
+/** Place an order at the supplier and return the delivered key(s). Deducts the supplier-side balance. */
+export async function placeSupplierOrder(supplierId: string, ref: string, qty = 1): Promise<{ ok: boolean; keys: string[]; reason?: string }> {
+  const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
+  if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
+  try {
+    const res = await fetch(`${s.baseUrl}/orders`, {
+      method: "POST",
+      headers: { ...authHeaders(decKey(s)), "Content-Type": "application/json" },
+      body: JSON.stringify({ product_id: ref, productId: ref, id: ref, quantity: qty, qty }),
+    });
+    if (!res.ok) return { ok: false, keys: [], reason: `${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}` };
+    const j: any = await res.json();
+    const out: string[] = [];
+    const collect = (v: any): void => {
+      if (!v) return;
+      if (typeof v === "string") { if (v.trim()) out.push(v.trim()); return; }
+      if (Array.isArray(v)) { v.forEach(collect); return; }
+      if (typeof v === "object") collect(v.key ?? v.code ?? v.serial ?? v.license ?? v.credentials ?? v.data ?? v.result);
+    };
+    collect(j.key ?? j.code ?? j.keys ?? j.codes ?? j.data ?? j.result ?? j);
+    return { ok: out.length > 0, keys: out, reason: out.length ? undefined : "NO_KEY_IN_RESPONSE" };
+  } catch (e) { return { ok: false, keys: [], reason: String(e instanceof Error ? e.message : e).slice(0, 200) }; }
+}
+
+/** Import/refresh a supplier's catalog into our products (with markup). */
+export async function syncSupplierProducts(supplierId: string): Promise<{ added: number; updated: number }> {
+  const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
+  if (!s) return { added: 0, updated: 0 };
+  const prods = await fetchSupplierProducts(s);
+  const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
+  const rate = loadConfig().BINANCE_USDT_INR_RATE || 90;
+  let cat = await prisma.category.findFirst({ where: { slug: "uncategorized" } });
+  if (!cat) cat = await prisma.category.create({ data: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 } });
+  let added = 0, updated = 0;
+  for (const p of prods) {
+    const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
+    const inrMinor = Math.round(priceMinor * rate);
+    const existing = await prisma.product.findFirst({ where: { supplierId: s.id, supplierRef: p.ref }, include: { variants: true } });
+    if (existing) {
+      await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null } });
+      const v = existing.variants[0];
+      if (v) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
+        await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
+      }
+      updated++;
+    } else {
+      const slug = `sup-${s.id.slice(0, 6)}-${p.ref}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60);
+      await prisma.product.create({
+        data: {
+          slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
+          type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
+          supplierId: s.id, supplierRef: p.ref,
+          variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
+        },
+      });
+      added++;
+    }
+  }
+  await invalidate("cat:*");
+  return { added, updated };
+}
+
+/** Fulfill an order item by buying from its linked supplier and delivering the key. */
+export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: boolean; reason?: string }> {
+  const item = await prisma.orderItem.findUnique({ where: { id: orderItemId }, include: { variant: { include: { product: true } } } });
+  if (!item) return { ok: false, reason: "NOT_FOUND" };
+  const { supplierId, supplierRef } = item.variant.product;
+  if (!supplierId || !supplierRef) return { ok: false, reason: "NOT_SUPPLIER" };
+  const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity);
+  if (!r.ok || r.keys.length === 0) return { ok: false, reason: r.reason ?? "NO_KEY" };
+  await manualFulfillItem(orderItemId, r.keys.join("\n"));
+  return { ok: true };
+}

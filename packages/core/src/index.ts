@@ -16,6 +16,7 @@ export * from "./orders/maintenance.service.js";
 export * from "./orders/stars.service.js";
 export * from "./orders/binance-poll.service.js";
 export * from "./referral.service.js";
+export * from "./supplier.service.js";
 export * from "./broadcast.service.js";
 export * from "./group-post.service.js";
 export * from "./admin.service.js";

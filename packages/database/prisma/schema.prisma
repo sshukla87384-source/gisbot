@@ -486,6 +486,8 @@ model Product {
   nameHtml        String? // premium-emoji HTML for the product-card title (display only)
   descriptionHtml String? // premium-emoji HTML for the product-card description (display only)
   allowPasswordChange Boolean @default(false) // account products: may the buyer change the password?
+  supplierId      String? // if set, this product is fulfilled via an external supplier API
+  supplierRef     String? // external product id at the supplier
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
   saleEndsAt      DateTime?
@@ -1129,6 +1131,18 @@ model ActivityLog {
 
   @@index([userId, createdAt])
   @@index([event, createdAt])
+}
+
+model Supplier {
+  id         String   @id @default(cuid())
+  name       String
+  baseUrl    String
+  apiKeyEnc  String   // AES-GCM encrypted API key
+  markupBp   Int      @default(2000) // markup in basis points (2000 = +20%)
+  active     Boolean  @default(true)
+  balanceNote String? // last known supplier balance (display only)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 model Setting {

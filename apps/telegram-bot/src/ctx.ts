@@ -50,6 +50,10 @@ export interface SessionData {
     | "admin_delivery_note"
     | "admin_binance_key"
     | "admin_binance_secret"
+    | "admin_sup_name"
+    | "admin_sup_url"
+    | "admin_sup_key"
+    | "admin_sup_markup"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -87,6 +91,7 @@ export interface SessionData {
   dmTarget?: string;
   webAdminEmail?: string;
   binanceKeyTmp?: string;
+  supDraft?: { name?: string; url?: string; key?: string };
   /** Pending customer wallet top-up awaiting a transaction ID. */
   walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */

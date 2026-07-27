@@ -69,6 +69,12 @@ import {
   setProductStatus,
   testBinanceApi,
   setBinanceCreds,
+  listSuppliers,
+  addSupplier,
+  removeSupplier,
+  testSupplier,
+  syncSupplierProducts,
+  fulfillFromSupplier,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
 } from "@gis/core";
@@ -179,6 +185,7 @@ function panelKeyboard(): InlineKeyboard {
     // ── Customize & integrations ──
     .add(sbtn("🔤 Rename Buttons", cb("adm", "btns"), "primary"), sbtn("📋 Delivery Note", cb("adm", "delnote"), "primary")).row()
     .add(sbtn("🔗 Set Binance API", cb("adm", "binapi"), "primary"), sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
+    .add(sbtn("🏭 Suppliers", cb("adm", "sups"), "primary")).row()
     .add(sbtn("🔑 API Keys", cb("adm", "apikeys"), "primary")).row()
     // ── Security ──
     .add(sbtn("🔑 Passcode", cb("adm", "chpass"), "primary"), sbtn("🔐 Web Login", cb("adm", "webpass"), "primary")).row()
@@ -386,7 +393,8 @@ async function manualDeliverView(ctx: Ctx, orderId: string): Promise<void> {
   const kb = new InlineKeyboard();
   for (const it of items) {
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
-    kb.text(`📤 Deliver — ${it.productName}${vn}`, cb("adm", "dlv", it.id)).row();
+    kb.text(`📤 Enter key — ${it.productName}${vn}`, cb("adm", "dlv", it.id)).row();
+    kb.text(`🤖 Auto-buy from supplier — ${it.productName}`, cb("adm", "supbuy", it.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "orders"));
   const text = items.length
@@ -565,6 +573,19 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
   ].join("\n"), kb, true);
 }
 
+async function suppliersView(ctx: Ctx): Promise<void> {
+  const sups = await listSuppliers();
+  const kb = new InlineKeyboard().add(sbtn("➕ Add supplier", cb("adm", "supadd"), "success")).row();
+  for (const su of sups) {
+    kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text(`🧪 Test`, cb("adm", "suptest", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "home"));
+  const lines = ["🏭 <b>Suppliers</b>", "", "Connect an external supplier API — sync their catalog into your shop with your markup; buyers pay your price and the key is bought from the supplier and delivered automatically.", ""];
+  if (sups.length === 0) lines.push("No suppliers yet. Tap ➕ Add supplier.");
+  for (const su of sups) lines.push(`• <b>${escapeHtml(su.name)}</b> — +${Math.round(su.markupBp / 100)}% markup ${su.active ? "🟢" : "⚪️"}\n  <code>${escapeHtml(su.baseUrl)}</code>`);
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -583,6 +604,32 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   switch (action) {
     case "home": return sendPanel(ctx, true);
     case "sales": return salesView(ctx);
+    case "sups": return suppliersView(ctx);
+    case "supadd":
+      ctx.session.supDraft = {};
+      ctx.session.awaiting = "admin_sup_name";
+      await askStep(ctx, "🏭 <b>Add supplier</b>\nStep 1/4 — send a <b>name</b> for this supplier:");
+      return;
+    case "supsync": {
+      await ctx.reply("🔄 Syncing catalog…");
+      const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; err?: string }));
+      await ctx.reply("err" in r && r.err ? `❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}` : `✅ Synced — ${r.added} added, ${r.updated} updated.`);
+      return suppliersView(ctx);
+    }
+    case "suptest": {
+      const r = await testSupplier(id);
+      await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ ${escapeHtml(r.detail)}`);
+      return;
+    }
+    case "suprm":
+      await removeSupplier(id);
+      await ctx.reply("🗑 Supplier removed (its imported products remain).");
+      return suppliersView(ctx);
+    case "supbuy": {
+      const r = await fulfillFromSupplier(id);
+      await ctx.reply(r.ok ? "🤖 Bought from supplier and delivered to the customer. ✅" : `❌ Supplier fulfilment failed (${r.reason ?? "error"}). Deliver manually or check the supplier.`);
+      return;
+    }
     case "dm":
       ctx.session.dmTarget = id;
       ctx.session.awaiting = "admin_dm_reply";
@@ -1086,6 +1133,36 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_sup_name") {
+    ctx.session.supDraft = { ...(ctx.session.supDraft ?? {}), name: text.trim().slice(0, 80) };
+    ctx.session.awaiting = "admin_sup_url";
+    await askStep(ctx, "Step 2/4 — send the supplier <b>API base URL</b> (e.g. <code>https://api.supplier.com/v1</code>):");
+    return true;
+  }
+  if (awaiting === "admin_sup_url") {
+    ctx.session.supDraft = { ...(ctx.session.supDraft ?? {}), url: text.trim() };
+    ctx.session.awaiting = "admin_sup_key";
+    await askStep(ctx, "Step 3/4 — send the supplier <b>API key</b> (deleted after saving):");
+    return true;
+  }
+  if (awaiting === "admin_sup_key") {
+    await ctx.deleteMessage().catch(() => undefined);
+    ctx.session.supDraft = { ...(ctx.session.supDraft ?? {}), key: text.trim() };
+    ctx.session.awaiting = "admin_sup_markup";
+    await askStep(ctx, "Step 4/4 — send your <b>markup %</b> (e.g. <code>20</code> for +20%):");
+    return true;
+  }
+  if (awaiting === "admin_sup_markup") {
+    const d = ctx.session.supDraft ?? {}; ctx.session.supDraft = undefined;
+    const pct = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!d.name || !d.url || !d.key) { await ctx.reply("Draft incomplete — start again from 🏭 Suppliers."); await sendPanel(ctx, false); return true; }
+    const { id } = await addSupplier(d.name, d.url, d.key, Number.isFinite(pct) ? pct : 20);
+    await ctx.reply("✅ Supplier added. Testing connection…");
+    const t = await testSupplier(id);
+    await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`);
+    await suppliersView(ctx);
+    return true;
+  }
   if (awaiting === "admin_binance_key") {
     await ctx.deleteMessage().catch(() => undefined);
     ctx.session.binanceKeyTmp = text.trim();
