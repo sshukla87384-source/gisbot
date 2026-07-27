@@ -264,10 +264,10 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       const instr = await deliveryInstructionsMessage();
       if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
     }
-    if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🕐 ${outcome.pendingManual} item(s) are being prepared (~12 h).`);
+    if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🔄 ${outcome.pendingManual} item(s) are being prepared — arriving here shortly.`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
   }
-  if (outcome.pendingManual > 0) await notifyManualOrder(outcome.orderId);
+  await notifyOrderToAdmins(outcome.orderId, "Payment confirmed");
   return { status: outcome.finalStatus, delivered: outcome.deliveries.length };
 }
 
@@ -400,4 +400,39 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
   } catch {
     return { ok: false, reason: "NO_STOCK" };
   }
+}
+
+/** Fire on EVERY paid order: auto-fulfil supplier items, then notify admins with a full summary. */
+export async function notifyOrderToAdmins(orderId: string, method = "order"): Promise<void> {
+  try {
+    const { autoFulfillSupplierItems } = await import("../supplier.service.js");
+    await autoFulfillSupplierItems(orderId);
+  } catch { /* best-effort */ }
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      user: { select: { telegramHandle: true, firstName: true, telegramId: true } },
+      items: { include: { variant: { include: { product: { select: { supplierId: true } } } } } },
+    },
+  });
+  if (!order) return;
+  const buyer = order.user.telegramHandle ? `@${order.user.telegramHandle}` : (order.user.firstName ?? String(order.user.telegramId));
+  const paid = order.walletUsedMinor + order.totalMinor;
+  const manualPending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null && !i.variant.product.supplierId);
+  const itemLine = (i: (typeof order.items)[number]): string => {
+    const vn = i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${i.variantNameSnap}`;
+    const state = i.fulfilledAt ? "✅" : i.variant.product.supplierId ? "🤖" : "🕐";
+    return `${state} ${i.productNameSnap}${vn} ×${i.quantity}`;
+  };
+  const lines = [
+    `🧾 <b>New order — ${method}</b>`,
+    `#${order.orderNumber} · ${formatMinor(paid, order.currency as CurrencyCode)}`,
+    `👤 ${buyer}`,
+    "",
+    ...order.items.map(itemLine),
+  ];
+  if (manualPending.length > 0) lines.push("", "Tap Deliver to send the pending item(s).");
+  const buttons = manualPending.length > 0 ? [{ text: "📦 Deliver now", callbackData: cb("adm", "deliver", orderId), style: "primary" as const }] : undefined;
+  await enqueueAdminAlert(lines.join("\n"), buttons);
 }

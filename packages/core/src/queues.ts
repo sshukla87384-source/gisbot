@@ -127,14 +127,19 @@ export const BOT_ADMIN_MEMBERS_KEY = "botadmin:members";
 export async function enqueueAdminAlert(text: string, buttons?: OutboxButton[]): Promise<void> {
   const sent = new Set<string>();
   const opts = buttons && buttons.length > 0 ? { buttons } : {};
-  const chatId = loadConfig().ADMIN_ALERT_CHAT_ID;
+  const cfg = loadConfig();
+  const chatId = cfg.ADMIN_ALERT_CHAT_ID;
   if (chatId) { await enqueueTelegramMessage(chatId, text, opts); sent.add(String(chatId)); }
+  // Always reach the configured admin Telegram IDs (works even if they never opened the panel).
+  for (const id of (cfg.BOT_ADMIN_IDS ?? "").split(",").map((x) => x.trim()).filter(Boolean)) {
+    if (!sent.has(id)) { await enqueueTelegramMessage(id, text, opts); sent.add(id); }
+  }
   try {
     const members = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY);
     for (const m of members) {
       if (m && !sent.has(m)) { await enqueueTelegramMessage(m, text, opts); sent.add(m); }
     }
   } catch {
-    // Redis unavailable — the configured channel (if any) still got it.
+    // Redis unavailable — the configured channel/ids (if any) still got it.
   }
 }

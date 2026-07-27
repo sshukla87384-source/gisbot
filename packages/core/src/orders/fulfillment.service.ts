@@ -4,7 +4,7 @@ import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument } from "../queues.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
-import { notifyManualOrder } from "./manual-pay.service.js";
+import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
@@ -285,7 +285,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       if (outcome.pendingManual > 0) {
         await enqueueTelegramMessage(
           outcome.telegramId,
-          `🕐 ${outcome.pendingManual} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
+          `🔄 ${outcome.pendingManual} item(s) are being prepared — arriving here shortly.`,
         );
       }
       if (outcome.awaitingStock > 0) {
@@ -295,7 +295,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         );
       }
     }
-    if (outcome.pendingManual > 0) await notifyManualOrder(outcome.orderId);
+    await notifyOrderToAdmins(outcome.orderId, "Gateway");
     if (outcome.email && loadConfig().RESEND_API_KEY) {
       await enqueueEmail({
         to: outcome.email,

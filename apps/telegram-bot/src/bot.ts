@@ -629,7 +629,7 @@ export function createBot(): Bot<Ctx> {
           await deliverAll(ctx, result.deliveries, result.orderNumber);
           if (result.pendingManualItems > 0) {
             await ctx.reply(
-              `🕐 ${result.pendingManualItems} item(s) are being prepared by our team (~12 h). You'll be notified here.`,
+              `🔄 ${result.pendingManualItems} item(s) are being prepared — arriving here shortly.`,
             );
           }
           const nudge = referralNudgeMessage(user.referralCode, ctx.me.username);
@@ -653,7 +653,7 @@ export function createBot(): Bot<Ctx> {
               { parse_mode: "HTML" },
             );
             await deliverAll(ctx, result.deliveries, result.orderNumber);
-            if (result.pendingManualItems > 0) await ctx.reply(`🕐 ${result.pendingManualItems} item(s) are being prepared (~12 h).`);
+            if (result.pendingManualItems > 0) await ctx.reply(`🔄 ${result.pendingManualItems} item(s) are being prepared — arriving here shortly.`);
             const instr = await deliveryInstructionsMessage();
             if (instr) await ctx.reply(instr, { parse_mode: "HTML" }).catch(() => undefined);
           } catch {

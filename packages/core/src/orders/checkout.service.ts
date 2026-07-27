@@ -1,7 +1,7 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret } from "@gis/shared";
-import { notifyManualOrder } from "./manual-pay.service.js";
+import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 import { assignAccountSlot, assignLicenseKey, priceCart, type PricedLine } from "./assign.js";
@@ -232,7 +232,7 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
     },
     { timeout: 15_000 },
   );
-  if (result.pendingManualItems > 0) await notifyManualOrder(result.orderId);
+  await notifyOrderToAdmins(result.orderId, channel === "API" ? "API / Wallet" : "Wallet");
   return result;
 }
 
@@ -308,7 +308,7 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
     },
     { timeout: 15_000 },
   );
-  if (result.pendingManualItems > 0) await notifyManualOrder(result.orderId);
+  await notifyOrderToAdmins(result.orderId, "Pay Later (BNPL)");
   return result;
 }
 
