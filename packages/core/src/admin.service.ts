@@ -737,3 +737,14 @@ export async function adjustUserWalletById(userId: string, amountMinor: number, 
   }
   return { ok: true, newBalanceMinor, currency };
 }
+
+
+// ───────────── Flash-sale headline (admin-set hook) ─────────────
+export async function getFlashHeadline(): Promise<string> {
+  const row = await prisma.setting.findUnique({ where: { key: "flash.headline" } });
+  return typeof row?.value === "string" ? row.value : "";
+}
+export async function setFlashHeadline(html: string): Promise<void> {
+  const v = html.slice(0, 400);
+  await prisma.setting.upsert({ where: { key: "flash.headline" }, create: { key: "flash.headline", value: v }, update: { value: v } });
+}

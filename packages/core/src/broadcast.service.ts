@@ -3,6 +3,7 @@ import { prisma } from "@gis/database";
 import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
 import { effectivePriceMinor, isSaleActive } from "./pricing.js";
 import { getProductView } from "./catalog/catalog.service.js";
+import { getFlashHeadline } from "./admin.service.js";
 
 export type BroadcastSegment = "all" | "customers" | "resellers";
 export type BroadcastRecurrence = "none" | "daily" | "weekly";
@@ -258,22 +259,32 @@ export async function announceFlashSale(
   const cheapest = picks.length > 0 ? picks.reduce((a, b) => (b.now < a.now ? b : a)) : null;
   const left = saleTimeLeft(p.saleEndsAt);
 
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
-  const title = `🔥 FLASH SALE — ${icon}${p.name}`;
-  const body = [
-    `${pct}% OFF${left ? ` · ⏳ ${left}` : ""}!`,
-    cheapest ? `${fmtMinor(cheapest.was, cheapest.currency)} ➜ ${fmtMinor(cheapest.now, cheapest.currency)}` : "",
+  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
+  const hook = (await getFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
+  const lines = [
+    hook,
+    "━━━━━━━━━━━━━━━━━━━━",
+    `${icon}${nameDisp}`,
+    ...(descDisp ? [descDisp] : []),
     "",
-    "Grab it before the timer runs out! ⚡",
-  ].filter((l) => l !== "").join("\n");
+    `🏷 <b>${pct}% OFF</b>${left ? `   ·   ⏳ <b>${left}</b>` : ""}`,
+    cheapest ? `💸 <s>${fmtMinor(cheapest.was, cheapest.currency)}</s> ➜ <b>${fmtMinor(cheapest.now, cheapest.currency)}</b>` : "",
+    "",
+    "🚀 <b>Best deal of the day — don't miss it!</b>",
+    "⌛ Once the timer ends, the price goes back up.",
+  ].filter((l) => l !== "");
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
   const res = await sendBroadcast({
-    title,
-    body,
+    title: "",
+    body: lines.join("\n"),
+    bodyIsHtml: true,
     segment: "all",
     imageUrl: p.imageUrl ?? undefined,
-    buttonText: buttonUrl ? "⚡ Grab the deal" : undefined,
+    buttonText: buttonUrl ? "🛒 Grab the deal 🔥" : undefined,
     buttonUrl,
     pin: opts.pin ?? false,
     createdById: opts.createdById,

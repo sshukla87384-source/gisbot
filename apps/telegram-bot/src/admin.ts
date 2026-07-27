@@ -81,6 +81,8 @@ import {
   setUserBanned,
   adjustUserWalletById,
   getUserById,
+  getFlashHeadline,
+  setFlashHeadline,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
 } from "@gis/core";
@@ -212,6 +214,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_mkt: { title: "📣 <b>Marketing</b>", subtitle: "Reach & reward customers", rows: [
       [["📢 Broadcast", cb("adm", "bc"), "primary"], ["📣 Groups", cb("adm", "groups"), "primary"]],
       [["🎁 Referral %", cb("adm", "refrates"), "primary"], ["🕒 BNPL Limit", cb("adm", "bnpl"), "primary"]],
+      [["🔥 Flash Sale Headline", cb("adm", "flashhead"), "primary"]],
     ] },
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
@@ -677,6 +680,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "m_prod": case "m_orders": case "m_stats": case "m_pay": case "m_mkt": case "m_content": case "m_sec":
       await showSubmenu(ctx, `m_${action.slice(2)}`);
       return;
+    case "flashhead": {
+      const cur = (await getFlashHeadline()).trim();
+      ctx.session.awaiting = "admin_flash_headline";
+      await askStep(ctx, ["🔥 <b>Flash sale headline</b>", "The hook shown at the top of every flash-sale announcement (premium emoji OK).", cur ? `\nCurrent:\n${cur}` : "\nUsing the default hook.", "\nSend a new headline, or <code>-</code> to reset to default."].join("\n"));
+      return;
+    }
     case "m_users": return usersMenuView(ctx);
     case "uview": return usersListView(ctx);
     case "uinfo": return userDetailView(ctx, id);
@@ -1454,6 +1463,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_flash_headline") {
+    if (text.trim() === "-") { await setFlashHeadline(""); await ctx.reply("🔥 Flash headline reset to default."); await sendPanel(ctx, false); return true; }
+    await setFlashHeadline(composeBroadcastHtml(ctx));
+    await ctx.reply("✅ Flash sale headline saved — it'll lead every flash-sale announcement.");
+    await sendPanel(ctx, false);
+    return true;
+  }
   if (awaiting === "admin_user_lookup") {
     const u = await getUserSummary(text.trim());
     if (!u) { await ctx.reply("❌ No customer found. Send their @username or Telegram numeric ID."); return true; }

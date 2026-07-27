@@ -58,6 +58,7 @@ export interface SessionData {
     | "admin_user_lookup"
     | "admin_user_addbal"
     | "admin_user_deductbal"
+    | "admin_flash_headline"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
