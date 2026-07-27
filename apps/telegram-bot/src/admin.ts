@@ -348,14 +348,16 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
-  kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
+  if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
+  else kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
   if (p.type === "DIGITAL_ACCOUNT") kb.text(`🔐 Password change: ${p.allowPwChange ? "✅ Allowed → disallow" : "🚫 Not allowed → allow"}`, cb("adm", "ppw", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
-  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible in bot</b>" : "🙈 <b>Hidden from bot</b>"} · ${p.status}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
+  const deliv = p.supplierId ? "🤖 Auto (supplier)" : p.fulfillmentMode === "AUTOMATIC" ? "⚡ Auto (instant)" : "🕐 Manual";
+  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible</b>" : "🙈 <b>Hidden</b>"} · ${p.status} · ${deliv}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
   await show(ctx, text, kb, true);
 }
 

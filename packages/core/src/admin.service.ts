@@ -158,11 +158,11 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean }
+export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null }
 
-type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean };
+type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null };
 function toBrief(p: PRow): ProductBrief {
-  return { id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange };
+  return { id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId };
 }
 
 export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
