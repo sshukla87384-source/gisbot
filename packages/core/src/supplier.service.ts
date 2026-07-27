@@ -10,6 +10,25 @@ interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: st
 export interface SupplierProduct { ref: string; name: string; description: string; priceMinor: number; stock: number | null }
 
 const authHeaders = (key: string): Record<string, string> => ({ Authorization: `Bearer ${key}`, "X-API-Key": key, Accept: "application/json" });
+
+/** URL candidates: as given, and with an /api/v1 prefix if the base has no version segment. */
+function urlCandidates(baseUrl: string, path: string): string[] {
+  const b = baseUrl.replace(/\/$/, "");
+  const hasVersion = /\/api\/v\d+/.test(b);
+  return hasVersion ? [`${b}${path}`] : [`${b}${path}`, `${b}/api/v1${path}`];
+}
+
+/** Fetch that tolerates a missing /api/v1 prefix (retries the versioned URL on 404). */
+async function supFetch(s: SupplierRow, path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = { ...authHeaders(decKey(s)), ...(init.headers as Record<string, string> | undefined) };
+  let last: Response | null = null;
+  for (const url of urlCandidates(s.baseUrl, path)) {
+    const res = await fetch(url, { ...init, headers });
+    if (res.status !== 404) return res;
+    last = res;
+  }
+  return last as Response;
+}
 const decKey = (s: SupplierRow): string => decryptSecret(s.apiKeyEnc, loadConfig().ENCRYPTION_MASTER_KEY);
 
 function pickStr(o: any, keys: string[]): string {
@@ -36,12 +55,12 @@ export async function setSupplierMarkup(id: string, pct: number): Promise<void> 
 
 // ── HTTP (tolerant to common REST shapes) ──
 async function getJson(s: SupplierRow, path: string): Promise<any> {
-  const res = await fetch(`${s.baseUrl}${path}`, { headers: authHeaders(decKey(s)) });
+  const res = await supFetch(s, path);
   if (!res.ok) throw new Error(`${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
   return res.json();
 }
 
-const PRODUCT_PATHS = ["/products", "/product", "/products/list", "/catalog", "/items", "/list", "/api/products", "/api/v1/products", "/listProducts", "/getProducts", ""];
+const PRODUCT_PATHS = ["/products", "/product", "/catalog", "/items", "/list"];
 
 function parseProductArray(arr: any[]): SupplierProduct[] {
   return arr
@@ -61,7 +80,7 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
   let lastNote = "";
   for (const path of PRODUCT_PATHS) {
     try {
-      const res = await fetch(`${s.baseUrl}${path}`, { headers: authHeaders(decKey(s)) });
+      const res = await supFetch(s, path);
       const text = await res.text().catch(() => "");
       if (!res.ok) { lastNote = `${path || "/"} → HTTP ${res.status} ${text.slice(0, 120)}`; continue; }
       let json: any;
@@ -112,10 +131,11 @@ export async function placeSupplierOrder(supplierId: string, ref: string, qty = 
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
   try {
-    const res = await fetch(`${s.baseUrl}/orders`, {
+    const pid: string | number = /^\d+$/.test(ref) ? Number(ref) : ref;
+    const res = await supFetch(s, "/orders", {
       method: "POST",
-      headers: { ...authHeaders(decKey(s)), "Content-Type": "application/json" },
-      body: JSON.stringify({ product_id: ref, productId: ref, id: ref, quantity: qty, qty }),
+      headers: { "Content-Type": "application/json", "Idempotency-Key": `sup-${supplierId}-${ref}-${Date.now()}` },
+      body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty }),
     });
     if (!res.ok) return { ok: false, keys: [], reason: `${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}` };
     const j: any = await res.json();
