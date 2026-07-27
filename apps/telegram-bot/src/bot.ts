@@ -210,6 +210,9 @@ export function createBot(): Bot<Ctx> {
   bot.command("wallet", async (ctx) => render(ctx, await views.walletView(ctx.user), false));
   bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
   bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
+  bot.command("api", async (ctx) => render(ctx, await views.apiKeysView(ctx.user), false));
+  bot.command(["language", "lang"], async (ctx) => render(ctx, views.languageView(ctx.user), false));
+  bot.command("referral", async (ctx) => render(ctx, await views.referralView(ctx.user, ctx.me.username), false));
   // Secret admin trigger — /Shriji (case-insensitive). /admin no longer opens the panel.
   bot.hears(/^\/shriji(?:@\S+)?(?:\s|$)/i, async (ctx) => adminCommand(ctx));
 

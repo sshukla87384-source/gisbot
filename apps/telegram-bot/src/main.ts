@@ -18,6 +18,11 @@ async function main(): Promise<void> {
     { command: "shop", description: "Browse products" },
     { command: "menu", description: "Main menu" },
     { command: "help", description: "Help & support" },
+    { command: "wallet", description: "Wallet & deposit" },
+    { command: "orders", description: "My orders" },
+    { command: "referral", description: "Refer & earn" },
+    { command: "api", description: "Developer API" },
+    { command: "language", description: "Change language" },
   ]);
 
   if (config.BOT_MODE === "webhook") {
