@@ -976,10 +976,10 @@ async function sendRevealed(
 ): Promise<void> {
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(variantName)}`;
   const lines = [`📦 <b>${escapeHtml(productName)}</b>${vn}`, ""];
-  if (payload.key) lines.push(`🔑 <code>${escapeHtml(payload.key)}</code>`);
-  if (payload.username) lines.push(`👤 Login: <code>${escapeHtml(payload.username)}</code>`);
-  if (payload.password) lines.push(`🔒 Password: <tg-spoiler>${escapeHtml(payload.password)}</tg-spoiler>`);
-  if (payload.username) lines.push("", "⚠️ Please do not change the account password.");
+  if (payload.key) lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
+  if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(payload.username)}</code>`);
+  if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(payload.password)}</code>`);
+  if (payload.username) lines.push("", "ℹ️ Tap the ID/Password to copy. Please don't change the account password.");
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
   lines.push("", "Saved in 🔑 My Licenses. Problem? Open a 🎫 Support ticket.");
