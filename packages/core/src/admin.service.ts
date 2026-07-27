@@ -488,6 +488,7 @@ export async function setProductPublicPrice(productId: string, prices: { usdMino
       });
     }
   }
+  await prisma.product.update({ where: { id: productId }, data: { priceLocked: true } }); // keep this price through supplier re-syncs
   await invalidate("cat:*");
 }
 

@@ -186,7 +186,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
       // Visibility follows supplier stock: shown when >0, hidden when 0.
       await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null, activationGuide: p.note.slice(0, 2000) || null, status: inStock ? "ACTIVE" : "PAUSED" } });
       const v = existing.variants[0];
-      if (v) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
+      if (v && !existing.priceLocked) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
         await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
       }
       updated++;
