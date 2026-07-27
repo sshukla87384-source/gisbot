@@ -941,7 +941,7 @@ export function createBot(): Bot<Ctx> {
 }
 
 async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
-  await sendRevealed(ctx, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide);
+  await sendRevealed(ctx, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide, d.allowPwChange);
 }
 
 /**
@@ -952,7 +952,7 @@ async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
 async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?: string): Promise<void> {
   if (deliveries.length === 0) return;
   if (deliveries.length === 1) { await sendDelivery(ctx, deliveries[0]!); return; }
-  const lines = deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide }));
+  const lines = deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
   const menu = new InlineKeyboard().text("🏠 Menu", "mnu:home");
   if (deliveries.length > DELIVERY_FILE_THRESHOLD) {
     const txt = buildDeliveryTxt(lines, orderNumber);
@@ -973,13 +973,17 @@ async function sendRevealed(
   variantName: string,
   payload: { kind: string; key?: string; username?: string; password?: string; expiresAt?: string },
   activationGuide?: string | null,
+  allowPwChange?: boolean,
 ): Promise<void> {
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(variantName)}`;
   const lines = [`📦 <b>${escapeHtml(productName)}</b>${vn}`, ""];
   if (payload.key) lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
   if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(payload.username)}</code>`);
   if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(payload.password)}</code>`);
-  if (payload.username) lines.push("", "ℹ️ Tap the ID/Password to copy. Please don't change the account password.");
+  if (payload.username) {
+    lines.push("", "ℹ️ Tap the ID or Password to copy it.");
+    lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
+  }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
   lines.push("", "Saved in 🔑 My Licenses. Problem? Open a 🎫 Support ticket.");

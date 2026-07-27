@@ -158,13 +158,13 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string }
+export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean }
 
 export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
   const rows = await prisma.product.findMany({
     where: { deletedAt: null }, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], take: limit,
   });
-  return rows.map((p) => ({ id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug }));
+  return rows.map((p) => ({ id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange }));
 }
 
 /** Pin a product to the top / a chosen priority. Higher rank = higher in the list; 0 = unpinned. */
@@ -220,6 +220,11 @@ export async function setProductImage(productId: string, imageUrl: string): Prom
 
 export async function setProductFulfillmentMode(productId: string, mode: "AUTOMATIC" | "MANUAL"): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { fulfillmentMode: mode } });
+  await invalidate("cat:*");
+}
+
+export async function setProductPasswordChange(productId: string, allow: boolean): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { allowPasswordChange: allow } });
   await invalidate("cat:*");
 }
 

@@ -21,6 +21,7 @@ export interface DeliveredSecret {
   orderItemId: string;
   productName: string;
   variantName: string;
+  allowPwChange?: boolean;
   kind: "LICENSE_KEY" | "DIGITAL_ACCOUNT";
   /** Plaintext, for immediate dispatch only. Never persist or log. */
   secret: { key?: string; username?: string; password?: string; expiresAt?: string };
@@ -87,6 +88,7 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
               kind: "LICENSE_KEY",
               secret: { key, expiresAt: expiresAt?.toISOString() },
               activationGuide: line.activationGuide,
+              allowPwChange: line.allowPwChange,
             });
           } else if (line.productType === "DIGITAL_ACCOUNT") {
             const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);
@@ -109,6 +111,7 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
                 expiresAt: creds.expiresAt?.toISOString(),
               },
               activationGuide: line.activationGuide,
+              allowPwChange: line.allowPwChange,
             });
           } else {
             // DOWNLOAD / SUBSCRIPTION / MANUAL_SERVICE automatic flows arrive

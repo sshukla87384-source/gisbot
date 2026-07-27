@@ -152,7 +152,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               },
             });
             if (order.user.telegramId !== null) {
-              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide });
+              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             }
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
@@ -170,7 +170,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               },
             });
             if (order.user.telegramId !== null) {
-              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide });
+              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             }
           }
         } catch {
@@ -266,7 +266,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       );
       if (outcome.deliveries.length === 1) {
         const d = outcome.deliveries[0]!;
-        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide));
+        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange));
       } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
         await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`);
       } else if (outcome.deliveries.length > 1) {

@@ -14,6 +14,7 @@ import {
   setProductPinRank,
   setProductPublicPrice,
   setProductFulfillmentMode,
+  setProductPasswordChange,
   listPendingManualItems,
   manualFulfillItem,
   type PriceChannel,
@@ -289,6 +290,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
+  if (p.type === "DIGITAL_ACCOUNT") kb.text(`🔐 Password change: ${p.allowPwChange ? "✅ Allowed → disallow" : "🚫 Not allowed → allow"}`, cb("adm", "ppw", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
@@ -655,6 +657,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const next = cur === "MANUAL" ? "AUTOMATIC" : "MANUAL";
       await setProductFulfillmentMode(id, next);
       await ctx.reply(`⚙️ Delivery mode set to <b>${next}</b>.`, { parse_mode: "HTML" });
+      return productView(ctx, id);
+    }
+    case "ppw": {
+      const prods = await listProductsBrief(200);
+      const cur = prods.find((x) => x.id === id)?.allowPwChange ?? false;
+      await setProductPasswordChange(id, !cur);
+      await ctx.reply(!cur ? "🔓 Customers can now change this account's password." : "🔒 Customers are told not to change this account's password.");
       return productView(ctx, id);
     }
     case "deliver": return manualDeliverView(ctx, id);

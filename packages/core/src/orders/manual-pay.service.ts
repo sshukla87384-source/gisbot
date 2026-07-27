@@ -205,12 +205,12 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
             const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
             const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
-            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide });
+            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
             const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
             await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
-            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide });
+            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           }
         } catch {
           awaitingStock++;
@@ -251,7 +251,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb);
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide));
+      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange));
     } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
       await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`);
     } else if (outcome.deliveries.length > 1) {
@@ -386,7 +386,7 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
     if (item.order.user.telegramId !== null) {
       await enqueueTelegramMessage(
         item.order.user.telegramId,
-        `🔄 <b>Replacement delivered</b>\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide)}`,
+        `🔄 <b>Replacement delivered</b>\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
       );
     }
     return { ok: true };

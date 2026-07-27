@@ -22,6 +22,7 @@ export interface PricedLine {
   quantity: number;
   unitPriceMinor: number;
   fulfillmentMode: "AUTOMATIC" | "MANUAL";
+  allowPwChange: boolean;
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
@@ -67,6 +68,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       variantName: v.name,
       productType: v.product.type,
       activationGuide: v.product.activationGuide,
+      allowPwChange: v.product.allowPasswordChange,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
       unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),
@@ -169,6 +171,7 @@ export function buildDeliveryText(
   variantName: string,
   payload: DeliveryPayload,
   activationGuide?: string | null,
+  allowPwChange?: boolean,
 ): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(variantName)}`;
@@ -176,7 +179,10 @@ export function buildDeliveryText(
   if (payload.key) lines.push(`🔑 <b>Key:</b> <code>${esc(payload.key)}</code>`);
   if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${esc(payload.username)}</code>`);
   if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${esc(payload.password)}</code>`);
-  if (payload.username) lines.push("", "ℹ️ Tap the ID/Password to copy. Please don't change the account password.");
+  if (payload.username) {
+    lines.push("", "ℹ️ Tap the ID or Password to copy it.");
+    lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
+  }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${esc(activationGuide)}`);
   lines.push("", "💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
@@ -208,6 +214,7 @@ export interface DeliveryLine {
   variantName: string;
   payload: DeliveryPayload;
   activationGuide?: string | null;
+  allowPwChange?: boolean;
 }
 
 /** One consolidated HTML message for a whole multi-item order (used when count ≤ threshold). */
@@ -223,6 +230,7 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
     if (p.key) out.push(`   🔑 Key: <code>${esc(p.key)}</code>`);
     if (p.username) out.push(`   🆔 ID: <code>${esc(p.username)}</code>`);
     if (p.password) out.push(`   🔑 Password: <code>${esc(p.password)}</code>`);
+    if (p.password) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
     if (p.expiresAt) out.push(`   ⏳ ${p.expiresAt.slice(0, 10)}`);
     out.push("");
   });
