@@ -6,6 +6,7 @@ import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegra
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyManualOrder } from "./manual-pay.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
+import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 
 /**
@@ -278,6 +279,8 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         );
         const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
         if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
+        const instr = await deliveryInstructionsMessage();
+        if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
       }
       if (outcome.pendingManual > 0) {
         await enqueueTelegramMessage(

@@ -643,3 +643,21 @@ export async function setWebAdminPassword(email: string, password: string): Prom
   });
   return { ok: true };
 }
+
+// ───────────── Global post-delivery instructions ─────────────
+/** Store-wide instructions appended after every order delivery (HTML). Empty = none. */
+export async function getDeliveryInstructions(): Promise<string> {
+  const row = await prisma.setting.findUnique({ where: { key: "delivery.instructions" } });
+  return typeof row?.value === "string" ? row.value : "";
+}
+
+export async function setDeliveryInstructions(html: string): Promise<void> {
+  const val = html.slice(0, 3500);
+  await prisma.setting.upsert({ where: { key: "delivery.instructions" }, create: { key: "delivery.instructions", value: val }, update: { value: val } });
+}
+
+/** The formatted instructions message, or null when unset. */
+export async function deliveryInstructionsMessage(): Promise<string | null> {
+  const html = (await getDeliveryInstructions()).trim();
+  return html ? `📋 <b>Important — please read</b>\n${html}` : null;
+}

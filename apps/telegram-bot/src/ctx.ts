@@ -47,6 +47,7 @@ export interface SessionData {
     | "admin_dm_reply"
     | "admin_web_email"
     | "admin_web_pass"
+    | "admin_delivery_note"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;

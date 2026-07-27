@@ -11,6 +11,7 @@ import {
   removeCouponFromCart,
   couponReason,
   referralNudgeMessage,
+  deliveryInstructionsMessage,
   clearCart,
   createGatewayCheckout,
   createBinanceManualCheckout,
@@ -625,6 +626,8 @@ export function createBot(): Bot<Ctx> {
           }
           const nudge = referralNudgeMessage(user.referralCode, ctx.me.username);
           if (nudge) await ctx.reply(nudge, { parse_mode: "HTML" });
+          const instr = await deliveryInstructionsMessage();
+          if (instr) await ctx.reply(instr, { parse_mode: "HTML" }).catch(() => undefined);
           break;
         }
         case "ord:paybnpl": {
@@ -643,6 +646,8 @@ export function createBot(): Bot<Ctx> {
             );
             await deliverAll(ctx, result.deliveries, result.orderNumber);
             if (result.pendingManualItems > 0) await ctx.reply(`🕐 ${result.pendingManualItems} item(s) are being prepared (~12 h).`);
+            const instr = await deliveryInstructionsMessage();
+            if (instr) await ctx.reply(instr, { parse_mode: "HTML" }).catch(() => undefined);
           } catch {
             await ctx.reply("❌ Couldn't place on Pay Later — your BNPL limit may be exceeded. Try another payment method.");
           }

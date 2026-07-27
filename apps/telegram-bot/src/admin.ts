@@ -37,6 +37,8 @@ import {
   removeCustomEmojiEntry,
   dmUser,
   setWebAdminPassword,
+  getDeliveryInstructions,
+  setDeliveryInstructions,
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
@@ -173,7 +175,8 @@ function panelKeyboard(): InlineKeyboard {
     // ── Customers ──
     .add(sbtn("💰 Adjust Wallet", cb("adm", "walletadj"), "primary"), sbtn("🕒 BNPL Limit", cb("adm", "bnpl"), "primary")).row()
     // ── Customize & integrations ──
-    .add(sbtn("🔤 Rename Buttons", cb("adm", "btns"), "primary"), sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
+    .add(sbtn("🔤 Rename Buttons", cb("adm", "btns"), "primary"), sbtn("📋 Delivery Note", cb("adm", "delnote"), "primary")).row()
+    .add(sbtn("🧪 Test Binance", cb("adm", "bintest"), "primary")).row()
     .add(sbtn("🔑 API Keys", cb("adm", "apikeys"), "primary")).row()
     // ── Security ──
     .add(sbtn("🔑 Passcode", cb("adm", "chpass"), "primary"), sbtn("🔐 Web Login", cb("adm", "webpass"), "primary")).row()
@@ -583,6 +586,17 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "↩️ Type your reply — it will be sent to the customer as a Support message:");
       return;
     case "emoji": return emojiRegistryView(ctx);
+    case "delnote": {
+      const cur = (await getDeliveryInstructions()).trim();
+      ctx.session.awaiting = "admin_delivery_note";
+      await askStep(ctx, [
+        "📋 <b>Post-delivery instructions</b>",
+        "This message is sent to the customer after <b>every</b> order delivery (all products).",
+        cur ? `\nCurrent:\n${cur}` : "\nNone set yet.",
+        "\nSend the new instructions (premium emoji OK), or send <code>-</code> to clear.",
+      ].join("\n"));
+      return;
+    }
     case "emojiadd":
       ctx.session.awaiting = "admin_emoji_capture";
       await askStep(ctx, "🎨 Send <b>one premium emoji</b> (from your Telegram Premium keyboard). I'll capture it.");
@@ -1058,6 +1072,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_delivery_note") {
+    if (text.trim() === "-") { await setDeliveryInstructions(""); await ctx.reply("🧹 Delivery instructions cleared."); await sendPanel(ctx, false); return true; }
+    await setDeliveryInstructions(composeBroadcastHtml(ctx));
+    await ctx.reply("✅ Delivery instructions saved — customers will see them after every order.");
+    await sendPanel(ctx, false);
+    return true;
+  }
   if (awaiting === "admin_web_email") {
     const email = text.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { await askStep(ctx, "Please send a valid email, e.g. admin@getitsasta.cloud"); ctx.session.awaiting = "admin_web_email"; return true; }

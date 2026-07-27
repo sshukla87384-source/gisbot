@@ -5,6 +5,7 @@ import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument } fr
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
+import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 
 /**
@@ -260,6 +261,8 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));
       const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
       if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
+      const instr = await deliveryInstructionsMessage();
+      if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
     }
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🕐 ${outcome.pendingManual} item(s) are being prepared (~12 h).`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
@@ -335,6 +338,8 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
     await enqueueTelegramMessage(tgId, thankYouMessage(item.order.user, loadConfig().STORE_NAME));
     const nudge = referralNudgeMessage(item.order.user.referralCode, loadConfig().BOT_USERNAME);
     if (nudge) await enqueueTelegramMessage(tgId, nudge);
+    const instr = await deliveryInstructionsMessage();
+    if (instr) await enqueueTelegramMessage(tgId, instr);
   }
   return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
 }
