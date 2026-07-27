@@ -177,20 +177,23 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
   for (const p of prods) {
     const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
     const inrMinor = Math.round(priceMinor * rate);
+    const inStock = p.stock === null || p.stock > 0; // null = API doesn't report stock → treat as available
     const existing = await prisma.product.findFirst({ where: { supplierId: s.id, supplierRef: p.ref }, include: { variants: true } });
     if (existing) {
-      await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null } });
+      // Visibility follows supplier stock: shown when >0, hidden when 0.
+      await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null, status: inStock ? "ACTIVE" : "PAUSED" } });
       const v = existing.variants[0];
       if (v) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
         await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
       }
       updated++;
     } else {
+      if (!inStock) continue; // don't import out-of-stock products
       const slug = `sup-${s.id.slice(0, 6)}-${p.ref}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60);
       await prisma.product.create({
         data: {
           slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
-          type: "MANUAL_SERVICE", status: "PAUSED", fulfillmentMode: "MANUAL", categoryId: cat.id,
+          type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
           supplierId: s.id, supplierRef: p.ref,
           variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
         },
@@ -228,4 +231,16 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
   if (!r.ok || r.keys.length === 0) return { ok: false, reason: r.reason ?? "NO_KEY" };
   await manualFulfillItem(orderItemId, r.keys.join("\n"));
   return { ok: true };
+}
+
+/** Auto-buy + deliver every supplier-linked, still-unfulfilled item in an order. Returns count delivered. */
+export async function autoFulfillSupplierItems(orderId: string): Promise<number> {
+  const items = await prisma.orderItem.findMany({ where: { orderId, fulfilledAt: null }, include: { variant: { include: { product: true } } } });
+  let done = 0;
+  for (const it of items) {
+    if (!it.variant.product.supplierId) continue;
+    const r = await fulfillFromSupplier(it.id);
+    if (r.ok) done++;
+  }
+  return done;
 }

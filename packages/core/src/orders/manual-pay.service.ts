@@ -275,12 +275,19 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
 
 /** Notify bot admins that an order has manual items awaiting hand-delivery, with a Deliver button. */
 export async function notifyManualOrder(orderId: string): Promise<void> {
+  // Auto-buy + deliver any supplier-linked items first (dynamic import avoids a circular dependency).
+  try {
+    const { autoFulfillSupplierItems } = await import("../supplier.service.js");
+    await autoFulfillSupplierItems(orderId);
+  } catch { /* supplier auto-fulfil is best-effort */ }
+
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { user: { select: { telegramHandle: true, firstName: true, telegramId: true } }, items: true },
+    include: { user: { select: { telegramHandle: true, firstName: true, telegramId: true } }, items: { include: { variant: { include: { product: { select: { supplierId: true } } } } } } },
   });
   if (!order) return;
-  const pending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null);
+  // Only alert for items that still need a HUMAN (manual, not fulfilled, not supplier-auto).
+  const pending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null && !i.variant.product.supplierId);
   if (pending.length === 0) return;
   const buyer = order.user.telegramHandle ? `@${order.user.telegramHandle}` : (order.user.firstName ?? String(order.user.telegramId));
   const lines = [
