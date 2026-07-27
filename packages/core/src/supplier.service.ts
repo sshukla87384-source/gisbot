@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, decryptSecret } from "@gis/shared";
 import { invalidate } from "./redis.js";
+import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
 import { announceProduct, sendBroadcast } from "./broadcast.service.js";
 
@@ -142,7 +143,29 @@ export async function testSupplier(id: string): Promise<{ ok: boolean; detail: s
 }
 
 /** Place an order at the supplier and return the delivered key(s). Deducts the supplier-side balance. */
-export async function placeSupplierOrder(supplierId: string, ref: string, qty = 1): Promise<{ ok: boolean; keys: string[]; reason?: string }> {
+const KEY_FIELD_RE = /(key|code|serial|license|cred|account|token|secret|login|user|email|pass|pin|voucher|card|otp|delivered|value|content|data)/i;
+const STATUS_WORDS = /^(true|false|ok|success|failed|failure|error|pending|completed|done|processing|active)$/i;
+
+/** Deeply extract delivered credential strings from any supplier order response shape. */
+function extractDeliveredKeys(j: any): string[] {
+  const out: string[] = [];
+  const walk = (node: any, keyName?: string): void => {
+    if (node === null || node === undefined) return;
+    if (typeof node === "string") {
+      const v = node.trim();
+      if (v.length >= 3 && keyName && KEY_FIELD_RE.test(keyName) && !STATUS_WORDS.test(v)) out.push(v);
+      return;
+    }
+    if (typeof node === "number") return;
+    if (Array.isArray(node)) { for (const el of node) walk(el, keyName); return; }
+    if (typeof node === "object") { for (const [k, val] of Object.entries(node)) walk(val, k); return; }
+  };
+  walk(j);
+  if (out.length === 0 && typeof j === "string" && j.trim().length >= 3) out.push(j.trim());
+  return [...new Set(out)];
+}
+
+export async function placeSupplierOrder(supplierId: string, ref: string, qty = 1): Promise<{ ok: boolean; keys: string[]; reason?: string; raw?: string }> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
   try {
@@ -152,17 +175,11 @@ export async function placeSupplierOrder(supplierId: string, ref: string, qty = 
       headers: { "Content-Type": "application/json", "Idempotency-Key": `sup-${supplierId}-${ref}-${Date.now()}` },
       body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty }),
     });
-    if (!res.ok) return { ok: false, keys: [], reason: `${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}` };
-    const j: any = await res.json();
-    const out: string[] = [];
-    const collect = (v: any): void => {
-      if (!v) return;
-      if (typeof v === "string") { if (v.trim()) out.push(v.trim()); return; }
-      if (Array.isArray(v)) { v.forEach(collect); return; }
-      if (typeof v === "object") collect(v.key ?? v.code ?? v.serial ?? v.license ?? v.credentials ?? v.data ?? v.result);
-    };
-    collect(j.key ?? j.code ?? j.keys ?? j.codes ?? j.data ?? j.result ?? j);
-    return { ok: out.length > 0, keys: out, reason: out.length ? undefined : "NO_KEY_IN_RESPONSE" };
+    const rawText = await res.text().catch(() => "");
+    if (!res.ok) return { ok: false, keys: [], reason: `${res.status} ${rawText.slice(0, 200)}`, raw: rawText.slice(0, 500) };
+    let j: any; try { j = JSON.parse(rawText); } catch { j = rawText; }
+    const out = extractDeliveredKeys(j);
+    return { ok: out.length > 0, keys: out, reason: out.length ? undefined : "NO_KEY_IN_RESPONSE", raw: rawText.slice(0, 500) };
   } catch (e) { return { ok: false, keys: [], reason: String(e instanceof Error ? e.message : e).slice(0, 200) }; }
 }
 
@@ -257,9 +274,15 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
   const { supplierId, supplierRef } = item.variant.product;
   if (!supplierId || !supplierRef) return { ok: false, reason: "NOT_SUPPLIER" };
   const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity);
-  if (!r.ok || r.keys.length === 0) return { ok: false, reason: r.reason ?? "NO_KEY" };
-  await manualFulfillItem(orderItemId, r.keys.join("\n"));
-  return { ok: true };
+  if (r.ok && r.keys.length > 0) {
+    await manualFulfillItem(orderItemId, r.keys.join("\n"));
+    return { ok: true };
+  }
+  // A charge may have gone through but we couldn't read the key — never drop it silently.
+  await enqueueAdminAlert(
+    `⚠️ <b>Supplier charged but no key parsed</b>\nProduct: ${item.productNameSnap}\nReason: ${r.reason ?? "unknown"}\nDeliver this order manually. Raw supplier response (send to support to fix mapping):\n<code>${(r.raw ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 400)}</code>`,
+  ).catch(() => undefined);
+  return { ok: false, reason: r.reason ?? "NO_KEY" };
 }
 
 /** Auto-buy + deliver every supplier-linked, still-unfulfilled item in an order. Returns count delivered. */
