@@ -69,6 +69,7 @@ import {
   setProductName,
   setProductDescription,
   setProductActivationGuide,
+  setProductButton,
   setProductStatus,
   testBinanceApi,
   setBinanceCreds,
@@ -356,6 +357,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
+  kb.text("🎨 Button name & colour", cb("adm", "pbtn", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const deliv = p.supplierId ? "🤖 Auto (supplier)" : p.fulfillmentMode === "AUTOMATIC" ? "⚡ Auto (instant)" : "🕐 Manual";
@@ -856,6 +858,16 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "💵 New <b>USD</b> price for everyone (applies to all variants), e.g. <code>9.99</code>. Send <code>0</code> to skip USD.");
       return;
     case "cprice": return customPriceView(ctx, id);
+    case "pbtn":
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_btntext";
+      await askStep(ctx, "🎨 Send the <b>Buy button label</b> for this product (e.g. <code>⚡ Get Now</code>). Send <code>-</code> to keep the default.");
+      return;
+    case "pbtncol": {
+      const [pid, style] = id.split("~");
+      if (pid && style) { await setProductButton(pid, null, style === "default" ? null : style); await ctx.reply(`🎨 Button colour set to <b>${style}</b>.`, { parse_mode: "HTML" }); await productView(ctx, pid); }
+      return;
+    }
     case "pmode": {
       const cur = (await getProductBriefById(id))?.fulfillmentMode ?? "AUTOMATIC";
       const next = cur === "MANUAL" ? "AUTOMATIC" : "MANUAL";
@@ -1275,6 +1287,16 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setProductName(pid, text, hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : null);
     await ctx.reply("✅ Name updated." + (hasCustomEmoji(ctx) ? " (premium emoji kept 🎨)" : ""));
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_p_btntext") {
+    const pid = ctx.session.admProductId ?? "";
+    await setProductButton(pid, text.trim() === "-" ? "" : text.trim(), null);
+    const kb = new InlineKeyboard()
+      .text("🟢 Green", cb("adm", "pbtncol", `${pid}~success`)).text("🔵 Blue", cb("adm", "pbtncol", `${pid}~primary`)).text("🔴 Red", cb("adm", "pbtncol", `${pid}~danger`)).row()
+      .text("⚪️ Default", cb("adm", "pbtncol", `${pid}~default`)).row();
+    await ctx.reply(text.trim() === "-" ? "Label kept. Pick the button colour:" : "✅ Label saved. Pick the button colour:", { parse_mode: "HTML", reply_markup: kb });
+    ctx.session.awaiting = null;
     return true;
   }
   if (awaiting === "admin_p_guide") {

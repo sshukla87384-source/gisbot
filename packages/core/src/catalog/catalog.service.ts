@@ -19,6 +19,7 @@ export interface ProductListItem {
   fromPriceMinor: number | null;
   onSale: boolean;
   inStock: boolean;
+  buttonStyle: string | null;
 }
 
 export interface Paged<T> {
@@ -52,6 +53,8 @@ export interface ProductView {
   activationGuide: string | null;
   isPlatform: boolean;
   supplierBacked: boolean;
+  buyButtonText: string | null;
+  buttonStyle: string | null;
   variants: VariantView[];
 }
 
@@ -146,6 +149,7 @@ export async function listProducts(opts: {
         fromPriceMinor: priced.length > 0 ? Math.min(...priced) : null,
         onSale,
         inStock,
+        buttonStyle: p.buttonStyle,
       });
     }
     return { items, page, pages, total };
@@ -212,6 +216,8 @@ export async function getProductView(productId: string, currency: Currency, user
     activationGuide: p.activationGuide,
     isPlatform: p.resellerId === null,
     supplierBacked: p.supplierId !== null,
+    buyButtonText: p.buyButtonText,
+    buttonStyle: p.buttonStyle,
     variants,
   };
 }

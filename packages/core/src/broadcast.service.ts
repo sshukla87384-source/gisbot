@@ -200,7 +200,6 @@ export async function announceProduct(
   const lines = [
     `${icon}${nameDisp}`,
     onSale ? "🔥 <b>Flash sale — just added!</b>" : "🆕 <b>Just added & in stock!</b>",
-    ...(descDisp ? ["", descDisp] : []),
   ];
   if (cheapest) lines.push("", `💵 <b>${onSale ? "Sale price " : "Price "}from ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
 
@@ -318,12 +317,11 @@ export async function announceRestock(
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "💎 ";
   const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
-  const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
   const lines = [
     `${icon}${nameDisp}`,
-    ...(descDisp ? ["", descDisp, ""] : [""]),
+    "",
     `➕ Added: <b>${qtyAdded}</b>`,
-    `📦 Current stock: <b>${currentStock}</b>`,
+    `📦 In stock: <b>${currentStock}</b>`,
   ];
   if (cheapestMinor !== null) lines.push(`💵 Price: <b>${fmtMinor(cheapestMinor, "USD")}</b>`);
 

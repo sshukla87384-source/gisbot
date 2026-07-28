@@ -256,6 +256,12 @@ export async function setProductPasswordChange(productId: string, allow: boolean
   await invalidate("cat:*");
 }
 
+/** Set a product's custom Buy button label and/or colour (success|primary|danger). */
+export async function setProductButton(productId: string, text: string | null, style: string | null): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { ...(text !== null ? { buyButtonText: text.slice(0, 40) || null } : {}), ...(style !== null ? { buttonStyle: style || null } : {}) } });
+  await invalidate("cat:*");
+}
+
 export async function setProductStatus(productId: string, status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED"): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { status } });
 }
