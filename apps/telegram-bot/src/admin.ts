@@ -64,6 +64,7 @@ import {
   postProductToGroups,
   removePostTarget,
   sendBroadcast,
+  scheduleBroadcast,
   setFlashSale,
   setProductImage,
   setProductName,
@@ -221,6 +222,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["📢 Broadcast", cb("adm", "bc"), "primary"], ["📣 Groups", cb("adm", "groups"), "primary"]],
       [["🎁 Referral %", cb("adm", "refrates"), "primary"], ["🕒 BNPL Limit", cb("adm", "bnpl"), "primary"]],
       [["🔥 Flash Sale Headline", cb("adm", "flashhead"), "primary"]],
+      [["🎉 Special Sale (campaign)", cb("adm", "ssale"), "success"]],
     ] },
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
@@ -690,6 +692,47 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     : "No products synced yet — tap 🔄 Sync on the supplier first.", kb, true);
 }
 
+function saleTargetKb(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("🛍 Open Shop", cb("adm", "ssaletgt", "menu")).text("📦 A product", cb("adm", "ssaletgt", "prod")).row()
+    .text("🔗 Custom link", cb("adm", "ssaletgt", "url")).text("🚫 No button", cb("adm", "ssaletgt", "none")).row();
+}
+
+function saleColourKb(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("🟢 Green", cb("adm", "ssalecol", "success")).text("🔵 Blue", cb("adm", "ssalecol", "primary")).text("🔴 Red", cb("adm", "ssalecol", "danger")).row();
+}
+
+function saleFinalKb(): InlineKeyboard {
+  return new InlineKeyboard()
+    .add(sbtn("📣 Announce now", cb("adm", "ssalego", "now"), "success")).row()
+    .text("⏰ Auto — daily", cb("adm", "ssalego", "daily")).text("⏰ Auto — weekly", cb("adm", "ssalego", "weekly")).row()
+    .text("✖️ Cancel", cb("adm", "home"));
+}
+
+function buildSaleBody(d: NonNullable<Ctx["session"]["saleDraft"]>): string {
+  const lines = [d.title ?? "🎉 <b>Special Sale</b>"];
+  if (d.body) lines.push("", d.body);
+  if (d.endsHours && d.endsHours > 0) lines.push("", `⏳ <b>Hurry — offer ends in ${d.endsHours}h!</b>`);
+  return lines.join("\n");
+}
+
+async function runSpecialSale(ctx: Ctx, mode: "now" | "daily" | "weekly"): Promise<void> {
+  const d = ctx.session.saleDraft;
+  if (!d?.title) { await ctx.reply("Sale draft expired — start again."); return sendPanel(ctx, false); }
+  const body = buildSaleBody(d);
+  const common = { title: "", body, bodyIsHtml: true, segment: "all" as const, buttonText: d.btnText, buttonUrl: d.btnUrl, buttonStyle: d.btnStyle, createdById: "bot-admin" };
+  ctx.session.saleDraft = undefined;
+  if (mode === "now") {
+    const r = await sendBroadcast(common);
+    await ctx.reply(`📣 Special sale announced to ${r.targets} users. 🎉`);
+  } else {
+    await scheduleBroadcast({ ...common, scheduledAt: new Date(Date.now() + 60_000), recurrence: mode });
+    await ctx.reply(`⏰ Special sale scheduled to auto-announce <b>${mode}</b> (starting shortly). 🎉`, { parse_mode: "HTML" });
+  }
+  await sendPanel(ctx, false);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -710,6 +753,32 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "m_prod": case "m_orders": case "m_stats": case "m_pay": case "m_mkt": case "m_content": case "m_sec":
       await showSubmenu(ctx, `m_${action.slice(2)}`);
       return;
+    case "ssale":
+      ctx.session.saleDraft = {};
+      ctx.session.awaiting = "sale_title";
+      await askStep(ctx, "🎉 <b>Special Sale</b>\nStep 1 — send the <b>title/headline</b> (premium emoji OK):");
+      return;
+    case "ssaletgt": {
+      const d = ctx.session.saleDraft ?? {};
+      if (id === "none") { ctx.session.saleDraft = { ...d, btnText: undefined, btnUrl: undefined }; ctx.session.awaiting = "sale_timer"; await askStep(ctx, "⏳ Send a countdown in <b>hours</b> (e.g. 24), or <code>-</code> to skip:"); return; }
+      if (id === "menu") { ctx.session.saleDraft = { ...d, btnUrl: `https://t.me/${ctx.me.username}?start=menu` }; ctx.session.awaiting = "sale_btntext"; await askStep(ctx, "Send the <b>button label</b> (e.g. 🛍 Shop the sale):"); return; }
+      if (id === "url") { ctx.session.awaiting = "sale_url"; await askStep(ctx, "🔗 Send the full <b>URL</b> the button should open:"); return; }
+      if (id === "prod") { await show(ctx, "📦 Pick the product to link:", await (async () => { const kb = new InlineKeyboard(); const ps = await listProductsBrief(30); for (const pr of ps) kb.text(`${pr.iconEmoji ? pr.iconEmoji + " " : ""}${pr.name.slice(0, 30)}`, cb("adm", "ssaleprod", pr.id)).row(); kb.text("◀️ Back", cb("adm", "home")); return kb; })(), true); return; }
+      return;
+    }
+    case "ssaleprod": {
+      const pr = await getProductBriefById(id);
+      ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), btnUrl: pr ? `https://t.me/${ctx.me.username}?start=p_${pr.slug}` : undefined };
+      ctx.session.awaiting = "sale_btntext";
+      await askStep(ctx, "Send the <b>button label</b> (e.g. ⚡ Grab the deal):");
+      return;
+    }
+    case "ssalecol":
+      ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), btnStyle: id };
+      ctx.session.awaiting = "sale_timer";
+      await askStep(ctx, "⏳ Send a countdown in <b>hours</b> (e.g. 24), or <code>-</code> to skip:");
+      return;
+    case "ssalego": return runSpecialSale(ctx, (id === "daily" || id === "weekly" ? id : "now"));
     case "flashhead": {
       const cur = (await getFlashHeadline()).trim();
       ctx.session.awaiting = "admin_flash_headline";
@@ -1534,6 +1603,37 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "sale_title") {
+    ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), title: composeBroadcastHtml(ctx) };
+    ctx.session.awaiting = "sale_body";
+    await askStep(ctx, "Step 2 — send the <b>message</b> (premium emoji OK), or <code>-</code> to skip:");
+    return true;
+  }
+  if (awaiting === "sale_body") {
+    ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), body: text.trim() === "-" ? undefined : composeBroadcastHtml(ctx) };
+    ctx.session.awaiting = null;
+    await show(ctx, "Step 3 — add a button? Choose where it links:", saleTargetKb(), false);
+    return true;
+  }
+  if (awaiting === "sale_url") {
+    ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), btnUrl: text.trim() };
+    ctx.session.awaiting = "sale_btntext";
+    await askStep(ctx, "Send the <b>button label</b>:");
+    return true;
+  }
+  if (awaiting === "sale_btntext") {
+    ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), btnText: text.trim().slice(0, 40) };
+    ctx.session.awaiting = null;
+    await show(ctx, "Pick the <b>button colour</b>:", saleColourKb(), false);
+    return true;
+  }
+  if (awaiting === "sale_timer") {
+    const h = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), endsHours: text.trim() === "-" || !Number.isFinite(h) ? undefined : h };
+    ctx.session.awaiting = null;
+    await show(ctx, "✅ Ready! Announce now, or set it to auto-announce:", saleFinalKb(), false);
+    return true;
+  }
   if (awaiting === "admin_flash_headline") {
     if (text.trim() === "-") { await setFlashHeadline(""); await ctx.reply("🔥 Flash headline reset to default."); await sendPanel(ctx, false); return true; }
     await setFlashHeadline(composeBroadcastHtml(ctx));

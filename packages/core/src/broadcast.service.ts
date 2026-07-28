@@ -34,12 +34,13 @@ async function deliver(broadcast: {
   pin: boolean;
   segmentQuery: unknown;
 }): Promise<number> {
-  const sq = broadcast.segmentQuery as { segment?: BroadcastSegment; html?: boolean } | null;
+  const sq = broadcast.segmentQuery as { segment?: BroadcastSegment; html?: boolean; style?: string } | null;
   const segment = (sq?.segment ?? "all") as BroadcastSegment;
   const ids = await targetTelegramIds(segment);
   const text = sq?.html ? broadcast.body : renderText(broadcast.title, broadcast.body);
+  const btnStyle = (sq?.style === "primary" || sq?.style === "danger" || sq?.style === "success" ? sq.style : "success") as "primary" | "success" | "danger";
   const buttons: OutboxButton[] | undefined =
-    broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: "success" }] : undefined;
+    broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: btnStyle }] : undefined;
   let sent = 0;
   for (const id of ids) {
     await enqueueTelegramMessage(id, text, { photo: broadcast.imageUrl ?? undefined, buttons, pin: broadcast.pin });
@@ -59,6 +60,7 @@ export interface BroadcastInput {
   imageUrl?: string;
   buttonText?: string;
   buttonUrl?: string;
+  buttonStyle?: string;
   pin?: boolean;
   bodyIsHtml?: boolean;
   createdById: string;
@@ -74,7 +76,7 @@ export async function sendBroadcast(opts: BroadcastInput): Promise<{ broadcastId
       buttonText: opts.buttonText ?? null,
       buttonUrl: opts.buttonUrl ?? null,
       pin: opts.pin ?? false,
-      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false } as never,
+      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false, style: opts.buttonStyle ?? "success" } as never,
       status: "RUNNING",
       createdById: opts.createdById,
       startedAt: new Date(),
@@ -101,7 +103,7 @@ export async function scheduleBroadcast(
       buttonText: opts.buttonText ?? null,
       buttonUrl: opts.buttonUrl ?? null,
       pin: opts.pin ?? false,
-      segmentQuery: { segment: opts.segment } as never,
+      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false, style: opts.buttonStyle ?? "success" } as never,
       status: "SCHEDULED",
       scheduledAt: opts.scheduledAt,
       recurrence,

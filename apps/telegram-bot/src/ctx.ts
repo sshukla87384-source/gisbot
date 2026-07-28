@@ -61,6 +61,11 @@ export interface SessionData {
     | "admin_user_deductbal"
     | "admin_prod_search"
     | "admin_flash_headline"
+    | "sale_title"
+    | "sale_body"
+    | "sale_btntext"
+    | "sale_timer"
+    | "sale_url"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -92,6 +97,7 @@ export interface SessionData {
   bcBody?: string;
   bcBtnText?: string;
   bcBtnUrl?: string;
+  saleDraft?: { title?: string; body?: string; btnText?: string; btnStyle?: string; btnUrl?: string; endsHours?: number };
   btnKey?: string;
   pendEmojiId?: string;
   pendEmojiGlyph?: string;
