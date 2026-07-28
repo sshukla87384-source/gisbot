@@ -318,7 +318,7 @@ export function createBot(): Bot<Ctx> {
   bot.on("message:text", async (ctx) => {
     const awaiting = ctx.session.awaiting;
     ctx.session.awaiting = null;
-    if (awaiting && awaiting.startsWith("admin_")) {
+    if (awaiting && (awaiting.startsWith("admin_") || awaiting.startsWith("sale_"))) {
       const handled = await handleAdminText(ctx, awaiting);
       if (handled) return;
     }
