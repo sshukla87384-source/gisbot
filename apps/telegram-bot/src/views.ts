@@ -57,7 +57,9 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   kb.row().text("📂 All Categories", cb("shp", "root"));
   backToMenuRow(kb);
   return {
-    text: result.items.length > 0 ? "🛍 <b>All Products</b> — tap an item to buy" : "🛍 The shop is being restocked — check back soon!",
+    text: result.items.length > 0
+      ? "🛍 <b>All Products</b>\n<i>How to buy: tap a product → choose quantity → pay from your 💰 wallet. Delivery is instant for automatic items.</i>"
+      : "🛍 The shop is being restocked — check back soon!",
     kb,
   };
 }
@@ -278,7 +280,9 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
   }
   paginationRow(kb, "ord", "list", result.page, result.pages);
   backToMenuRow(kb);
-  return { text: result.items.length > 0 ? `${header(`📦 ${bold("Your Orders")}`)}\nTap an order to view your delivered items.` : `${header(`📦 ${bold("Your Orders")}`)}\nNo orders yet.`, kb };
+  return { text: result.items.length > 0
+    ? `${header(`📦 ${bold("Your Orders")}`)}\n<i>Tap any order to view or re-copy your delivered keys/accounts. ✅ = delivered, 🕐 = being delivered.</i>`
+    : `${header(`📦 ${bold("Your Orders")}`)}\n<i>No orders yet — head to 🛍 Shop to make your first purchase.</i>`, kb };
 }
 
 export async function vaultView(user: BotUser, page: number): Promise<View> {
@@ -471,6 +475,7 @@ export async function apiKeysView(user: BotUser): Promise<View> {
       header(`🧑‍💻 ${bold("Developer API")}`),
       "",
       "Build on our store: browse the catalog, check your balance, and place orders from your wallet — all via a REST API.",
+      "<i>New here? Tap 📖 API Documentation for the base URL, auth header and example requests.</i>",
       "",
       active.length > 0
         ? `You have <b>${num(active.length)}</b> active key(s). Tap 📋 My API keys to manage them.`
@@ -566,7 +571,7 @@ export function currencyView(user: BotUser): View {
     .text("🇮🇳 INR (₹)", cb("cur", "set", "INR"))
     .row();
   backToMenuRow(kb);
-  return { text: t(user.locale, "cur_title"), kb };
+  return { text: `${t(user.locale, "cur_title")}\n<i>Your wallet balance and all prices are shown in the currency you pick. Current: <b>${user.currency}</b>. You can switch anytime.</i>`, kb };
 }
 
 export async function orderDetailView(user: BotUser, orderId: string): Promise<View> {
