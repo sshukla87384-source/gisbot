@@ -294,6 +294,7 @@ export async function notifyManualOrder(orderId: string): Promise<void> {
     "📦 <b>New manual-delivery order!</b>",
     `🧾 Order <b>${order.orderNumber}</b>`,
     `👤 Buyer: ${buyer}`,
+    `🆔 ID: <code>${order.user.telegramId ?? "—"}</code>`,
     "",
     ...pending.map((i) => `• ${i.productNameSnap}${i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${i.variantNameSnap}`}`),
     "",
@@ -429,6 +430,7 @@ export async function notifyOrderToAdmins(orderId: string, method = "order"): Pr
     `🧾 <b>New order — ${method}</b>`,
     `#${order.orderNumber} · ${formatMinor(paid, order.currency as CurrencyCode)}`,
     `👤 ${buyer}`,
+    `🆔 <code>${order.user.telegramId ?? "—"}</code>`,
     "",
     ...order.items.map(itemLine),
   ];

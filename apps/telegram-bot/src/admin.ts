@@ -657,7 +657,7 @@ async function usersListView(ctx: Ctx): Promise<void> {
   const users = await listRecentUsers(12);
   const kb = new InlineKeyboard();
   for (const u of users) {
-    kb.text(`${u.status === "BANNED" ? "🚫 " : ""}${u.label} · ${(u.balanceMinor / 100).toFixed(2)} ${u.currency} · ${u.orders}🧾`, cb("adm", "uinfo", u.id)).row();
+    kb.text(`${u.status === "BANNED" ? "🚫 " : ""}${u.label} · 🆔${u.telegramId || "?"} · ${(u.balanceMinor / 100).toFixed(2)} ${u.currency} · ${u.orders}🧾`, cb("adm", "uinfo", u.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "m_users"));
   await show(ctx, users.length ? "📋 <b>Recent users</b>\nTap one to manage." : "No users yet.", kb, true);
@@ -672,6 +672,7 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
     .text("◀️ Back", cb("adm", "uview"));
   await show(ctx, [
     `👤 <b>${escapeHtml(u.label)}</b>`,
+    `🆔 ID: <code>${u.telegramId || "—"}</code>`,
     `Status: <b>${u.status}</b>`,
     `Wallet: <b>${(u.balanceMinor / 100).toFixed(2)} ${u.currency}</b>`,
     `Orders: <b>${u.orders}</b>`,

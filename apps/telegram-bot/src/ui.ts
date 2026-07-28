@@ -16,6 +16,7 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
   return [
     header(`${e("diamond")} ${bold(loadConfig().STORE_NAME)}`),
     `👋 <b>Welcome back, ${who}!</b>`,
+    `🆔 Your ID: <code>${user.telegramId ?? "—"}</code>`,
     ...(user.isVip ? [`${e("vip")} <b>VIP MEMBER</b>`] : []),
     `<b>${t(loc, "tagline")}</b>`,
     "",

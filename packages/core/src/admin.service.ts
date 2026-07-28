@@ -703,7 +703,7 @@ export async function deliveryInstructionsMessage(): Promise<string | null> {
 }
 
 // ───────────── Users management ─────────────
-export interface UserRow { id: string; label: string; balanceMinor: number; currency: string; status: string; orders: number }
+export interface UserRow { id: string; label: string; telegramId: string; balanceMinor: number; currency: string; status: string; orders: number }
 
 export async function listRecentUsers(limit = 12): Promise<UserRow[]> {
   const users = await prisma.user.findMany({
@@ -713,6 +713,7 @@ export async function listRecentUsers(limit = 12): Promise<UserRow[]> {
   return users.map((u) => ({
     id: u.id,
     label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+    telegramId: String(u.telegramId ?? ""),
     balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
     currency: u.wallet?.currency ?? u.currency,
     status: u.status,
@@ -729,6 +730,7 @@ export async function getUserSummary(identifier: string): Promise<UserRow | null
   return {
     id: u.id,
     label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+    telegramId: String(u.telegramId ?? ""),
     balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
     currency: u.wallet?.currency ?? u.currency,
     status: u.status,
@@ -742,6 +744,7 @@ export async function getUserById(userId: string): Promise<UserRow | null> {
   return {
     id: u.id,
     label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+    telegramId: String(u.telegramId ?? ""),
     balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
     currency: u.wallet?.currency ?? u.currency,
     status: u.status,
