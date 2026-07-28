@@ -317,25 +317,22 @@ export async function announceRestock(
   const cheapestMinor = pricedMinors.length > 0 ? Math.min(...pricedMinors) : null;
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "💎 ";
+  const iconTxt = p.iconEmoji ? `${p.iconEmoji} ` : "";
   const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
-  const lines = [
-    `${icon}${nameDisp}`,
-    "",
-    `➕ Added: <b>${qtyAdded}</b>`,
-    `📦 In stock: <b>${currentStock}</b>`,
-  ];
-  if (cheapestMinor !== null) lines.push(`💵 Price: <b>${fmtMinor(cheapestMinor, "USD")}</b>`);
+  const usdt = cheapestMinor !== null ? (Number.isInteger(cheapestMinor / 100) ? (cheapestMinor / 100).toFixed(1) : (cheapestMinor / 100).toFixed(2)) : "";
+  const body = `📣 <b>${qtyAdded} new stock added for</b> ${iconTxt}${nameDisp}`;
+  const btnLabel = `${iconTxt}${p.name} - ${usdt} USDT (Stock: ${currentStock})`.slice(0, 64);
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
   const res = await sendBroadcast({
     title: "",
-    body: lines.join("\n"),
+    body,
     bodyIsHtml: true,
     segment: "all",
     imageUrl: p.imageUrl ?? undefined,
-    buttonText: buttonUrl ? "🛒 Buy now" : undefined,
+    buttonText: buttonUrl ? btnLabel : undefined,
     buttonUrl,
+    buttonStyle: "success",
     createdById: opts.createdById,
   });
   return { announced: true, targets: res.targets };
