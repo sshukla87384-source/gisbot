@@ -51,7 +51,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
     const stock = p.inStock ? "" : " · ❌ out of stock";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger")).row();
+    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().text("📂 All Categories", cb("shp", "root"));
@@ -85,7 +85,7 @@ export async function productListView(
     const stock = p.inStock ? "✅" : "❌";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger")).row();
+    kb.add(sbtn(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().text("◀️ Categories", cb("shp", "root"));
@@ -100,7 +100,7 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger")).row();
+    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   backToMenuRow(kb);
@@ -171,7 +171,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       const bl = v.name.trim().toLowerCase() === "standard" ? "" : ` ${v.name}`;
       const buyLabel = p.buyButtonText ? `${p.buyButtonText} — ${priceLabel}` : `⚡ ${icon}Buy${bl} — ${priceLabel}`;
       const buyStyle = (p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success";
-      kb.add(sbtn(buyLabel, cb("crt", "buynow", v.id), buyStyle)).row();
+      kb.add(sbtn(buyLabel, cb("crt", "buynow", v.id), buyStyle, p.iconCustomEmojiId ?? undefined)).row();
     } else {
       const bl = v.name.trim().toLowerCase() === "standard" ? "this" : v.name;
       kb.add(sbtn(`❌ ${bl} — out of stock`, cb("mnu", "noop"), "danger")).row();

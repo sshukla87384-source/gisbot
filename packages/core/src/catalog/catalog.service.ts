@@ -20,6 +20,14 @@ export interface ProductListItem {
   onSale: boolean;
   inStock: boolean;
   buttonStyle: string | null;
+  iconCustomEmojiId: string | null;
+}
+
+/** Pull the first custom (premium) emoji id out of stored *Html fields, for use as a button icon. */
+export function firstCustomEmojiId(html: string | null | undefined): string | null {
+  if (!html) return null;
+  const m = html.match(/emoji-id="(\d+)"/);
+  return m?.[1] ?? null;
 }
 
 export interface Paged<T> {
@@ -55,6 +63,7 @@ export interface ProductView {
   supplierBacked: boolean;
   buyButtonText: string | null;
   buttonStyle: string | null;
+  iconCustomEmojiId: string | null;
   variants: VariantView[];
 }
 
@@ -150,6 +159,7 @@ export async function listProducts(opts: {
         onSale,
         inStock,
         buttonStyle: p.buttonStyle,
+        iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),
       });
     }
     return { items, page, pages, total };
@@ -218,6 +228,7 @@ export async function getProductView(productId: string, currency: Currency, user
     supplierBacked: p.supplierId !== null,
     buyButtonText: p.buyButtonText,
     buttonStyle: p.buttonStyle,
+    iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),
     variants,
   };
 }
