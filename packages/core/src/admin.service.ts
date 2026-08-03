@@ -6,6 +6,7 @@ import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
 import { invalidate, cached } from "./redis.js";
+import { usdtRate } from "./fx.js";
 import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./orders/assign.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
@@ -516,7 +517,7 @@ export async function createProductFull(input: {
     // If no USD given, derive it from INR (USDT≈USD, so INR ÷ INR-per-USDT rate).
     let usdMinor = input.priceUsdMinor;
     if (!usdMinor || usdMinor <= 0) {
-      const rate = loadConfig().BINANCE_USDT_INR_RATE || 90;
+      const rate = usdtRate("INR");
       usdMinor = Math.max(1, Math.round(input.priceInrMinor / rate));
     }
     const prices: Array<{ currency: "INR" | "USD"; amountMinor: number }> = [
@@ -620,7 +621,7 @@ export async function setProductPublicPrice(
 /** Set the default store price (INR + derived USD) for all variants of a product. */
 export async function setStoreDefaultPrice(productId: string, amountMinorInr: number): Promise<void> {
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
-  const rate = loadConfig().BINANCE_USDT_INR_RATE || 90;
+  const rate = usdtRate("INR");
   const usdMinor = Math.max(1, Math.round(amountMinorInr / rate));
   const variants = await prisma.productVariant.findMany({ where: { productId, deletedAt: null } });
   for (const v of variants) {

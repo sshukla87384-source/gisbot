@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { priceCart } from "./assign.js";
 import { confirmManualPayment } from "./manual-pay.service.js";
+import { usdtRate } from "../fx.js";
 
 export interface StarsCheckoutResult {
   orderId: string;
@@ -14,7 +15,7 @@ export interface StarsCheckoutResult {
 /** Convert an order total to Telegram Stars using the configured rate. */
 function toStars(totalMinor: number, currency: Currency): number {
   const cfg = loadConfig();
-  const usd = currency === "USD" ? totalMinor / 100 : totalMinor / 100 / cfg.BINANCE_USDT_INR_RATE;
+  const usd = currency === "USD" ? totalMinor / 100 : totalMinor / 100 / usdtRate("INR");
   return Math.max(1, Math.ceil(usd * cfg.STARS_PER_USD));
 }
 

@@ -7,6 +7,7 @@ import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
+import { toUsdt } from "../fx.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -35,9 +36,7 @@ export interface BinanceCheckoutResult {
  * customer submits (or admin verification), so no unique tail is needed.
  */
 function toUsdtAmount(totalMinor: number, currency: Currency): string {
-  const cfg = loadConfig();
-  const rate = currency === "INR" ? cfg.BINANCE_USDT_INR_RATE : cfg.BINANCE_USDT_USD_RATE;
-  return (totalMinor / 100 / rate).toFixed(2);
+  return toUsdt(totalMinor, currency);
 }
 
 export interface UpiCheckoutResult {

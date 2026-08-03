@@ -69,7 +69,9 @@ const envSchema = z
     TRANSLATE_PROVIDER: z.enum(["none", "libre", "deepl", "google"]).default("none"),
     TRANSLATE_API_URL: z.string().optional(), // e.g. https://libretranslate.com/translate
     TRANSLATE_API_KEY: z.string().optional(),
-    BINANCE_USDT_INR_RATE: z.coerce.number().positive().default(90), // INR per 1 USDT
+    // Legacy/env override. The canonical INR<->USDT rate is pinned at 100 in
+    // packages/core/src/fx.ts (INR_PER_USDT) — keep this in sync if you change it.
+    BINANCE_USDT_INR_RATE: z.coerce.number().positive().default(100), // INR per 1 USDT
     BINANCE_USDT_USD_RATE: z.coerce.number().positive().default(1), // USD per 1 USDT
     // In-bot admin panel: passcode gate + optional telegram-id allowlist.
     BOT_ADMIN_PASSCODE: z.string().optional(),

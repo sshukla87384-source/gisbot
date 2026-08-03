@@ -3,10 +3,11 @@ import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
 import { adjustWallet } from "./wallet.service.js";
 import { fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
+import { usdtRate } from "../fx.js";
 
 function toUsdt(amountMinor: number, currency: Currency): string {
   const cfg = loadConfig();
-  const rate = currency === "INR" ? cfg.BINANCE_USDT_INR_RATE : cfg.BINANCE_USDT_USD_RATE;
+  const rate = usdtRate(currency);
   return (amountMinor / 100 / rate).toFixed(2);
 }
 
@@ -119,7 +120,7 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const creditMinor = user.currency === "USD"
     ? Math.round(usdt * 100)
-    : Math.round(usdt * cfg.BINANCE_USDT_INR_RATE * 100);
+    : Math.round(usdt * usdtRate("INR") * 100);
 
   const topup = await prisma.walletTopup.create({
     data: {

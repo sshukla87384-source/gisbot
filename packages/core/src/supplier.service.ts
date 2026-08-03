@@ -5,6 +5,7 @@ import { invalidate } from "./redis.js";
 import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
 import { announceProduct, sendBroadcast } from "./broadcast.service.js";
+import { usdtRate } from "./fx.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -314,7 +315,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
   if (!s) return { added: 0, updated: 0 };
   const prods = await fetchSupplierProducts(s);
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
-  const rate = loadConfig().BINANCE_USDT_INR_RATE || 90;
+  const rate = usdtRate("INR");
   let cat = await prisma.category.findFirst({ where: { slug: "uncategorized" } });
   if (!cat) cat = await prisma.category.create({ data: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 } });
   let added = 0, updated = 0;

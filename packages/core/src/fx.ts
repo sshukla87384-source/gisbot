@@ -2,13 +2,16 @@ import { loadConfig } from "@gis/config";
 import type { Currency } from "@gis/database";
 
 /**
- * Cross-currency conversion for wallet charges. Rates are the same ones used to
- * quote Binance deposits, so a deposit and a purchase always agree:
- *   BINANCE_USDT_INR_RATE = INR per 1 USDT, BINANCE_USDT_USD_RATE = USD per 1 USDT.
+ * THE single INR↔USDT rate for the whole store: exactly 100 INR = 1 USDT.
+ * Pinned deliberately (not read from env) so a deposit, a wallet deduction, a
+ * Binance quote and a price conversion can never disagree with each other.
  */
+export const INR_PER_USDT = 100;
+
+/** Units of `currency` per 1 USDT. */
 export function usdtRate(currency: Currency): number {
-  const cfg = loadConfig();
-  return currency === "INR" ? cfg.BINANCE_USDT_INR_RATE : cfg.BINANCE_USDT_USD_RATE;
+  if (currency === "INR") return INR_PER_USDT;
+  return loadConfig().BINANCE_USDT_USD_RATE; // USD per USDT (normally 1)
 }
 
 /** Convert an integer minor-unit amount between currencies. Rounds to the nearest minor unit. */
