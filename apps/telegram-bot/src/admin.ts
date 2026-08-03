@@ -1112,6 +1112,30 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       );
       return sendPanel(ctx, false);
     }
+    case "wdok": {
+      // args: userId ~ inrMinor ~ usdMinor  (wallet is always credited in USD)
+      const [uid, inrRaw, usdRaw] = (id || "").split("~");
+      const inrMinor = Number.parseInt(inrRaw ?? "0", 10);
+      const usdMinor = Number.parseInt(usdRaw ?? "0", 10);
+      if (!uid || !Number.isFinite(usdMinor) || usdMinor <= 0) { await ctx.reply("That top-up request is invalid."); return; }
+      const res = await adjustUserWalletById(uid, usdMinor, `UPI top-up approved (₹${(inrMinor / 100).toFixed(2)})`);
+      if (res.ok) {
+        await ctx.reply(
+          `✅ Credited <b>$${(usdMinor / 100).toFixed(2)}</b> (₹${(inrMinor / 100).toFixed(2)} @ 100 INR = 1 USD). New balance: <b>${(Number(res.newBalanceMinor ?? 0n) / 100).toFixed(2)} ${res.currency ?? "USD"}</b>.`,
+          { parse_mode: "HTML" },
+        );
+        await dmUser(uid, `✅ <b>Wallet topped up!</b>\n\n💰 <b>$${(usdMinor / 100).toFixed(2)}</b> added (₹${(inrMinor / 100).toFixed(2)} at 100 INR = 1 USD).\nYou can pay for any order instantly now. 🚀`).catch(() => undefined);
+      } else {
+        await ctx.reply("❌ Couldn't credit that customer.");
+      }
+      return;
+    }
+    case "wdno": {
+      if (!id) return;
+      await dmUser(id, "❌ <b>We could not verify that UPI payment.</b>\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => undefined);
+      await ctx.reply("❌ Rejected — the customer has been told.");
+      return;
+    }
     case "deliver": return manualDeliverView(ctx, id);
     case "dlv":
       ctx.session.admManualItemId = id;

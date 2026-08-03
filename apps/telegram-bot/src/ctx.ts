@@ -70,6 +70,8 @@ export interface SessionData {
     | "replace_proof"
     | "admin_reject_note"
     | "admin_p_warrantydays"
+    | "wallet_inr_amount"
+    | "wallet_inr_utr"
     | "admin_tr_key"
     | "admin_tr_url"
     | null;
@@ -79,6 +81,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** INR wallet top-up being requested (minor units). */
+  inrTopupMinor?: number;
   /** Pending price-change announcement offered to the admin. */
   priceAlert?: { productId: string; oldMinor: number; newMinor: number; currency: string };
   /** Auto-translate provider being configured. */

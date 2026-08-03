@@ -23,6 +23,10 @@ export interface BinanceCheckoutResult {
   binanceUid: string;
   binanceAsset: string; // always "USDT"
   binanceAmount: string; // exact USDT amount to send (unique for auto-matching)
+  /** Wallet balance already applied; `totalMinor` is what is still owed. */
+  walletUsedMinor: number;
+  /** Full order value before the wallet was applied. */
+  orderTotalMinor: number;
 }
 
 /**
@@ -43,13 +47,77 @@ export interface UpiCheckoutResult {
   currency: Currency;
   upiId: string;
   payeeName: string | null;
+  /** Wallet balance already applied; `totalMinor` is what is still owed. */
+  walletUsedMinor: number;
+  /** Full order value before the wallet was applied. */
+  orderTotalMinor: number;
+}
+
+
+type TxM = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+/**
+ * Cancel any stale PENDING_PAYMENT orders, REFUNDING wallet money already
+ * applied to them. Never silently keep a customer's balance for a dead order.
+ */
+async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
+  const stale = await tx.order.findMany({
+    where: { userId, status: "PENDING_PAYMENT" },
+    select: { id: true, orderNumber: true, walletUsedMinor: true, currency: true },
+  });
+  for (const o of stale) {
+    if (o.walletUsedMinor && o.walletUsedMinor > 0) {
+      const w = await tx.wallet.findUnique({ where: { userId } });
+      if (w) {
+        const back = w.balanceMinor + BigInt(o.walletUsedMinor);
+        await tx.walletTransaction.create({
+          data: {
+            walletId: w.id, type: "REFUND", amountMinor: BigInt(o.walletUsedMinor),
+            balanceAfterMinor: back, currency: w.currency, orderId: o.id,
+            referenceNote: `cancelled ${o.orderNumber}`, idempotencyKey: `refund-cancel:${o.id}`,
+          },
+        });
+        await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
+      }
+    }
+    await tx.order.update({ where: { id: o.id }, data: { status: "CANCELLED", cancelledAt: new Date(), walletUsedMinor: 0 } });
+  }
+}
+
+/**
+ * Spend the customer's wallet balance on this order first and return what is
+ * still owed via the payment method. A $3 order with $1 in the wallet leaves $2
+ * to pay by UPI/Binance.
+ */
+async function applyWalletTx(
+  tx: TxM,
+  userId: string,
+  orderId: string,
+  orderNumber: string,
+  totalMinor: number,
+): Promise<{ walletUsed: number; owed: number }> {
+  const w = await tx.wallet.findUnique({ where: { userId } });
+  if (!w || w.balanceMinor <= 0n) return { walletUsed: 0, owed: totalMinor };
+  const use = Number(w.balanceMinor < BigInt(totalMinor) ? w.balanceMinor : BigInt(totalMinor));
+  if (use <= 0) return { walletUsed: 0, owed: totalMinor };
+  const after = w.balanceMinor - BigInt(use);
+  await tx.walletTransaction.create({
+    data: {
+      walletId: w.id, type: "PURCHASE", amountMinor: -BigInt(use), balanceAfterMinor: after,
+      currency: w.currency, orderId, referenceNote: `part-payment ${orderNumber}`,
+      idempotencyKey: `partial:${orderId}`,
+    },
+  });
+  await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: after } });
+  await tx.order.update({ where: { id: orderId }, data: { walletUsedMinor: use, totalMinor: totalMinor - use } });
+  return { walletUsed: use, owed: totalMinor - use };
 }
 
 /**
  * Manual UPI checkout (INR). Customer pays to the configured UPI ID and submits
  * a reference; the admin confirms in the panel/bot (same fulfilment path).
  */
-export async function createUpiManualCheckout(userId: string): Promise<UpiCheckoutResult> {
+export async function createUpiManualCheckout(userId: string, opts: { useWallet?: boolean } = {}): Promise<UpiCheckoutResult> {
   const cfg = loadConfig();
   const upiId = cfg.UPI_ID;
   if (!upiId) throw new CoreError("VALIDATION_FAILED", "UPI is not configured");
@@ -57,10 +125,7 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const expiresAt = new Date(Date.now() + 60 * 60_000);
   const created = await prisma.$transaction(async (tx) => {
-    await tx.order.updateMany({
-      where: { userId, status: "PENDING_PAYMENT" },
-      data: { status: "CANCELLED", cancelledAt: new Date() },
-    });
+    await cancelStalePendingTx(tx, userId);
     const lines = await priceCart(tx, userId, user.currency);
     const subtotalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
     const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
@@ -86,7 +151,11 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
       }
     }
     if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
-    return { orderId: order.id, orderNumber, totalMinor };
+    // Spend wallet balance first when asked; only the remainder is paid by UPI.
+    const applied = opts.useWallet
+      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor)
+      : { walletUsed: 0, owed: totalMinor };
+    return { orderId: order.id, orderNumber, totalMinor: applied.owed, walletUsedMinor: applied.walletUsed, orderTotalMinor: totalMinor };
   });
   await enqueueAdminAlert(
     `🇮🇳 New UPI order ${created.orderNumber} — ${formatMinor(created.totalMinor, user.currency as CurrencyCode)}. Verify payment to ${upiId}, then confirm in the panel.`,
@@ -94,7 +163,7 @@ export async function createUpiManualCheckout(userId: string): Promise<UpiChecko
   return { ...created, currency: user.currency, upiId, payeeName: cfg.UPI_PAYEE_NAME ?? null };
 }
 
-export async function createBinanceManualCheckout(userId: string): Promise<BinanceCheckoutResult> {
+export async function createBinanceManualCheckout(userId: string, opts: { useWallet?: boolean } = {}): Promise<BinanceCheckoutResult> {
   const cfg = loadConfig();
   const uid = cfg.BINANCE_PAY_UID;
   if (!uid) throw new CoreError("VALIDATION_FAILED", "Binance Pay is not configured");
@@ -103,10 +172,7 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
   const expiresAt = new Date(Date.now() + 60 * 60_000); // 60-min window for manual pay
 
   const created = await prisma.$transaction(async (tx) => {
-    await tx.order.updateMany({
-      where: { userId, status: "PENDING_PAYMENT" },
-      data: { status: "CANCELLED", cancelledAt: new Date() },
-    });
+    await cancelStalePendingTx(tx, userId);
     const lines = await priceCart(tx, userId, user.currency);
     const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
     const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
@@ -159,7 +225,18 @@ export async function createBinanceManualCheckout(userId: string): Promise<Binan
       },
     });
     if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
-    return { orderId: order.id, orderNumber, totalMinor, binanceAmount: usdt };
+    // Wallet first when asked; the USDT amount must reflect only what is owed.
+    const applied = opts.useWallet
+      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor)
+      : { walletUsed: 0, owed: totalMinor };
+    const owedUsdt = applied.walletUsed > 0 ? toUsdtAmount(applied.owed, user.currency) : usdt;
+    if (applied.walletUsed > 0) {
+      await tx.order.update({ where: { id: order.id }, data: { binanceAmount: owedUsdt } });
+    }
+    return {
+      orderId: order.id, orderNumber, totalMinor: applied.owed, binanceAmount: owedUsdt,
+      walletUsedMinor: applied.walletUsed, orderTotalMinor: totalMinor,
+    };
   });
 
   await enqueueAdminAlert(

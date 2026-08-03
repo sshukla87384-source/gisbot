@@ -365,6 +365,88 @@ export function createBot(): Bot<Ctx> {
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📨 Submit without screenshot", "rep:nopic").text("✖️ Cancel", "rep:home") },
       );
     }
+    if (awaiting === "wallet_inr_amount") {
+      const val = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(val) || val <= 0) {
+        ctx.session.awaiting = "wallet_inr_amount";
+        return ctx.reply("Please send a valid amount in ₹, e.g. <code>500</code>", { parse_mode: "HTML" });
+      }
+      const minor = Math.round(val * 100);
+      ctx.session.inrTopupMinor = minor;
+      ctx.session.awaiting = "wallet_inr_utr";
+      const upiId = config.UPI_ID ?? "";
+      const payee = config.UPI_PAYEE_NAME || config.STORE_NAME;
+      const rupees = (minor / 100).toFixed(2);
+      const uri = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(payee)}&am=${rupees}&cu=INR&tn=${encodeURIComponent(`WALLET-${ctx.user.id.slice(-6)}`)}`;
+      const caption = [
+        "🇮🇳 <b>Add ₹ to your wallet</b>",
+        "",
+        "┏━━━━━━━━━━━━━━━━━━",
+        `┃ 💵 <b>Amount</b>`,
+        `┃ <code>${rupees}</code>`,
+        "┃",
+        `┃ 🆔 <b>UPI ID</b>`,
+        `┃ <code>${upiId}</code>`,
+        `┃ <i>${escapeHtml(payee)}</i>`,
+        "┗━━━━━━━━━━━━━━━━━━",
+        "",
+        "📷 <b>Scan the QR</b> in GPay / PhonePe / Paytm — the amount is pre-filled.",
+        "📋 No QR? Use the copy buttons below.",
+        "",
+        `💰 Your wallet will be credited <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b>  <i>(100 INR = 1 USD)</i>`,
+        "",
+        "✅ After paying, paste your <b>UTR number</b> here. Our team verifies it and your wallet is credited.",
+      ].join("\n");
+      const kb = new InlineKeyboard()
+        .copyText(`📋 Copy amount — ₹${rupees}`, rupees).row()
+        .copyText(`📋 Copy UPI ID — ${upiId}`, upiId).row()
+        .url("📲 Open in UPI app", uri).row()
+        .text("✖️ Cancel", "wal:view");
+      try {
+        const png = await QRCode.toBuffer(uri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
+        return ctx.replyWithPhoto(new InputFile(png, "upi-topup.png"), { caption, parse_mode: "HTML", reply_markup: kb });
+      } catch {
+        return ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb });
+      }
+    }
+    if (awaiting === "wallet_inr_utr") {
+      const utr = ctx.message.text.trim().slice(0, 64);
+      const minor = ctx.session.inrTopupMinor ?? 0;
+      if (utr.length < 6 || minor <= 0) {
+        ctx.session.awaiting = "wallet_inr_utr";
+        return ctx.reply("Please paste the <b>UTR number</b> from your UPI payment receipt.", { parse_mode: "HTML" });
+      }
+      ctx.session.inrTopupMinor = undefined;
+      const who = ctx.user.telegramHandle ? `@${ctx.user.telegramHandle}` : (ctx.user.firstName ?? "customer");
+      await enqueueAdminAlert(
+        [
+          "🇮🇳 <b>UPI wallet top-up to verify</b>",
+          `👤 ${escapeHtml(who)}`,
+          `🆔 <code>${ctx.user.telegramId ?? "—"}</code>`,
+          `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
+          `💰 Credit: <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b>  <i>(100 INR = 1 USD)</i>`,
+          `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
+          "",
+          "Check the UTR in your UPI app, then approve to credit their wallet in USD.",
+        ].join("\n"),
+        [
+          { text: `✅ Approve — credit $${(Math.round(minor / 100) / 100).toFixed(2)}`, callbackData: `adm:wdok:${ctx.user.id}~${minor}~${Math.round(minor / 100)}`, style: "success" },
+          { text: "❌ Reject", callbackData: `adm:wdno:${ctx.user.id}`, style: "danger" },
+        ],
+      ).catch(() => undefined);
+      return ctx.reply(
+        [
+          "🧾 <b>Thanks — payment submitted!</b>",
+          "",
+          `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
+          `💰 You'll receive: <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b> <i>(100 INR = 1 USD)</i>`,
+          `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
+          "",
+          "🧑‍💼 Our team is verifying it now. Your wallet is credited as soon as it clears, and you'll get a message here. 🙏",
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🏠 Menu", "mnu:home") },
+      );
+    }
     if (awaiting === "binance_txnid") {
       const orderId = ctx.session.binanceOrderId ?? "";
       const txn = ctx.message.text.trim().slice(0, 128);
@@ -770,7 +852,7 @@ export function createBot(): Bot<Ctx> {
         case "ord:paybinance": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
           if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
-          const bz = await createBinanceManualCheckout(user.id);
+          const bz = await createBinanceManualCheckout(user.id, { useWallet: args[0] === "w" });
           ctx.session.binanceOrderId = bz.orderId;
           // Arm the paste right away: the next message they send is treated as the Order ID.
           ctx.session.awaiting = "binance_txnid";
@@ -883,8 +965,10 @@ export function createBot(): Bot<Ctx> {
         case "ord:payupi": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating UPI order…" });
           if (user.currency !== "INR") { await setUserCurrency(user.id, "INR"); user.currency = "INR"; }
-          const up = await createUpiManualCheckout(user.id);
+          const up = await createUpiManualCheckout(user.id, { useWallet: args[0] === "w" });
           ctx.session.upiOrderId = up.orderId;
+          // Arm the UTR paste right away — no extra tap needed.
+          ctx.session.awaiting = "upi_ref";
           // Build a UPI deep link for the EXACT amount and render it as a QR.
           const amountRupees = (up.totalMinor / 100).toFixed(2);
           const payee = up.payeeName || config.STORE_NAME;
@@ -892,25 +976,51 @@ export function createBot(): Bot<Ctx> {
             `upi://pay?pa=${encodeURIComponent(up.upiId)}&pn=${encodeURIComponent(payee)}` +
             `&am=${amountRupees}&cu=INR&tn=${encodeURIComponent(up.orderNumber)}`;
           const caption = [
-            `🇮🇳 <b>Pay via UPI</b> — Order <b>${up.orderNumber}</b>`,
+            `🇮🇳 <b>Pay via UPI</b>`,
+            `🧾 Order <b>${up.orderNumber}</b>`,
             "",
-            `Amount: <b>${fmt(up.totalMinor, up.currency)}</b>`,
-            `UPI ID: <code>${up.upiId}</code> (${escapeHtml(payee)})`,
+            ...(up.walletUsedMinor > 0
+              ? [
+                  `🧮 Order total: <b>${fmt(up.orderTotalMinor, up.currency)}</b>`,
+                  `💰 Paid from wallet: <b>−${fmt(up.walletUsedMinor, up.currency)}</b>`,
+                  "",
+                ]
+              : []),
+            "┏━━━━━━━━━━━━━━━━━━",
+            `┃ 💵 <b>Amount to pay</b>`,
+            `┃ <code>${amountRupees}</code>`,
+            "┃",
+            `┃ 🆔 <b>UPI ID</b>`,
+            `┃ <code>${up.upiId}</code>`,
+            `┃ <i>${escapeHtml(payee)}</i>`,
+            "┗━━━━━━━━━━━━━━━━━━",
             "",
-            "📷 Scan this QR in any UPI app (GPay/PhonePe/Paytm) — the amount is pre-filled.",
-            "After paying, tap “I've paid” and paste your UTR number.",
+            "📷 <b>Scan the QR</b> in any UPI app (GPay / PhonePe / Paytm) — the amount is pre-filled.",
+            "📋 No QR? Tap the buttons below to copy the amount and UPI ID.",
+            "",
+            "✅ After paying, just paste your <b>UTR number</b> here — we verify and deliver instantly.",
           ].join("\n");
+          const upiKb = new InlineKeyboard()
+            .copyText(`📋 Copy amount — ₹${amountRupees}`, amountRupees)
+            .row()
+            .copyText(`📋 Copy UPI ID — ${up.upiId}`, up.upiId)
+            .row()
+            .url("📲 Open in UPI app", upiUri)
+            .row()
+            .text("⚠️ I have paid — need help", "ord:upipaid")
+            .row()
+            .text("🏠 Menu", "mnu:home");
           try {
             const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
             await ctx.replyWithPhoto(new InputFile(png, "upi-qr.png"), {
               caption,
               parse_mode: "HTML",
-              reply_markup: new InlineKeyboard().text("✅ I've paid — enter UTR", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
+              reply_markup: upiKb,
             });
           } catch {
             await ctx.reply(caption, {
               parse_mode: "HTML",
-              reply_markup: new InlineKeyboard().text("✅ I've paid — enter UTR", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
+              reply_markup: upiKb,
             });
           }
           break;
@@ -965,7 +1075,14 @@ export function createBot(): Bot<Ctx> {
               "✅ We read the exact USDT amount you sent and credit your wallet instantly.",
               "⚠️ Send only <b>USDT</b>. Each Order ID can be used once.",
             ].join("\n"),
-            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ I have deposited — enter Order ID", "wal:freetxn").row().text("🏠 Menu", "mnu:home") },
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .copyText(`📋 Copy Binance Pay ID — ${uid}`, String(uid)).row()
+                .text("✅ I have deposited — enter Order ID", "wal:freetxn").row()
+                .add(...(config.UPI_ID ? [{ text: "🇮🇳 Add INR via UPI instead", callback_data: "wal:topupinr" }] : [])).row()
+                .text("🏠 Menu", "mnu:home"),
+            },
           );
           break;
         }
@@ -977,6 +1094,16 @@ export function createBot(): Bot<Ctx> {
             else await ctx.reply("Nothing to repay, or your wallet balance is 0. Top up first.");
           } catch { await ctx.reply("Couldn't repay — add wallet funds first."); }
           await render(ctx, await views.walletView(user), false);
+          break;
+        }
+        case "wal:topupinr": {
+          await ctx.answerCallbackQuery();
+          if (!config.UPI_ID) { await ctx.reply("UPI deposits aren't configured yet."); break; }
+          ctx.session.awaiting = "wallet_inr_amount";
+          await ctx.reply(
+            "🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).\n\n<i>Wallet is held in USD — credited at 100 INR = 1 USD, so ₹500 gives you $5.00.</i>",
+            { parse_mode: "HTML" },
+          );
           break;
         }
         case "wal:freetxn":

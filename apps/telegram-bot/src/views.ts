@@ -277,8 +277,13 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       : `💰 Pay ${fmt(payable, view.currency)} from Wallet`;
     kb.add(sbtn(label, cb("ord", "paywallet"), "success")).row();
   } else if (view.allAvailable && wallet.balanceMinor > 0n) {
+    // Not enough for the whole order — spend what they have and pay the rest.
     const need = Math.max(0, walletPayable - Number(wallet.balanceMinor));
-    kb.add(sbtn(`💰 Wallet ${fmt(wallet.balanceMinor, walletCur)} · ➕ Add ${fmt(need, walletCur)} to pay`, cb("wal", "topup"), "primary")).row();
+    kb.add(sbtn(`🪙 Use wallet ${fmt(wallet.balanceMinor, walletCur)} + pay ${fmt(need, walletCur)} via Binance`, cb("ord", "paybinance", "w"), "success")).row();
+    if (loadConfig().UPI_ID) {
+      kb.add(sbtn(`🇮🇳 Use wallet + pay rest via UPI`, cb("ord", "payupi", "w"), "success")).row();
+    }
+    kb.add(sbtn(`➕ Or top up ${fmt(need, walletCur)} first`, cb("wal", "topup"), "primary")).row();
   }
   if (view.allAvailable && bnpl.limitMinor > 0 && bnpl.availableMinor >= walletPayable && walletPayable > 0) {
     kb.add(sbtn(`🕒 Pay Later — ${fmt(walletPayable, bnpl.currency as Currency)} (BNPL)`, cb("ord", "paybnpl"), "primary")).row();
