@@ -2,8 +2,8 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
-import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS} from "../queues.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
@@ -266,7 +266,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       );
       if (outcome.deliveries.length === 1) {
         const d = outcome.deliveries[0]!;
-        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange), { buttons: DELIVERY_BUTTONS });
+        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange), { buttons: deliveryButtons(credsOf(d.payload)) });
       } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
         await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
       } else if (outcome.deliveries.length > 1) {

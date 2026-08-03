@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
-import { encryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
+import { encryptSecret, decryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
 import { invalidate, cached } from "./redis.js";
-import { splitCredential, sanitizeCredentialLine } from "./orders/assign.js";
+import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./orders/assign.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -817,4 +817,40 @@ export async function getFlashHeadline(): Promise<string> {
 export async function setFlashHeadline(html: string): Promise<void> {
   const v = html.slice(0, 400);
   await prisma.setting.upsert({ where: { key: "flash.headline" }, create: { key: "flash.headline", value: v }, update: { value: v } });
+}
+
+/**
+ * One-off repair for account stock saved by the OLD buggy parser, which split a
+ * pasted markdown email link inside "mailto:" and left the address in BOTH the
+ * username and password. Decrypts, rejoins, re-parses and re-encrypts.
+ */
+export async function repairBrokenAccounts(): Promise<{ scanned: number; fixed: number }> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const rows = await prisma.digitalAccount.findMany({
+    where: { deletedAt: null, status: { in: ["AVAILABLE", "RESERVED"] } },
+    select: { id: true, usernameEncrypted: true, passwordEncrypted: true, twofaEncrypted: true },
+  });
+  let fixed = 0;
+  for (const r of rows) {
+    let u: string, pw: string;
+    try {
+      u = decryptSecret(r.usernameEncrypted, masterKey);
+      pw = decryptSecret(r.passwordEncrypted, masterKey);
+    } catch {
+      continue; // cannot decrypt — leave it alone
+    }
+    const repaired = repairAccountPair(u, pw);
+    if (!repaired || (repaired.id === u && repaired.pw === pw)) continue;
+    await prisma.digitalAccount.update({
+      where: { id: r.id },
+      data: {
+        usernameEncrypted: encryptSecret(repaired.id, masterKey),
+        passwordEncrypted: encryptSecret(repaired.pw, masterKey),
+        ...(repaired.twofa && !r.twofaEncrypted ? { twofaEncrypted: encryptSecret(repaired.twofa, masterKey) } : {}),
+      },
+    });
+    fixed++;
+  }
+  if (fixed > 0) await invalidate("cat:*");
+  return { scanned: rows.length, fixed };
 }

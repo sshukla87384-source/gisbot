@@ -44,12 +44,23 @@ async function main(): Promise<void> {
         const styled = config.BUTTON_STYLES_ENABLED;
         const btns = job.data.buttons && job.data.buttons.length > 0
           ? job.data.buttons.map((b) => {
-              const base: Record<string, unknown> = b.callbackData ? { text: b.text, callback_data: b.callbackData } : { text: b.text, url: b.url };
-              if (styled && b.style) base.style = b.style;
+              const base: Record<string, unknown> = b.copyText
+                ? { text: b.text, copy_text: { text: b.copyText } }
+                : b.callbackData
+                  ? { text: b.text, callback_data: b.callbackData }
+                  : { text: b.text, url: b.url };
+              if (styled && b.style && !b.copyText) base.style = b.style;
               return base;
             })
           : undefined;
-        const reply_markup = btns ? ({ inline_keyboard: [btns] } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
+        // Copy buttons get their own row (long labels); the rest share one row.
+        const rows = btns
+          ? [
+              ...btns.filter((b) => "copy_text" in b).map((b) => [b]),
+              ...(btns.some((b) => !("copy_text" in b)) ? [btns.filter((b) => !("copy_text" in b))] : []),
+            ]
+          : undefined;
+        const reply_markup = rows ? ({ inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
         let msg;
         if (job.data.document) {
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;

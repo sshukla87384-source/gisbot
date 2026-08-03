@@ -232,6 +232,42 @@ export function splitCredential(line: string): { id: string; pw: string; twofa?:
   return null;
 }
 
+/**
+ * Repair a username/password pair that was stored by the OLD buggy parser.
+ * That parser split at the earliest separator, so a pasted markdown email link
+ * broke apart inside "mailto:" — leaving the address in BOTH fields. Rejoining
+ * on ":" reconstructs the original line, which the fixed parser reads correctly.
+ * Defensive: stock already saved wrong still delivers correctly.
+ */
+export function repairAccountPair(
+  username: string | undefined,
+  password: string | undefined,
+): { id: string; pw: string; twofa?: string } | null {
+  if (!username || !password) return null;
+  const looksBroken = /\[|\]\(|mailto\s*$/i.test(username) || /\)\s*\|/.test(password);
+  if (!looksBroken) return null;
+  return splitCredential(`${username}:${password}`);
+}
+
+/** Clipboard values for the copy buttons — repaired and matching what is displayed. */
+export function credsOf(payload: DeliveryPayload): { id?: string; pw?: string; twofa?: string; key?: string } {
+  const fixed = repairAccountPair(payload.username, payload.password);
+  const id = fixed?.id ?? payload.username;
+  const pw = fixed?.pw ?? payload.password;
+  const twofa = fixed?.twofa ?? payload.twofa;
+  if (id && pw) return { id, pw, twofa };
+  // A single-line key blob may itself be "id|pass[|2fa]".
+  if (payload.key) {
+    const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+    if (rows.length === 1) {
+      const c = splitCredential(rows[0] ?? "");
+      if (c) return { id: c.id, pw: c.pw, twofa: c.twofa };
+      return { key: rows[0] };
+    }
+  }
+  return {};
+}
+
 /** The 2FA helper site customers paste the secret into. */
 export const TWOFA_SITE = "https://2fa.live";
 
@@ -270,10 +306,14 @@ export function buildDeliveryText(
       lines.push(`🔑 <b>Key:</b> <code>${esc(payload.key)}</code>`);
     }
   }
-  if (payload.username) lines.push(`👤 <b>ID:</b>  <code>${esc(payload.username)}</code>`);
-  if (payload.password) lines.push(`🔐 <b>Password:</b>  <code>${esc(payload.password)}</code>`);
-  if (payload.twofa) lines.push(`🔢 <b>2FA secret:</b>  <code>${esc(payload.twofa)}</code>`);
-  if (payload.twofa) {
+  const fixed = repairAccountPair(payload.username, payload.password);
+  const uName = fixed?.id ?? payload.username;
+  const uPass = fixed?.pw ?? payload.password;
+  const uTwofa = fixed?.twofa ?? payload.twofa;
+  if (uName) lines.push(`👤 <b>ID:</b>  <code>${esc(uName)}</code>`);
+  if (uPass) lines.push(`🔐 <b>Password:</b>  <code>${esc(uPass)}</code>`);
+  if (uTwofa) lines.push(`🔢 <b>2FA secret:</b>  <code>${esc(uTwofa)}</code>`);
+  if (uTwofa) {
     lines.push(
       "",
       "🔐 <b>How to get your OTP</b>",
@@ -283,10 +323,10 @@ export function buildDeliveryText(
       "4. Enter that code when logging in (it refreshes every 30s)",
       "",
       "📋 <b>Copy all credentials:</b>",
-      `<code>${esc(payload.username ?? "")}|${esc(payload.password ?? "")}|${esc(payload.twofa)}</code>`,
+      `<code>${esc(uName ?? "")}|${esc(uPass ?? "")}|${esc(uTwofa)}</code>`,
     );
-  } else if (payload.username && payload.password) {
-    lines.push("", "📋 <b>Copy all credentials:</b>", `<code>${esc(payload.username)}|${esc(payload.password)}</code>`);
+  } else if (uName && uPass) {
+    lines.push("", "📋 <b>Copy all credentials:</b>", `<code>${esc(uName)}|${esc(uPass)}</code>`);
   }
   if (renderedCreds && payload.key) {
     const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
@@ -304,7 +344,7 @@ export function buildDeliveryText(
     lines.push("", "📋 <b>Copy all credentials:</b>");
     for (const r of rows) lines.push(`<code>${esc(r)}</code>`);
   }
-  if (payload.username || renderedCreds) {
+  if (uName || renderedCreds) {
     lines.push("", "ℹ️ Tap any value above to copy it.");
     lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
   }
@@ -370,9 +410,14 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
         out.push(`   🔑 Key: <code>${esc(p.key)}</code>`);
       }
     }
-    if (p.username) out.push(`   👤 ID: <code>${esc(p.username)}</code>`);
-    if (p.password) out.push(`   🔐 Password: <code>${esc(p.password)}</code>`);
-    if (p.twofa) out.push(`   🔢 2FA secret: <code>${esc(p.twofa)}</code>  <i>(paste at 2fa.live)</i>`);
+    const fx = repairAccountPair(p.username, p.password);
+    const cName = fx?.id ?? p.username;
+    const cPass = fx?.pw ?? p.password;
+    const cTwo = fx?.twofa ?? p.twofa;
+    if (cName) out.push(`   👤 ID: <code>${esc(cName)}</code>`);
+    if (cPass) out.push(`   🔐 Password: <code>${esc(cPass)}</code>`);
+    if (cTwo) out.push(`   🔢 2FA secret: <code>${esc(cTwo)}</code>  <i>(paste at 2fa.live)</i>`);
+    if (cName && cPass) out.push(`   📋 <code>${esc(cName)}|${esc(cPass)}${cTwo ? `|${esc(cTwo)}` : ""}</code>`);
     if (p.password) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
     if (p.expiresAt) out.push(`   ⏳ ${p.expiresAt.slice(0, 10)}`);
     out.push("");
@@ -405,9 +450,14 @@ export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): s
         for (const r of rows) out.push(`   Key: ${r}`);
       }
     }
-    if (p.username) out.push(`   ID: ${p.username}`);
-    if (p.password) out.push(`   Password: ${p.password}`);
-    if (p.twofa) out.push(`   2FA secret: ${p.twofa}   (paste at ${TWOFA_SITE} to get the OTP)`);
+    const fxx = repairAccountPair(p.username, p.password);
+    const tName = fxx?.id ?? p.username;
+    const tPass = fxx?.pw ?? p.password;
+    const tTwo = fxx?.twofa ?? p.twofa;
+    if (tName) out.push(`   ID: ${tName}`);
+    if (tPass) out.push(`   Password: ${tPass}`);
+    if (tTwo) out.push(`   2FA secret: ${tTwo}   (paste at ${TWOFA_SITE} to get the OTP)`);
+    if (tName && tPass) out.push(`   Copy all: ${tName}|${tPass}${tTwo ? `|${tTwo}` : ""}`);
     if (p.expiresAt) out.push(`   Valid until: ${p.expiresAt.slice(0, 10)}`);
     if (it.activationGuide) out.push(`   Note: ${it.activationGuide}`);
     out.push("");

@@ -34,6 +34,7 @@ import {
   resolveTelegramUser,
   revealDelivery,
   splitCredential,
+  repairAccountPair,
   revealOrderDeliveries,
   setUserCurrency,
   setUserLocale,
@@ -1125,14 +1126,18 @@ async function sendRevealed(
       lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
     }
   }
-  if (payload.username) lines.push(`👤 <b>ID:</b>  <code>${escapeHtml(payload.username)}</code>`);
-  if (payload.password) lines.push(`🔐 <b>Password:</b>  <code>${escapeHtml(payload.password)}</code>`);
-  if (payload.twofa) {
-    lines.push(`🔢 <b>2FA secret:</b>  <code>${escapeHtml(payload.twofa)}</code>`);
+  const rc = repairAccountPair(payload.username, payload.password);
+  const rName = rc?.id ?? payload.username;
+  const rPass = rc?.pw ?? payload.password;
+  const rTwo = rc?.twofa ?? payload.twofa;
+  if (rName) lines.push(`👤 <b>ID:</b>  <code>${escapeHtml(rName)}</code>`);
+  if (rPass) lines.push(`🔐 <b>Password:</b>  <code>${escapeHtml(rPass)}</code>`);
+  if (rTwo) {
+    lines.push(`🔢 <b>2FA secret:</b>  <code>${escapeHtml(rTwo)}</code>`);
     lines.push("", '🔐 Paste the <b>2FA secret</b> at <a href="https://2fa.live">2fa.live</a> to get your 6-digit OTP.');
   }
-  if (payload.username && payload.password) {
-    lines.push("", "📋 <b>Copy all credentials:</b>", `<code>${escapeHtml(payload.username)}|${escapeHtml(payload.password)}${payload.twofa ? `|${escapeHtml(payload.twofa)}` : ""}</code>`);
+  if (rName && rPass) {
+    lines.push("", "📋 <b>Copy all credentials:</b>", `<code>${escapeHtml(rName)}|${escapeHtml(rPass)}${rTwo ? `|${escapeHtml(rTwo)}` : ""}</code>`);
   }
   if (shownCreds && payload.key) {
     const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
@@ -1142,15 +1147,19 @@ async function sendRevealed(
     lines.push("", "📋 <b>Copy all credentials:</b>");
     for (const r of rows) lines.push(`<code>${escapeHtml(r)}</code>`);
   }
-  if (payload.username || shownCreds) {
+  if (rName || shownCreds) {
     lines.push("", "ℹ️ Tap any value above to copy it.");
     lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
   }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
   lines.push("", "💾 <b>Saved in 📦 My Orders</b> — reopen it any time.", "Problem? Open a 🎫 Support ticket.");
-  const kb = new InlineKeyboard()
-    .text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
+  const kb = new InlineKeyboard();
+  if (rName) kb.copyText("📋 Copy ID", rName).row();
+  if (rPass) kb.copyText("📋 Copy password", rPass).row();
+  if (rTwo) kb.copyText("📋 Copy 2FA secret", rTwo).row();
+  if (rName && rPass) kb.copyText("📋 Copy ALL credentials", `${rName}|${rPass}${rTwo ? `|${rTwo}` : ""}`).row();
+  kb.text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
     .text("🏠 Menu", "mnu:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }

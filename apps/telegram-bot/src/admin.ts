@@ -101,6 +101,7 @@ import {
   verifyBinanceByTxnId,
   WIZARD_TYPES,
   announcePriceChange,
+  repairBrokenAccounts,
   announceCatalogue,
 } from "@gis/core";
 import { cb } from "@gis/shared";
@@ -216,6 +217,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_prod: { title: "🛍 <b>Products Management</b>", subtitle: "Add and manage your catalog", rows: [
       [["➕ Add Product", cb("adm", "addp"), "success"]],
       [["📦 All Products", cb("adm", "prods"), "primary"]],
+      [["🧰 Repair account stock", cb("adm", "fixacc"), "primary"]],
     ] },
     m_orders: { title: "🧾 <b>Orders</b>", subtitle: "Review and fulfil orders", rows: [
       [["🧾 Pending", cb("adm", "orders"), "primary"], ["🗂 Recent", cb("adm", "recent"), "primary"]],
@@ -1097,6 +1099,17 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("⏳ Building the stock list…");
       const r = await announceCatalogue({ inStockOnly: id === "instock" });
       await ctx.reply(`🗂 Sent <b>${r.products}</b> products to <b>${r.targets}</b> customers. 🎉`, { parse_mode: "HTML" });
+      return sendPanel(ctx, false);
+    }
+    case "fixacc": {
+      await ctx.reply("🧰 Checking stored account stock…");
+      const r = await repairBrokenAccounts();
+      await ctx.reply(
+        r.fixed > 0
+          ? `✅ Repaired <b>${r.fixed}</b> of ${r.scanned} accounts that were saved in the broken format. They will now deliver correctly.`
+          : `✅ Checked ${r.scanned} accounts — none needed repair.`,
+        { parse_mode: "HTML" },
+      );
       return sendPanel(ctx, false);
     }
     case "deliver": return manualDeliverView(ctx, id);

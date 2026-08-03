@@ -22,6 +22,8 @@ export interface OutboxButton {
   text: string;
   url?: string;
   callbackData?: string;
+  /** One-tap clipboard copy (Telegram copy_text button). */
+  copyText?: string;
   style?: "primary" | "success" | "danger";
 }
 export interface OutboxJob {
@@ -120,6 +122,23 @@ export const DELIVERY_BUTTONS: OutboxButton[] = [
   { text: "📦 View my orders", callbackData: "ord:list:1", style: "primary" },
   { text: "🛍 Buy more", callbackData: "shp:home:1", style: "success" },
 ];
+
+/**
+ * Delivery buttons with one-tap copy for the credentials that were delivered.
+ * Pass the already-repaired values so the clipboard matches what is displayed.
+ */
+export function deliveryButtons(creds?: { id?: string; pw?: string; twofa?: string; key?: string }): OutboxButton[] {
+  const out: OutboxButton[] = [];
+  if (creds?.id) out.push({ text: "📋 Copy ID", copyText: creds.id });
+  if (creds?.pw) out.push({ text: "📋 Copy password", copyText: creds.pw });
+  if (creds?.twofa) out.push({ text: "📋 Copy 2FA secret", copyText: creds.twofa });
+  if (creds?.id && creds.pw) {
+    out.push({ text: "📋 Copy ALL credentials", copyText: `${creds.id}|${creds.pw}${creds.twofa ? `|${creds.twofa}` : ""}` });
+  } else if (creds?.key) {
+    out.push({ text: "📋 Copy key", copyText: creds.key });
+  }
+  return [...out, ...DELIVERY_BUTTONS];
+}
 
 export async function enqueueEmail(job: EmailJob): Promise<void> {
   await getQueue(QUEUE_NAMES.email).add("send", job);
