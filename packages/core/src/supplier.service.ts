@@ -63,16 +63,30 @@ async function getJson(s: SupplierRow, path: string): Promise<any> {
 }
 
 const PRODUCT_PATHS = ["/products", "/product", "/catalog", "/items", "/list"];
+/** Single-endpoint reseller APIs (Supabase functions etc.) select the operation with ?action=. */
+const PRODUCT_ACTIONS = ["products", "catalog", "list_products", "products_list", "list", "stock", "get_products"];
+
+/** Append query params to a base URL, respecting an existing query string. */
+function withQuery(baseUrl: string, params: Record<string, string | number>): string {
+  const b = baseUrl.replace(/\/$/, "");
+  const qs = Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join("&");
+  return `${b}${b.includes("?") ? "&" : "?"}${qs}`;
+}
+
+/** GET the supplier base URL with ?action=… (no path probing). */
+async function actionGet(s: SupplierRow, params: Record<string, string | number>): Promise<Response> {
+  return fetch(withQuery(s.baseUrl, params), { headers: authHeaders(decKey(s)) });
+}
 
 function parseProductArray(arr: any[]): SupplierProduct[] {
   return arr
     .map((p) => ({
       ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid", "_id"]),
-      name: pickStr(p, ["name", "title", "product", "label", "productName"]) || "Product",
+      name: pickStr(p, ["name", "title", "product", "label", "productName", "product_name"]) || "Product",
       description: pickStr(p, ["description", "desc", "details", "info", "about", "content", "body", "long_description", "longDescription", "summary"]),
       note: pickStr(p, ["note", "notes", "instructions", "instruction", "warranty", "terms", "guide", "activation", "how_to_use", "howToUse", "delivery_note", "deliveryNote"]),
-      priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price", "sell_price", "sellPrice"]) ?? 0) * 100),
-      stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count"]),
+      priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price", "unitPrice", "sell_price", "sellPrice", "total_cost", "reseller_price", "resellerPrice"]) ?? 0) * 100),
+      stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count", "available_stock", "availableStock", "stock_available", "in_stock", "remaining", "count"]),
     }))
     .filter((p) => p.ref && p.priceMinor > 0);
 }
@@ -94,6 +108,22 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       lastRaw = text.slice(0, 400);
       lastNote = `${path || "/"} → parsed 0 products`;
     } catch (e) { lastNote = `${path || "/"} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+  }
+  // Action-style APIs: GET <base>?action=products
+  for (const action of PRODUCT_ACTIONS) {
+    try {
+      const res = await actionGet(s, { action });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) { lastNote = `?action=${action} → HTTP ${res.status} ${text.slice(0, 120)}`; continue; }
+      let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); lastNote = `?action=${action} → non-JSON`; continue; }
+      const arr: any[] = Array.isArray(json)
+        ? json
+        : (json.products ?? json.data ?? json.result ?? json.items ?? json.list ?? json.catalog ?? json.stock ?? []);
+      const products = parseProductArray(Array.isArray(arr) ? arr : []);
+      if (products.length > 0) return { products, path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
+      lastRaw = text.slice(0, 400);
+      lastNote = `?action=${action} → parsed 0 products`;
+    } catch (e) { lastNote = `?action=${action} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
   }
   // Fallback: some reseller APIs (e.g. Supabase functions) return the catalog via POST + an action.
   for (const body of [{ action: "products" }, { action: "list_products" }, { action: "catalog" }, { action: "list" }, { type: "products" }]) {
@@ -123,12 +153,37 @@ export async function diagnoseSupplier(id: string): Promise<{ ok: boolean; detai
   if (r.products.length > 0) {
     return { ok: true, detail: `OK ✅ — endpoint ${r.path} returned ${r.products.length} product(s). e.g. ${r.products.slice(0, 2).map((p) => `${p.name} @ ${(p.priceMinor / 100).toFixed(2)}`).join("; ")}` };
   }
-  return { ok: false, detail: `Couldn't read products. Last attempt: ${r.note}\nRaw response sample:\n${r.raw || "(empty)"}` };
+  return {
+    ok: false,
+    detail: [
+      "Couldn't read a product list from this supplier.",
+      `Tried: GET ${PRODUCT_PATHS.join(", ")}; GET ?action=${PRODUCT_ACTIONS.join("/")}; POST {action:…}.`,
+      `Last attempt: ${r.note}`,
+      "Raw response sample:",
+      r.raw || "(empty)",
+      "",
+      "If the raw sample above shows products, send it to support so the field mapping can be added.",
+    ].join("\n"),
+  };
 }
 
 export async function getSupplierBalance(s: SupplierRow): Promise<number | null> {
-  try { const j = await getJson(s, "/balance"); return pickNum(j, ["balance", "amount", "credit", "wallet", "funds"]) ?? pickNum(j.data ?? {}, ["balance", "amount"]); }
-  catch { return null; }
+  const fields = ["balance", "amount", "credit", "wallet", "funds", "balance_usd"];
+  try {
+    const j = await getJson(s, "/balance");
+    const v = pickNum(j, fields) ?? pickNum(j.data ?? {}, fields);
+    if (v !== null) return v;
+  } catch { /* try the action-style endpoint */ }
+  for (const action of ["balance", "get_balance", "wallet"]) {
+    try {
+      const res = await actionGet(s, { action });
+      if (!res.ok) continue;
+      const j: any = await res.json();
+      const v = pickNum(j, fields) ?? pickNum(j.data ?? {}, fields) ?? pickNum(j.wallet ?? {}, fields);
+      if (v !== null) return v;
+    } catch { /* next */ }
+  }
+  return null;
 }
 
 export async function testSupplier(id: string): Promise<{ ok: boolean; detail: string }> {
@@ -143,7 +198,7 @@ export async function testSupplier(id: string): Promise<{ ok: boolean; detail: s
 }
 
 /** Place an order at the supplier and return the delivered key(s). Deducts the supplier-side balance. */
-const KEY_FIELD_RE = /(licen[sc]e|serial|voucher|redeem|coupon|activation|cd[_-]?key|game[_-]?key|product[_-]?key|\bkey\b|\bcode\b|\bcodes\b|credential|secret|\btoken\b|login|username|\buser\b|email|password|\bpass\b|\bpin\b|delivered|download|content)/i;
+const KEY_FIELD_RE = /(licen[sc]e|serial|voucher|redeem|coupon|activation|cd[_-]?key|game[_-]?key|product[_-]?key|\bkey\b|\bcode\b|\bcodes\b|credential|secret|\btoken\b|login|username|\buser\b|email|password|\bpass\b|\bpin\b|\baccount\b|\baccounts\b|\baccount\b|\baccounts\b|delivered|download|content)/i;
 // Never treat these as the delivered key even if they contain "key"/"id".
 const EXCLUDE_FIELD_RE = /(idempoten|request|trace|order[_-]?id|orderid|txn|transaction|invoice|reference|\bref\b|\bid\b|status|message|success|error|created|updated|timestamp)/i;
 const STATUS_WORDS = /^(true|false|ok|yes|no|success|failed|failure|error|pending|completed|done|processing|active|null|none|n\/a)$/i;
@@ -167,23 +222,90 @@ function extractDeliveredKeys(j: any, exclude: string[] = []): string[] {
   return [...new Set(out)];
 }
 
-export async function placeSupplierOrder(supplierId: string, ref: string, qty = 1): Promise<{ ok: boolean; keys: string[]; reason?: string; raw?: string }> {
+export async function placeSupplierOrder(
+  supplierId: string,
+  ref: string,
+  qty = 1,
+  externalOrderId?: string,
+): Promise<{ ok: boolean; keys: string[]; reason?: string; raw?: string }> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
+  const pid: string | number = /^\d+$/.test(ref) ? Number(ref) : ref;
+  // A STABLE id per order line: a retry must never create a second order upstream.
+  const extId = externalOrderId ?? `sup-${supplierId}-${ref}-${qty}`;
+  const excl = [extId, String(ref), s.id, supplierId];
+  let lastRaw = "";
+  let lastReason = "";
+
+  const readKeys = (text: string): { keys: string[]; json: any } => {
+    let j: any; try { j = JSON.parse(text); } catch { j = text; }
+    return { keys: extractDeliveredKeys(j, excl), json: j };
+  };
+
+  // Strategy A — action-style API: GET <base>?action=place_order&product_id=..&quantity=..&external_order_id=..
+  for (const action of ["place_order", "order", "create_order", "buy", "purchase", "new_order"]) {
+    try {
+      const res = await actionGet(s, { action, product_id: pid, quantity: qty, external_order_id: extId });
+      const text = await res.text().catch(() => "");
+      lastRaw = text.slice(0, 500);
+      if (res.status === 404) continue;
+      // Their documented duplicate guard: the order already exists and was NOT re-charged.
+      if (res.status === 409) {
+        const rec = await lookupSupplierOrder(s, extId, excl);
+        if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
+        lastReason = `409 duplicate, and order_status returned no accounts`;
+        lastRaw = rec.raw || lastRaw;
+        continue;
+      }
+      if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; continue; }
+      const { keys } = readKeys(text);
+      if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
+      // Accepted but still processing — poll the status endpoint once.
+      const rec = await lookupSupplierOrder(s, extId, excl);
+      if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
+      lastReason = "NO_KEY_IN_RESPONSE";
+    } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
+  }
+
+  // Strategy B — conventional REST: POST /orders
   try {
-    const pid: string | number = /^\d+$/.test(ref) ? Number(ref) : ref;
-    const idem = `sup-${supplierId}-${ref}-${Date.now()}`;
     const res = await supFetch(s, "/orders", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": idem },
-      body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty }),
+      headers: { "Content-Type": "application/json", "Idempotency-Key": extId },
+      body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId }),
     });
-    const rawText = await res.text().catch(() => "");
-    if (!res.ok) return { ok: false, keys: [], reason: `${res.status} ${rawText.slice(0, 200)}`, raw: rawText.slice(0, 500) };
-    let j: any; try { j = JSON.parse(rawText); } catch { j = rawText; }
-    const out = extractDeliveredKeys(j, [idem, String(ref), s.id]);
-    return { ok: out.length > 0, keys: out, reason: out.length ? undefined : "NO_KEY_IN_RESPONSE", raw: rawText.slice(0, 500) };
-  } catch (e) { return { ok: false, keys: [], reason: String(e instanceof Error ? e.message : e).slice(0, 200) }; }
+    const text = await res.text().catch(() => "");
+    lastRaw = text.slice(0, 500) || lastRaw;
+    if (res.status === 409) {
+      const rec = await lookupSupplierOrder(s, extId, excl);
+      if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
+    } else if (res.ok) {
+      const { keys } = readKeys(text);
+      if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
+      const rec = await lookupSupplierOrder(s, extId, excl);
+      if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
+      lastReason = "NO_KEY_IN_RESPONSE";
+    } else {
+      lastReason = `${res.status} ${text.slice(0, 160)}`;
+    }
+  } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
+
+  return { ok: false, keys: [], reason: lastReason || "NO_KEY_IN_RESPONSE", raw: lastRaw };
+}
+
+/** Look an order up by our external id and pull the delivered accounts/keys out. */
+async function lookupSupplierOrder(s: SupplierRow, extId: string, excl: string[]): Promise<{ keys: string[]; raw: string }> {
+  for (const action of ["order_status", "order", "status", "check_order"]) {
+    try {
+      const res = await actionGet(s, { action, external_order_id: extId });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) continue;
+      let j: any; try { j = JSON.parse(text); } catch { continue; }
+      const keys = extractDeliveredKeys(j, excl);
+      if (keys.length > 0) return { keys, raw: text.slice(0, 500) };
+    } catch { /* try the next action name */ }
+  }
+  return { keys: [], raw: "" };
 }
 
 /** Import/refresh a supplier's catalog into our products (with markup). */
@@ -276,7 +398,8 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
   if (!item) return { ok: false, reason: "NOT_FOUND" };
   const { supplierId, supplierRef } = item.variant.product;
   if (!supplierId || !supplierRef) return { ok: false, reason: "NOT_SUPPLIER" };
-  const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity);
+  // Stable per-order-line id → the supplier de-dupes retries instead of double-charging.
+  const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity, `oi-${orderItemId}`);
   if (r.ok && r.keys.length > 0) {
     await manualFulfillItem(orderItemId, r.keys.join("\n"));
     return { ok: true };
