@@ -1096,10 +1096,11 @@ async function sendRevealed(
     if (rows.length > 0 && creds.every((c) => c !== null)) {
       shownCreds = true;
       rows.forEach((_, i) => {
-        const c = creds[i] as { id: string; pw: string };
+        const c = creds[i] as { id: string; pw: string; twofa?: string };
         if (rows.length > 1) lines.push(`<b>━━ Account ${i + 1} ━━</b>`);
         lines.push(`👤 <b>ID:</b>  <code>${escapeHtml(c.id)}</code>`);
         lines.push(`🔐 <b>Password:</b>  <code>${escapeHtml(c.pw)}</code>`);
+        if (c.twofa) lines.push(`🔢 <b>2FA secret:</b>  <code>${escapeHtml(c.twofa)}</code>`);
         if (rows.length > 1 && i < rows.length - 1) lines.push("");
       });
     } else if (rows.length > 1) {
@@ -1111,8 +1112,16 @@ async function sendRevealed(
   }
   if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(payload.username)}</code>`);
   if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(payload.password)}</code>`);
+  if (shownCreds && payload.key) {
+    const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+    if (rows.map(splitCredential).some((c) => c?.twofa)) {
+      lines.push("", '🔐 Paste the <b>2FA secret</b> at <a href="https://2fa.live">2fa.live</a> to get your 6-digit OTP.');
+    }
+    lines.push("", "📋 <b>Copy all credentials:</b>");
+    for (const r of rows) lines.push(`<code>${escapeHtml(r)}</code>`);
+  }
   if (payload.username || shownCreds) {
-    lines.push("", "ℹ️ Tap the ID or Password to copy it.");
+    lines.push("", "ℹ️ Tap any value above to copy it.");
     lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
   }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);

@@ -173,21 +173,23 @@ export interface DeliveryPayload {
 
 /** HTML delivery message — same shape the bot renders (Bot UX doc §6). */
 /**
- * Split one delivered line into an id/password pair when it looks like one
- * ("user | pass", "user:pass"). License keys are left untouched — note that
- * "-" is never treated as a separator because keys look like XXXX-XXXX-XXXX.
+ * Split one delivered line into its credential parts.
+ *   "user | pass"            → id + password
+ *   "user | pass | SECRET"   → id + password + 2FA secret (paste at 2fa.live)
+ * License keys are left untouched — "-" is never a separator because keys look
+ * like XXXX-XXXX-XXXX, and ":" only splits when neither side contains spaces.
  */
-export function splitCredential(line: string): { id: string; pw: string } | null {
+export function splitCredential(line: string): { id: string; pw: string; twofa?: string } | null {
   const t = line.trim();
   if (!t) return null;
-  const bar = t.indexOf("|");
-  if (bar > 0) {
-    const id = t.slice(0, bar).trim();
-    const pw = t.slice(bar + 1).trim();
-    if (id && pw) return { id, pw };
-    return null;
+  if (t.includes("|")) {
+    const parts = t.split("|").map((x) => x.trim());
+    const [id, pw, twofa] = parts;
+    if (!id || !pw) return null;
+    // 4+ parts: keep everything after the password as the 2FA/extra field.
+    const extra = parts.length > 3 ? parts.slice(2).join("|") : twofa;
+    return { id, pw, ...(extra ? { twofa: extra } : {}) };
   }
-  // exactly one colon, and neither side contains spaces → user:pass
   const parts = t.split(":");
   if (parts.length === 2) {
     const id = (parts[0] ?? "").trim();
@@ -196,6 +198,10 @@ export function splitCredential(line: string): { id: string; pw: string } | null
   }
   return null;
 }
+
+/** The 2FA helper site customers paste the secret into. */
+export const TWOFA_SITE = "https://2fa.live";
+
 
 export function buildDeliveryText(
   productName: string,
@@ -217,10 +223,11 @@ export function buildDeliveryText(
     if (allCreds) {
       renderedCreds = true;
       rows.forEach((_, i) => {
-        const c = creds[i] as { id: string; pw: string };
+        const c = creds[i] as { id: string; pw: string; twofa?: string };
         if (rows.length > 1) lines.push(`<b>━━ Account ${i + 1} ━━</b>`);
         lines.push(`👤 <b>ID:</b>  <code>${esc(c.id)}</code>`);
         lines.push(`🔐 <b>Password:</b>  <code>${esc(c.pw)}</code>`);
+        if (c.twofa) lines.push(`🔢 <b>2FA secret:</b>  <code>${esc(c.twofa)}</code>`);
         if (rows.length > 1 && i < rows.length - 1) lines.push("");
       });
     } else if (rows.length > 1) {
@@ -232,8 +239,24 @@ export function buildDeliveryText(
   }
   if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${esc(payload.username)}</code>`);
   if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${esc(payload.password)}</code>`);
+  if (renderedCreds && payload.key) {
+    const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+    const anyTwofa = rows.map(splitCredential).some((c) => c?.twofa);
+    if (anyTwofa) {
+      lines.push(
+        "",
+        `🔐 <b>How to get your OTP</b>`,
+        `1. Open <a href="${TWOFA_SITE}">2fa.live</a>`,
+        `2. Paste the <b>2FA secret</b> above into the box`,
+        `3. Tap <b>Submit</b> — it shows a 6-digit code`,
+        `4. Enter that code when logging in (it refreshes every 30s)`,
+      );
+    }
+    lines.push("", "📋 <b>Copy all credentials:</b>");
+    for (const r of rows) lines.push(`<code>${esc(r)}</code>`);
+  }
   if (payload.username || renderedCreds) {
-    lines.push("", "ℹ️ Tap the ID or Password to copy it.");
+    lines.push("", "ℹ️ Tap any value above to copy it.");
     lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
   }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
@@ -285,10 +308,11 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
       const creds = rows.map(splitCredential);
       if (rows.length > 0 && creds.every((c) => c !== null)) {
         rows.forEach((_, k) => {
-          const c = creds[k] as { id: string; pw: string };
+          const c = creds[k] as { id: string; pw: string; twofa?: string };
           if (rows.length > 1) out.push(`   <b>${k + 1})</b>`);
-          out.push(`   🆔 ID: <code>${esc(c.id)}</code>`);
-          out.push(`   🔑 Password: <code>${esc(c.pw)}</code>`);
+          out.push(`   👤 ID: <code>${esc(c.id)}</code>`);
+          out.push(`   🔐 Password: <code>${esc(c.pw)}</code>`);
+          if (c.twofa) out.push(`   🔢 2FA secret: <code>${esc(c.twofa)}</code>  <i>(paste at 2fa.live)</i>`);
         });
         out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
       } else if (rows.length > 1) {
@@ -322,9 +346,10 @@ export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): s
       const creds = rows.map(splitCredential);
       if (rows.length > 0 && creds.every((c) => c !== null)) {
         rows.forEach((_, k) => {
-          const c = creds[k] as { id: string; pw: string };
+          const c = creds[k] as { id: string; pw: string; twofa?: string };
           out.push(`   ${rows.length > 1 ? `${k + 1}) ` : ""}ID: ${c.id}`);
           out.push(`   ${rows.length > 1 ? "   " : ""}Password: ${c.pw}`);
+          if (c.twofa) out.push(`   ${rows.length > 1 ? "   " : ""}2FA secret: ${c.twofa}   (paste at ${TWOFA_SITE} to get the OTP)`);
         });
       } else {
         for (const r of rows) out.push(`   Key: ${r}`);
