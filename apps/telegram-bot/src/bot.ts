@@ -395,7 +395,10 @@ export function createBot(): Bot<Ctx> {
         "",
         `💰 Your wallet will be credited <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b>  <i>(100 INR = 1 USD)</i>`,
         "",
-        "✅ After paying, paste your <b>UTR number</b> here. Our team verifies it and your wallet is credited.",
+        "✅ After paying, paste your <b>UTR number</b> here.",
+        "",
+        "🕐 <b>Please note:</b> UPI is verified <b>manually by our team</b>, so crediting can be delayed.",
+        "⚡ Need it instantly? Use <b>Binance (USDT)</b> — that is credited automatically.",
       ].join("\n");
       const kb = new InlineKeyboard()
         .copyText(`📋 Copy amount — ₹${rupees}`, rupees).row()
@@ -442,7 +445,9 @@ export function createBot(): Bot<Ctx> {
           `💰 You'll receive: <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b> <i>(100 INR = 1 USD)</i>`,
           `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
           "",
-          "🧑‍💼 Our team is verifying it now. Your wallet is credited as soon as it clears, and you'll get a message here. 🙏",
+          "🧑‍💼 Our team is verifying it now — UPI is approved by hand, so please allow a little time. Your wallet is credited as soon as it clears and you'll get a message here. 🙏",
+          "",
+          "⚡ <i>Tip: Binance (USDT) deposits are credited automatically, with no waiting.</i>",
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🏠 Menu", "mnu:home") },
       );
@@ -964,7 +969,14 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:payupi": {
           await ctx.answerCallbackQuery({ text: "⏳ Creating UPI order…" });
-          if (user.currency !== "INR") { await setUserCurrency(user.id, "INR"); user.currency = "INR"; }
+          // A stale button must not silently flip a USDT customer to INR.
+          if (user.currency !== "INR") {
+            await ctx.reply(
+              "🪙 Your currency is <b>USD (USDT)</b> — please pay with <b>Binance</b> (instant), or switch to <b>INR</b> from 💱 Currency to use UPI.",
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💱 Currency", cb("cur", "home")).text("🏠 Menu", "mnu:home") },
+            );
+            break;
+          }
           const up = await createUpiManualCheckout(user.id, { useWallet: args[0] === "w" });
           ctx.session.upiOrderId = up.orderId;
           // Arm the UTR paste right away — no extra tap needed.
@@ -998,7 +1010,10 @@ export function createBot(): Bot<Ctx> {
             "📷 <b>Scan the QR</b> in any UPI app (GPay / PhonePe / Paytm) — the amount is pre-filled.",
             "📋 No QR? Tap the buttons below to copy the amount and UPI ID.",
             "",
-            "✅ After paying, just paste your <b>UTR number</b> here — we verify and deliver instantly.",
+            "✅ After paying, just paste your <b>UTR number</b> here.",
+            "",
+            "🕐 <b>Note:</b> UPI payments are checked <b>manually by our team</b>, so delivery may be delayed.",
+            "⚡ Want it instantly? Pay with <b>Binance (USDT)</b> — that verifies automatically.",
           ].join("\n");
           const upiKb = new InlineKeyboard()
             .copyText(`📋 Copy amount — ₹${amountRupees}`, amountRupees)
@@ -1080,7 +1095,7 @@ export function createBot(): Bot<Ctx> {
               reply_markup: new InlineKeyboard()
                 .copyText(`📋 Copy Binance Pay ID — ${uid}`, String(uid)).row()
                 .text("✅ I have deposited — enter Order ID", "wal:freetxn").row()
-                .add(...(config.UPI_ID ? [{ text: "🇮🇳 Add INR via UPI instead", callback_data: "wal:topupinr" }] : [])).row()
+                .add(...(config.UPI_ID && user.currency === "INR" ? [{ text: "🇮🇳 Add INR via UPI (🕐 manual approval)", callback_data: "wal:topupinr" }] : [])).row()
                 .text("🏠 Menu", "mnu:home"),
             },
           );
@@ -1099,6 +1114,13 @@ export function createBot(): Bot<Ctx> {
         case "wal:topupinr": {
           await ctx.answerCallbackQuery();
           if (!config.UPI_ID) { await ctx.reply("UPI deposits aren't configured yet."); break; }
+          if (user.currency !== "INR") {
+            await ctx.reply(
+              "🪙 Your wallet currency is <b>USD (USDT)</b>, so deposits go through <b>Binance</b> — it is instant and automatic.\n\nSwitch your currency to <b>INR</b> from 💱 Currency if you want to pay by UPI.",
+              { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💱 Currency", cb("cur", "home")).text("🏠 Menu", "mnu:home") },
+            );
+            break;
+          }
           ctx.session.awaiting = "wallet_inr_amount";
           await ctx.reply(
             "🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).\n\n<i>Wallet is held in USD — credited at 100 INR = 1 USD, so ₹500 gives you $5.00.</i>",

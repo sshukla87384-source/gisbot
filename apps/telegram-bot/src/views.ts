@@ -266,6 +266,9 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     "",
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${walletCur === "USD" ? " USDT" : ""}`,
     crossCur ? `🔁 Wallet charge for this order: <b>${walletChargeLabel}</b>  <i>(${fmt(payable, view.currency)})</i>` : "",
+    (user.currency as string) === "INR" && loadConfig().UPI_ID
+      ? "\n⚡ <b>Binance (USDT) delivers instantly.</b>\n🕐 UPI is verified by hand, so it can take longer — prefer Binance if you need it now."
+      : "",
     gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
@@ -280,8 +283,8 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     // Not enough for the whole order — spend what they have and pay the rest.
     const need = Math.max(0, walletPayable - Number(wallet.balanceMinor));
     kb.add(sbtn(`🪙 Use wallet ${fmt(wallet.balanceMinor, walletCur)} + pay ${fmt(need, walletCur)} via Binance`, cb("ord", "paybinance", "w"), "success")).row();
-    if (loadConfig().UPI_ID) {
-      kb.add(sbtn(`🇮🇳 Use wallet + pay rest via UPI`, cb("ord", "payupi", "w"), "success")).row();
+    if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
+      kb.add(sbtn(`🇮🇳 Use wallet + pay rest via UPI 🕐`, cb("ord", "payupi", "w"), "primary")).row();
     }
     kb.add(sbtn(`➕ Or top up ${fmt(need, walletCur)} first`, cb("wal", "topup"), "primary")).row();
   }
@@ -293,10 +296,11 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
     }
     if (loadConfig().BINANCE_PAY_UID) {
-      kb.add(sbtn("🪙 Pay via Binance (USD)", cb("ord", "paybinance"), "success")).row();
+      kb.add(sbtn("🪙 Pay via Binance (USDT) ⚡ instant", cb("ord", "paybinance"), "success")).row();
     }
-    if (loadConfig().UPI_ID) {
-      kb.add(sbtn("🇮🇳 Pay via UPI (INR)", cb("ord", "payupi"), "success")).row();
+    // UPI is INR-only and needs manual approval — hide it from USD/USDT customers.
+    if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
+      kb.add(sbtn("🇮🇳 Pay via UPI (INR) 🕐 manual approval", cb("ord", "payupi"), "primary")).row();
     }
   }
   navRow(kb, cb("crt", "view"));
