@@ -7,7 +7,7 @@ import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
-import { toUsdt } from "../fx.js";
+import { toUsdtCharge, usdtToMinor, usdtCentInMinor } from "../fx.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -36,7 +36,7 @@ export interface BinanceCheckoutResult {
  * customer submits (or admin verification), so no unique tail is needed.
  */
 function toUsdtAmount(totalMinor: number, currency: Currency): string {
-  return toUsdt(totalMinor, currency);
+  return toUsdtCharge(totalMinor, currency);
 }
 
 export interface UpiCheckoutResult {
@@ -94,10 +94,34 @@ async function applyWalletTx(
   orderId: string,
   orderNumber: string,
   totalMinor: number,
+  opts: { alignToUsdtCent?: Currency } = {},
 ): Promise<{ walletUsed: number; owed: number }> {
   const w = await tx.wallet.findUnique({ where: { userId } });
   if (!w || w.balanceMinor <= 0n) return { walletUsed: 0, owed: totalMinor };
-  const use = Number(w.balanceMinor < BigInt(totalMinor) ? w.balanceMinor : BigInt(totalMinor));
+  let use = Number(w.balanceMinor < BigInt(totalMinor) ? w.balanceMinor : BigInt(totalMinor));
+  if (use <= 0) return { walletUsed: 0, owed: totalMinor };
+  // The remainder will be quoted in USDT, which has only 2 decimals. Let the
+  // wallet swallow the sub-cent part so the gateway amount is exact — e.g. a
+  // ₹159.20 order with ₹50 in the wallet takes ₹50.20 and quotes exactly 1.09.
+  if (opts.alignToUsdtCent) {
+    const step = usdtCentInMinor(opts.alignToUsdtCent);
+    const remainder = (totalMinor - use) % step;
+    if (remainder > 0) {
+      if (Number(w.balanceMinor) >= use + remainder) {
+        // Spend a touch more from the wallet: ₹159.20 with ₹200 → wallet ₹159.20.
+        use += remainder;
+      } else if (use >= step - remainder) {
+        // Wallet is maxed out, so debit slightly LESS and let the gateway cover a
+        // whole cent: ₹159.20 with ₹50 → wallet ₹49.20 + exactly 1.10 USDT.
+        use -= step - remainder;
+      } else {
+        // Dust balance (smaller than one USDT cent) — it cannot make the gateway
+        // amount exact, so leave it in the wallet instead of spending it for
+        // nothing. The order is then billed wholly via the gateway.
+        use = 0;
+      }
+    }
+  }
   if (use <= 0) return { walletUsed: 0, owed: totalMinor };
   const after = w.balanceMinor - BigInt(use);
   await tx.walletTransaction.create({
@@ -226,14 +250,18 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
     if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
     // Wallet first when asked; the USDT amount must reflect only what is owed.
     const applied = opts.useWallet
-      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor)
+      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor, { alignToUsdtCent: user.currency })
       : { walletUsed: 0, owed: totalMinor };
     const owedUsdt = applied.walletUsed > 0 ? toUsdtAmount(applied.owed, user.currency) : usdt;
-    if (applied.walletUsed > 0) {
-      await tx.order.update({ where: { id: order.id }, data: { binanceAmount: owedUsdt } });
-    }
+    // The 2dp USDT quote is what the customer actually sends and what the
+    // verifier compares against, so record that exact value as the amount owed.
+    const owedRecorded = usdtToMinor(owedUsdt, user.currency);
+    await tx.order.update({
+      where: { id: order.id },
+      data: { binanceAmount: owedUsdt, totalMinor: owedRecorded },
+    });
     return {
-      orderId: order.id, orderNumber, totalMinor: applied.owed, binanceAmount: owedUsdt,
+      orderId: order.id, orderNumber, totalMinor: owedRecorded, binanceAmount: owedUsdt,
       walletUsedMinor: applied.walletUsed, orderTotalMinor: totalMinor,
     };
   });

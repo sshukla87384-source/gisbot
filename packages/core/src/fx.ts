@@ -65,14 +65,50 @@ export async function setInrPerUsdt(rate: number): Promise<number> {
   return v;
 }
 
-/** Convert an integer minor-unit amount between currencies. Rounds to the nearest minor unit. */
+/**
+ * Convert an integer minor-unit amount between currencies, rounding to the
+ * nearest minor unit. A positive amount never converts to 0 — that would let a
+ * tiny order be fulfilled for free.
+ */
 export function convertMinor(amountMinor: number, from: Currency, to: Currency): number {
   if (from === to) return Math.round(amountMinor);
   const inUsdt = amountMinor / usdtRate(from);
-  return Math.round(inUsdt * usdtRate(to));
+  const out = Math.round(inUsdt * usdtRate(to));
+  if (amountMinor > 0 && out < 1) return 1;
+  if (amountMinor < 0 && out > -1) return -1;
+  return out;
 }
 
-/** The USDT value of a minor-unit amount, as a 2dp string (what a customer actually sends/spends). */
+/** The USDT value of a minor-unit amount, as a 2dp string. */
 export function toUsdt(amountMinor: number, currency: Currency): string {
   return (amountMinor / 100 / usdtRate(currency)).toFixed(2);
+}
+
+/**
+ * USDT to charge, as an exact 2dp string (Binance Pay has 2 decimals).
+ *
+ * Uses INTEGER arithmetic: `amountMinor` and the rate are both scaled by 100, so
+ * usdtCents = round(amountMinor / rate). Float maths here is dangerous — an
+ * earlier epsilon-nudged ceil() turned ₹2.00 into 0.03 USDT, a 50% overcharge.
+ *
+ * Rounds to NEAREST cent (never silently up), and a positive amount always
+ * quotes at least 0.01. Always pair with `usdtToMinor` so the amount recorded
+ * against the order equals the amount the customer was asked to send.
+ */
+export function toUsdtCharge(amountMinor: number, currency: Currency): string {
+  const rate = usdtRate(currency); // currency units per USDT
+  if (amountMinor <= 0) return "0.00";
+  let cents = Math.round(amountMinor / rate);
+  if (cents < 1) cents = 1;
+  return (cents / 100).toFixed(2);
+}
+
+/** Smallest currency amount that maps to a whole USDT cent (used to avoid rounding). */
+export function usdtCentInMinor(currency: Currency): number {
+  return Math.max(1, Math.round(usdtRate(currency)));
+}
+
+/** Convert a USDT amount string back to minor units of `currency` (exact bookkeeping). */
+export function usdtToMinor(usdt: string, currency: Currency): number {
+  return Math.round(Number.parseFloat(usdt) * usdtRate(currency) * 100);
 }
