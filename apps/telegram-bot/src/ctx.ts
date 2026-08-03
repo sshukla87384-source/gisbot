@@ -79,6 +79,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Pending price-change announcement offered to the admin. */
+  priceAlert?: { productId: string; oldMinor: number; newMinor: number; currency: string };
   /** Auto-translate provider being configured. */
   trProvider?: string;
   trKey?: string;

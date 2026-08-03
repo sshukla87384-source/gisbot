@@ -337,3 +337,140 @@ export async function announceRestock(
   });
   return { announced: true, targets: res.targets };
 }
+
+/**
+ * Price-change alert. A drop is framed as urgency ("price crashed"), a rise as
+ * scarcity ("low supply") — both with the exact before/after and a buy button.
+ */
+export async function announcePriceChange(
+  productId: string,
+  oldMinor: number,
+  newMinor: number,
+  currency: "USD" | "INR" = "USD",
+): Promise<{ announced: boolean; targets?: number }> {
+  if (oldMinor <= 0 || newMinor <= 0 || oldMinor === newMinor) return { announced: false };
+  const p = await prisma.product.findUnique({ where: { id: productId } });
+  if (!p || p.status !== "ACTIVE" || p.deletedAt) return { announced: false };
+
+  const cfg = loadConfig();
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const sym = currency === "INR" ? "₹" : "$";
+  const money = (m: number) => `${sym}${(m / 100).toFixed(2)}`;
+  const dropped = newMinor < oldMinor;
+  const pct = Math.round((Math.abs(newMinor - oldMinor) / oldMinor) * 100);
+
+  const stock = await getProductView(productId, currency).catch(() => null);
+  const UNLIMITED = 1_000_000;
+  const units = stock ? stock.variants.reduce((n, v) => n + (v.stock >= UNLIMITED ? 0 : v.stock), 0) : 0;
+
+  const body = dropped
+    ? [
+        "🚨💥 <b>PRICE CRASHED!</b> 💥🚨",
+        "",
+        `${icon}${nameDisp}`,
+        "",
+        `❌ <s>${money(oldMinor)}</s>   ➡️   ✅ <b>${money(newMinor)}</b>`,
+        `📉 <b>${pct}% OFF</b> — you save <b>${money(oldMinor - newMinor)}</b>`,
+        units > 0 ? `📦 Only <b>${units}</b> left in stock` : "",
+        "",
+        "⏰ <b>HURRY — GRAB IT NOW</b> before it is gone! 🏃‍♂️💨",
+      ].filter(Boolean).join("\n")
+    : [
+        "📢⚠️ <b>PRICE UPDATE</b> ⚠️📢",
+        "",
+        `${icon}${nameDisp}`,
+        "",
+        `${money(oldMinor)}   ➡️   <b>${money(newMinor)}</b>  📈 +${pct}%`,
+        "",
+        "🔻 <b>Due to low supply</b>, the price had to be increased.",
+        units > 0 ? `📦 Remaining stock: <b>${units}</b>` : "",
+        "",
+        "🙏 Thank you for understanding — secure yours before it rises again.",
+      ].filter(Boolean).join("\n");
+
+  const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
+  const res = await sendBroadcast({
+    title: "",
+    body,
+    bodyIsHtml: true,
+    segment: "all",
+    createdById: "system",
+    buttonText: buttonUrl ? (dropped ? `⚡ Grab at ${money(newMinor)}` : `🛒 Buy — ${money(newMinor)}`) : undefined,
+    buttonUrl,
+    buttonStyle: dropped ? "success" : "primary",
+  });
+  return { announced: true, targets: res.targets };
+}
+
+/**
+ * Broadcast the whole live catalogue as a stock list:
+ *   <emoji> Name
+ *   🎁 N in stock · PRICE
+ */
+export async function announceCatalogue(
+  opts: { segment?: BroadcastSegment; currency?: "USD" | "INR"; inStockOnly?: boolean } = {},
+): Promise<{ targets: number; products: number }> {
+  const currency = opts.currency ?? "USD";
+  const cfg = loadConfig();
+  const products = await prisma.product.findMany({
+    where: { status: "ACTIVE", deletedAt: null },
+    orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
+    include: { variants: { where: { isActive: true, deletedAt: null }, include: { prices: { where: { currency, tier: { name: "RETAIL" } } } } } },
+  });
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const sym = currency === "INR" ? "₹" : "$";
+  const UNLIMITED = 1_000_000;
+
+  const rows: string[] = [];
+  let shown = 0;
+  for (const p of products) {
+    const view = await getProductView(p.id, currency).catch(() => null);
+    const unlimited = view ? view.variants.some((v) => v.stock >= UNLIMITED) : false;
+    const units = view ? view.variants.reduce((n, v) => n + (v.stock >= UNLIMITED ? 0 : v.stock), 0) : 0;
+    if (opts.inStockOnly && !unlimited && units <= 0) continue;
+    const priced = (view?.variants ?? []).map((v) => v.priceMinor).filter((n): n is number => n !== null);
+    const price = priced.length > 0 ? `${sym}${(Math.min(...priced) / 100).toFixed(2)}` : "—";
+    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+    const stockTxt = unlimited ? "∞" : String(units);
+    rows.push(`${icon}${nameDisp}\n🎁 <b>${stockTxt}</b> in stock · <b>${price}</b>`);
+    shown++;
+  }
+
+  const header = ["🗂 <b>FULL STOCK LIST</b>", `🏪 ${esc(cfg.STORE_NAME)}`, "", `📦 <b>${shown}</b> products available right now`, "━━━━━━━━━━━━━━━━━━", ""];
+  const footer = ["", "━━━━━━━━━━━━━━━━━━", "⚡ Instant delivery · 💳 Pay from wallet", "👇 Tap below to open the shop"];
+  const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=menu` : undefined;
+
+  // Telegram caps a message at 4096 chars — send in chunks that stay under it.
+  const chunks: string[] = [];
+  let cur: string[] = [];
+  let len = 0;
+  for (const r of rows) {
+    if (len + r.length > 3200 && cur.length > 0) { chunks.push(cur.join("\n\n")); cur = []; len = 0; }
+    cur.push(r);
+    len += r.length + 2;
+  }
+  if (cur.length > 0) chunks.push(cur.join("\n\n"));
+  if (chunks.length === 0) chunks.push("<i>No products in stock right now.</i>");
+
+  let targets = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const first = i === 0;
+    const last = i === chunks.length - 1;
+    const body = [...(first ? header : [`🗂 <b>STOCK LIST</b> — part ${i + 1}/${chunks.length}`, ""]), chunks[i] ?? "", ...(last ? footer : [])].join("\n");
+    const res = await sendBroadcast({
+      title: "",
+      body,
+      bodyIsHtml: true,
+      segment: opts.segment ?? "all",
+      createdById: "system",
+      buttonText: last && buttonUrl ? "🛍 Open the shop" : undefined,
+      buttonUrl: last ? buttonUrl : undefined,
+      buttonStyle: "success",
+    });
+    targets = res.targets;
+  }
+  return { targets, products: shown };
+}

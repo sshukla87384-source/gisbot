@@ -310,7 +310,7 @@ export function buildDeliveryText(
   }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${esc(activationGuide)}`);
-  lines.push("", "💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
+  lines.push("", "💾 <b>Saved in 📦 My Orders</b> — reopen it any time from 📦 View my orders.", "Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
   return lines.join("\n");
 }
 
@@ -377,7 +377,7 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
     if (p.expiresAt) out.push(`   ⏳ ${p.expiresAt.slice(0, 10)}`);
     out.push("");
   });
-  out.push("💾 Saved in 🔑 My Licenses · Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
+  out.push("💾 <b>Saved in 📦 My Orders</b> — reopen it any time from 📦 View my orders.", "Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
   return out.join("\n");
 }
 
@@ -412,6 +412,6 @@ export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): s
     if (it.activationGuide) out.push(`   Note: ${it.activationGuide}`);
     out.push("");
   });
-  out.push("Saved in My Licenses. Problem? Open a Support ticket in the bot.");
+  out.push("Saved in My Orders in the bot - reopen any time. Problem? Open a Support ticket.");
   return out.join("\n");
 }

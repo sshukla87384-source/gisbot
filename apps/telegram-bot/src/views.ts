@@ -45,15 +45,25 @@ export async function menuView(user: BotUser): Promise<View> {
   return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg) };
 }
 
+
+/** "Name (29)" · "❌ Name (0)" · "Name (∞)" — matches the stock-list style. */
+function stockTag(p: { inStock: boolean; stock: number | null }): string {
+  if (p.stock === null) return " (∞)";
+  return ` (${p.stock})`;
+}
+function outMark(p: { inStock: boolean }): string {
+  return p.inStock ? "" : "❌ ";
+}
+
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
-    const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
-    const stock = p.inStock ? "" : " · ❌ out of stock";
+    const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}${stock}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    const label = `${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`;
+    kb.add(sbtn(label, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().text("📂 All Categories", cb("shp", "root"));
@@ -85,11 +95,10 @@ export async function productListView(
   const result = await listProducts({ categoryId, currency: user.currency as Currency, page, userId: user.id, locale: user.locale });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
-    const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
-    const stock = p.inStock ? "✅" : "❌";
+    const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${stock} ${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().text("◀️ Categories", cb("shp", "root"));
@@ -101,10 +110,10 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
   const result = await listProducts({ search: query, currency: user.currency as Currency, page, userId: user.id, locale: user.locale });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
-    const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
+    const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${icon}${p.name} — ${price}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   backToMenuRow(kb);

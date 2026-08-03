@@ -100,6 +100,8 @@ import {
   setFlashHeadline,
   verifyBinanceByTxnId,
   WIZARD_TYPES,
+  announcePriceChange,
+  announceCatalogue,
 } from "@gis/core";
 import { cb } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
@@ -232,6 +234,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🎁 Referral %", cb("adm", "refrates"), "primary"], ["🕒 BNPL Limit", cb("adm", "bnpl"), "primary"]],
       [["🔥 Flash Sale Headline", cb("adm", "flashhead"), "primary"]],
       [["🎉 Special Sale (campaign)", cb("adm", "ssale"), "success"]],
+      [["🗂 Share Full Stock List", cb("adm", "cataloglist"), "success"]],
     ] },
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
@@ -1065,6 +1068,37 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, `🌐 <b>${id}</b>\n${hint}`);
       return;
     }
+    case "pricealert": {
+      const a = ctx.session.priceAlert;
+      ctx.session.priceAlert = undefined;
+      if (!a) { await ctx.reply("That price change expired."); return sendPanel(ctx, false); }
+      const r = await announcePriceChange(a.productId, a.oldMinor, a.newMinor, a.currency as "USD" | "INR");
+      await ctx.reply(r.announced ? `📣 Sent to ${r.targets ?? 0} customers. 🎉` : "Couldn't announce that.");
+      return productView(ctx, a.productId);
+    }
+    case "cataloglist": {
+      const kb = new InlineKeyboard()
+        .add(sbtn("📣 Send full stock list", cb("adm", "catalogo", "all"), "success")).row()
+        .add(sbtn("📦 In-stock items only", cb("adm", "catalogo", "instock"), "primary")).row()
+        .text("◀️ Back", cb("adm", "m_mkt"));
+      await show(ctx, [
+        "🗂 <b>Share full stock list</b>",
+        "",
+        "Sends every live product to all customers as a clean stock list:",
+        "",
+        "<i>🎁 Product Name</i>",
+        "<i>🎁 12 in stock · $4.99</i>",
+        "",
+        "Long lists are split automatically so nothing gets cut off.",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "catalogo": {
+      await ctx.reply("⏳ Building the stock list…");
+      const r = await announceCatalogue({ inStockOnly: id === "instock" });
+      await ctx.reply(`🗂 Sent <b>${r.products}</b> products to <b>${r.targets}</b> customers. 🎉`, { parse_mode: "HTML" });
+      return sendPanel(ctx, false);
+    }
     case "deliver": return manualDeliverView(ctx, id);
     case "dlv":
       ctx.session.admManualItemId = id;
@@ -1635,9 +1669,32 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const inrMinor = Number.isFinite(val) && val > 0 ? Math.round(val * 100) : 0;
     const usdMinor = ctx.session.pubUsdMinor ?? 0; ctx.session.pubUsdMinor = undefined;
     if (usdMinor <= 0 && inrMinor <= 0) { await ctx.reply("No price set (both were 0)."); await productView(ctx, pid); return true; }
-    await setProductPublicPrice(pid, { usdMinor, inrMinor });
+    const chg = await setProductPublicPrice(pid, { usdMinor, inrMinor });
     const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
     await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
+    // Offer the customer-facing alert only when the price actually moved.
+    if (chg.oldMinor !== null && chg.newMinor !== null && chg.oldMinor !== chg.newMinor) {
+      const dropped = chg.newMinor < chg.oldMinor;
+      const sym = chg.currency === "INR" ? "₹" : "$";
+      ctx.session.priceAlert = { productId: pid, oldMinor: chg.oldMinor, newMinor: chg.newMinor, currency: chg.currency };
+      await ctx.reply(
+        [
+          dropped ? "📉 <b>Price went DOWN</b>" : "📈 <b>Price went UP</b>",
+          `${sym}${(chg.oldMinor / 100).toFixed(2)} → <b>${sym}${(chg.newMinor / 100).toFixed(2)}</b>`,
+          "",
+          dropped
+            ? "Tell everyone? They'll get a <b>PRICE CRASHED — hurry, grab now</b> alert with a buy button."
+            : "Tell everyone? They'll get a <b>due to low supply, price increased</b> notice with a buy button.",
+        ].join("\n"),
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .add(sbtn(dropped ? "📣 Announce the price crash" : "📣 Announce the increase", cb("adm", "pricealert"), dropped ? "success" : "primary")).row()
+            .text("🤫 Skip", cb("adm", "prod", pid)),
+        },
+      );
+      return true;
+    }
     await productView(ctx, pid);
     return true;
   }

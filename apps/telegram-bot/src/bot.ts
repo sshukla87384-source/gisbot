@@ -740,18 +740,33 @@ export function createBot(): Bot<Ctx> {
           ctx.session.binanceOrderId = bz.orderId;
           await ctx.editMessageText(
             [
-              `🟡 <b>Pay via Binance</b> — Order <b>${bz.orderNumber}</b>`,
+              `🟡 <b>Pay via Binance Pay</b>`,
+              `🧾 Order <b>${bz.orderNumber}</b>`,
               "",
-              `Order value: <b>${fmt(bz.totalMinor, bz.currency)}</b>`,
-              `Send exactly: <b>${bz.binanceAmount} ${bz.binanceAsset}</b>`,
-              `To Binance UID: <code>${bz.binanceUid}</code>`,
+              "┏━━━━━━━━━━━━━━━━━━━━",
+              `┃ 💵 <b>Amount</b>`,
+              `┃ <code>${bz.binanceAmount}</code> ${bz.binanceAsset}`,
+              "┃",
+              `┃ 🆔 <b>Binance Pay ID</b>`,
+              `┃ <code>${bz.binanceUid}</code>`,
+              "┗━━━━━━━━━━━━━━━━━━━━",
               "",
-              "After sending, tap the button below and paste your Binance <b>Order ID</b> (from the payment receipt) — we verify it and deliver instantly.",
+              `🧮 Order value: <b>${fmt(bz.totalMinor, bz.currency)}</b>`,
+              "",
+              "📋 Tap the buttons below to copy the amount and the Pay ID — paste them straight into Binance.",
+              "",
+              "⚠️ Send the <b>exact</b> amount. A different amount cannot be matched automatically.",
+              "",
+              "✅ After paying, tap <b>I've paid</b> and send your Binance <b>Order ID</b> from the receipt — we verify and deliver instantly.",
             ].join("\n"),
             {
               parse_mode: "HTML",
               reply_markup: new InlineKeyboard()
-                .text("✅ I’ve paid — enter Order ID", "ord:binancetxn")
+                .copyText(`📋 Copy amount — ${bz.binanceAmount} ${bz.binanceAsset}`, bz.binanceAmount)
+                .row()
+                .copyText(`📋 Copy Binance Pay ID — ${bz.binanceUid}`, String(bz.binanceUid))
+                .row()
+                .text("✅ I've paid — enter Order ID", "ord:binancetxn")
                 .row()
                 .text("🏠 Menu", "mnu:home"),
             },
@@ -1133,7 +1148,7 @@ async function sendRevealed(
   }
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
-  lines.push("", "Saved in 🔑 My Licenses. Problem? Open a 🎫 Support ticket.");
+  lines.push("", "💾 <b>Saved in 📦 My Orders</b> — reopen it any time.", "Problem? Open a 🎫 Support ticket.");
   const kb = new InlineKeyboard()
     .text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
     .text("🏠 Menu", "mnu:home");

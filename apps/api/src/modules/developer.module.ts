@@ -231,6 +231,13 @@ export class DeveloperController {
       // actually delivered so API clients get their keys in this response.
       if (pending > 0) {
         try {
+          // Supplier-backed lines are bought upstream immediately after the order
+          // tx commits; give a slow supplier a moment before reading deliveries.
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const done = await prisma.orderItem.count({ where: { orderId: r.orderId, fulfilledAt: null } });
+            if (done === 0) break;
+            await new Promise((res) => setTimeout(res, 1200));
+          }
           const delivered = await revealOrderDeliveries(userId, r.orderId);
           if (delivered.length > items.length) {
             items = delivered.map((d) => ({

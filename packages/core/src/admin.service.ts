@@ -520,9 +520,21 @@ export async function listProductUserPrices(productId: string): Promise<Array<{ 
 }
 
 /** Set the public (RETAIL) price for ALL variants of a product, in USD and/or INR. This is the price everyone sees. */
-export async function setProductPublicPrice(productId: string, prices: { usdMinor?: number; inrMinor?: number }): Promise<void> {
+export async function setProductPublicPrice(
+  productId: string,
+  prices: { usdMinor?: number; inrMinor?: number },
+  opts: { announce?: boolean } = {},
+): Promise<{ oldMinor: number | null; newMinor: number | null; currency: "USD" | "INR" }> {
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
   const variants = await prisma.productVariant.findMany({ where: { productId, deletedAt: null } });
+  // Capture the price BEFORE the update so we can tell customers what changed.
+  const announceCurrency: "USD" | "INR" = prices.usdMinor && prices.usdMinor > 0 ? "USD" : "INR";
+  const beforeRows = await prisma.variantPrice.findMany({
+    where: { variantId: { in: variants.map((v) => v.id) }, tierId: retail.id, currency: announceCurrency },
+    orderBy: { amountMinor: "asc" },
+    take: 1,
+  });
+  const oldMinor = beforeRows[0]?.amountMinor ?? null;
   const entries: Array<["USD" | "INR", number]> = [];
   if (prices.usdMinor && prices.usdMinor > 0) entries.push(["USD", prices.usdMinor]);
   if (prices.inrMinor && prices.inrMinor > 0) entries.push(["INR", prices.inrMinor]);
@@ -537,6 +549,13 @@ export async function setProductPublicPrice(productId: string, prices: { usdMino
   }
   await prisma.product.update({ where: { id: productId }, data: { priceLocked: true } }); // keep this price through supplier re-syncs
   await invalidate("cat:*");
+
+  const newMinor = (announceCurrency === "USD" ? prices.usdMinor : prices.inrMinor) ?? null;
+  if (opts.announce && oldMinor !== null && newMinor !== null && oldMinor !== newMinor) {
+    const { announcePriceChange } = await import("./broadcast.service.js");
+    await announcePriceChange(productId, oldMinor, newMinor, announceCurrency).catch(() => undefined);
+  }
+  return { oldMinor, newMinor, currency: announceCurrency };
 }
 
 /** Set the default store price (INR + derived USD) for all variants of a product. */

@@ -27,6 +27,8 @@ export interface ProductListItem {
   fromPriceMinor: number | null;
   onSale: boolean;
   inStock: boolean;
+  /** Total units across variants; null = unlimited (not unit-stocked). */
+  stock: number | null;
   buttonStyle: string | null;
   iconCustomEmojiId: string | null;
   /** Buyable variants — API consumers order by `variants[].id`. */
@@ -180,6 +182,8 @@ export async function listProducts(opts: {
         }),
       );
       const inStock = variantRows.some((v) => v.stock > 0);
+      const unlimited = variantRows.some((v) => v.stock >= UNLIMITED_STOCK);
+      const stock = unlimited ? null : variantRows.reduce((n, v) => n + v.stock, 0);
       items.push({
         id: p.id,
         name: p.name,
@@ -188,6 +192,7 @@ export async function listProducts(opts: {
         fromPriceMinor: priced.length > 0 ? Math.min(...priced) : null,
         onSale,
         inStock,
+        stock,
         buttonStyle: p.buttonStyle,
         iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),
       });
