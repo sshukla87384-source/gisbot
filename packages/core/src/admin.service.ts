@@ -921,3 +921,83 @@ export async function repairBrokenAccounts(): Promise<{ scanned: number; fixed: 
   if (fixed > 0) await invalidate("cat:*");
   return { scanned: rows.length, fixed };
 }
+
+export interface FundedUserRow {
+  id: string;
+  label: string;
+  telegramId: string;
+  balanceMinor: number;
+  currency: string;
+  bnplLimitMinor: number;
+  bnplOwedMinor: number;
+  status: string;
+}
+
+/** Customers who hold wallet money, owe BNPL, or have a BNPL limit set. */
+export async function listFundedUsers(limit = 25): Promise<FundedUserRow[]> {
+  const rows = await prisma.user.findMany({
+    where: {
+      deletedAt: null,
+      OR: [
+        { wallet: { balanceMinor: { gt: 0 } } },
+        { bnplOutstandingMinor: { gt: 0 } },
+        { bnplLimitMinor: { gt: 0 } },
+      ],
+    },
+    include: { wallet: true },
+    take: limit,
+  });
+  return rows
+    .map((u) => ({
+      id: u.id,
+      label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "user")),
+      telegramId: String(u.telegramId ?? ""),
+      balanceMinor: Number(u.wallet?.balanceMinor ?? 0n),
+      currency: u.wallet?.currency ?? u.currency,
+      bnplLimitMinor: u.bnplLimitMinor,
+      bnplOwedMinor: u.bnplOutstandingMinor,
+      status: u.status,
+    }))
+    // Richest / most-owing first — that is what an admin wants to see.
+    .sort((a, b) => b.balanceMinor + b.bnplOwedMinor - (a.balanceMinor + a.bnplOwedMinor));
+}
+
+export interface WalletHistoryRow {
+  type: string;
+  amountMinor: number;
+  balanceAfterMinor: number;
+  note: string | null;
+  at: Date;
+}
+
+/** Wallet transaction history for one customer (newest first). */
+export async function getUserWalletHistory(userId: string, limit = 12): Promise<{ currency: string; rows: WalletHistoryRow[] }> {
+  const wallet = await prisma.wallet.findUnique({ where: { userId } });
+  if (!wallet) return { currency: "USD", rows: [] };
+  const txns = await prisma.walletTransaction.findMany({
+    where: { walletId: wallet.id },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+  return {
+    currency: wallet.currency,
+    rows: txns.map((t) => ({
+      type: t.type,
+      amountMinor: Number(t.amountMinor),
+      balanceAfterMinor: Number(t.balanceAfterMinor),
+      note: t.referenceNote,
+      at: t.createdAt,
+    })),
+  };
+}
+
+/** Close a customer's BNPL: clear the credit limit (and optionally write off what is owed). */
+export async function closeBnpl(userId: string, writeOff = false): Promise<{ ok: boolean; clearedMinor: number }> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { bnplOutstandingMinor: true } });
+  if (!u) return { ok: false, clearedMinor: 0 };
+  await prisma.user.update({
+    where: { id: userId },
+    data: { bnplLimitMinor: 0, ...(writeOff ? { bnplOutstandingMinor: 0 } : {}) },
+  });
+  return { ok: true, clearedMinor: writeOff ? u.bnplOutstandingMinor : 0 };
+}

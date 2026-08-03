@@ -1,6 +1,8 @@
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
+import { enqueueAdminAlert } from "../queues.js";
+import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { adjustWallet } from "./wallet.service.js";
 import { fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
 import { usdtRate } from "../fx.js";
@@ -88,6 +90,8 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
     idempotencyKey: `topup:${topup.id}`,
   });
   await prisma.walletTopup.update({ where: { id: topup.id }, data: { status: "CREDITED", creditedAt: new Date() } });
+  const tu = await prisma.user.findUnique({ where: { id: topup.userId }, select: { telegramHandle: true, firstName: true, telegramId: true, currency: true } });
+  if (tu) await notifyTopupToAdmins(tu, topup.amountMinor, "Binance top-up", clean, newBalanceMinor);
   return { ok: true, newBalanceMinor, amountMinor: topup.amountMinor, currency: topup.currency };
 }
 
@@ -133,5 +137,29 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
     userId, amountMinor: BigInt(creditMinor), type: "DEPOSIT",
     note: `Binance deposit (txn ${clean})`, idempotencyKey: `topup:${topup.id}`,
   });
+  await notifyTopupToAdmins(user, creditMinor, `Binance ${usdt.toFixed(2)} USDT`, clean, newBalanceMinor);
   return { ok: true, newBalanceMinor, amountMinor: creditMinor, currency: user.currency };
+}
+
+/** Tell admins whenever a customer's wallet is topped up. */
+export async function notifyTopupToAdmins(
+  user: { telegramHandle?: string | null; firstName?: string | null; telegramId?: bigint | null; currency: string },
+  amountMinor: number,
+  method: string,
+  reference: string,
+  newBalanceMinor?: bigint | number,
+): Promise<void> {
+  const who = user.telegramHandle ? `@${user.telegramHandle}` : (user.firstName ?? "customer");
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  await enqueueAdminAlert(
+    [
+      "💰 <b>Wallet topped up</b>",
+      `👤 ${esc(who)}`,
+      `🆔 <code>${user.telegramId ?? "—"}</code>`,
+      `➕ Added: <b>${formatMinor(amountMinor, user.currency as CurrencyCode)}</b>`,
+      newBalanceMinor !== undefined ? `💳 New balance: <b>${formatMinor(Number(newBalanceMinor), user.currency as CurrencyCode)}</b>` : "",
+      `🏦 Via: ${esc(method)}`,
+      reference ? `🧾 Ref: <code>${esc(reference)}</code>` : "",
+    ].filter(Boolean).join("\n"),
+  ).catch(() => undefined);
 }

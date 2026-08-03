@@ -101,6 +101,10 @@ import {
   verifyBinanceByTxnId,
   WIZARD_TYPES,
   announcePriceChange,
+  notifyTopupToAdmins,
+  listFundedUsers,
+  getUserWalletHistory,
+  closeBnpl,
   getInrPerUsdt,
   setInrPerUsdt,
   repairBrokenAccounts,
@@ -673,6 +677,7 @@ async function suppliersView(ctx: Ctx): Promise<void> {
 async function usersMenuView(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard()
     .add(sbtn("📋 View Users", cb("adm", "uview"), "primary")).row()
+    .add(sbtn("💰 Wallets & BNPL", cb("adm", "ufund"), "success")).row()
     .add(sbtn("🔎 Customer Lookup", cb("adm", "ulook"), "primary")).row()
     .text("◀️ Back", cb("adm", "home"));
   await show(ctx, "👥 <b>Users Management</b>\n<i>View, look up, credit/debit or ban customers</i>", kb, true);
@@ -693,15 +698,69 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
   if (!u) { await ctx.reply("User not found."); return usersMenuView(ctx); }
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add Balance", cb("adm", "uadd", u.id), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", u.id), "danger")).row()
+    .add(sbtn("🧾 Wallet history", cb("adm", "uhist", u.id), "primary")).row()
+    .add(sbtn("🕒 BNPL limit", cb("adm", "ubnpl", u.id), "primary"), sbtn("🔒 Close BNPL", cb("adm", "ubnplclose", u.id), "danger")).row()
     .add(u.status === "BANNED" ? sbtn("✅ Unban User", cb("adm", "uunban", u.id), "success") : sbtn("🚫 Ban User", cb("adm", "uban", u.id), "danger")).row()
-    .text("◀️ Back", cb("adm", "uview"));
+    .text("◀️ Back", cb("adm", "ufund"));
   await show(ctx, [
     `👤 <b>${escapeHtml(u.label)}</b>`,
     `🆔 ID: <code>${u.telegramId || "—"}</code>`,
     `Status: <b>${u.status}</b>`,
     `Wallet: <b>${(u.balanceMinor / 100).toFixed(2)} ${u.currency}</b>`,
     `Orders: <b>${u.orders}</b>`,
+    ...(await (async () => {
+      const b = await getBnplStatus(u.id).catch(() => null);
+      if (!b || (b.limitMinor === 0 && b.outstandingMinor === 0)) return [] as string[];
+      return [
+        `🕒 BNPL limit: <b>${(b.limitMinor / 100).toFixed(2)}</b> · owed: <b>${(b.outstandingMinor / 100).toFixed(2)}</b> · available: <b>${(b.availableMinor / 100).toFixed(2)}</b>`,
+      ];
+    })()),
   ].join("\n"), kb, true);
+}
+
+async function fundedUsersView(ctx: Ctx): Promise<void> {
+  const rows = await listFundedUsers(25);
+  const kb = new InlineKeyboard();
+  for (const u of rows) {
+    const bits = [`${(u.balanceMinor / 100).toFixed(2)} ${u.currency}`];
+    if (u.bnplOwedMinor > 0) bits.push(`🕒 owes ${(u.bnplOwedMinor / 100).toFixed(2)}`);
+    else if (u.bnplLimitMinor > 0) bits.push(`🕒 limit ${(u.bnplLimitMinor / 100).toFixed(2)}`);
+    kb.text(`${u.status === "BANNED" ? "🚫 " : "💰 "}${u.label} · ${bits.join(" · ")}`, cb("adm", "uinfo", u.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "m_users"));
+  const totalBal = rows.reduce((n, r) => n + r.balanceMinor, 0) / 100;
+  const totalOwed = rows.reduce((n, r) => n + r.bnplOwedMinor, 0) / 100;
+  await show(ctx, rows.length
+    ? [
+        "💰 <b>Wallets &amp; BNPL</b>",
+        `Customers holding money or credit: <b>${rows.length}</b>`,
+        `💳 Total wallet balances: <b>${totalBal.toFixed(2)}</b>`,
+        totalOwed > 0 ? `🕒 Total BNPL owed: <b>${totalOwed.toFixed(2)}</b>` : "",
+        "",
+        "Tap a customer to see their history, add/deduct balance or close their limit.",
+      ].filter(Boolean).join("\n")
+    : "💰 <b>Wallets &amp; BNPL</b>\n\nNo customer holds a balance or BNPL credit yet.", kb, true);
+}
+
+async function walletHistoryView(ctx: Ctx, userId: string): Promise<void> {
+  const [u, h] = await Promise.all([getUserById(userId), getUserWalletHistory(userId, 12)]);
+  if (!u) { await ctx.reply("User not found."); return fundedUsersView(ctx); }
+  const sign = (n: number) => (n >= 0 ? `+${(n / 100).toFixed(2)}` : `${(n / 100).toFixed(2)}`);
+  const lines = [
+    `🧾 <b>Wallet history — ${escapeHtml(u.label)}</b>`,
+    `🆔 <code>${u.telegramId || "—"}</code>`,
+    `💳 Balance: <b>${(u.balanceMinor / 100).toFixed(2)} ${u.currency}</b>`,
+    "",
+  ];
+  if (h.rows.length === 0) lines.push("<i>No wallet activity yet.</i>");
+  for (const r of h.rows) {
+    const when = r.at.toISOString().slice(0, 16).replace("T", " ");
+    lines.push(`${r.amountMinor >= 0 ? "🟢" : "🔴"} <b>${sign(r.amountMinor)}</b> · ${r.type} · ${when}${r.note ? `\n   <i>${escapeHtml(r.note)}</i>` : ""}`);
+  }
+  const kb = new InlineKeyboard()
+    .add(sbtn("➕ Add", cb("adm", "uadd", userId), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", userId), "danger")).row()
+    .text("◀️ Back", cb("adm", "uinfo", userId));
+  await show(ctx, lines.join("\n"), kb, true);
 }
 
 async function replacementsListView(ctx: Ctx): Promise<void> {
@@ -846,6 +905,39 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "m_users": return usersMenuView(ctx);
     case "uview": return usersListView(ctx);
     case "uinfo": return userDetailView(ctx, id);
+    case "ufund": return fundedUsersView(ctx);
+    case "uhist": return walletHistoryView(ctx, id);
+    case "ubnpl":
+      ctx.session.userTarget = id; ctx.session.awaiting = "admin_bnpl_user";
+      await askStep(ctx, "🕒 Send the <b>BNPL credit limit</b> for this customer (their currency, e.g. <code>50</code>). Send <code>0</code> to remove the limit:");
+      return;
+    case "ubnplclose": {
+      const kb = new InlineKeyboard()
+        .add(sbtn("🔒 Close limit only", cb("adm", "ubnpldo", `${id}~keep`), "primary")).row()
+        .add(sbtn("🧹 Close + write off what is owed", cb("adm", "ubnpldo", `${id}~off`), "danger")).row()
+        .text("◀️ Back", cb("adm", "uinfo", id));
+      await show(ctx, [
+        "🔒 <b>Close BNPL</b>",
+        "",
+        "<b>Close limit only</b> — they can't borrow again, but still owe what is outstanding.",
+        "<b>Write off</b> — clears the limit AND forgives the outstanding amount. This cannot be undone.",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "ubnpldo": {
+      const [uid, mode] = (id || "").split("~");
+      if (!uid) return;
+      const r = await closeBnpl(uid, mode === "off");
+      await ctx.reply(
+        r.ok
+          ? mode === "off"
+            ? `🧹 BNPL closed and <b>${(r.clearedMinor / 100).toFixed(2)}</b> written off.`
+            : "🔒 BNPL limit closed. The outstanding amount still stands."
+          : "Couldn't update that customer.",
+        { parse_mode: "HTML" },
+      );
+      return userDetailView(ctx, uid);
+    }
     case "ulook":
       ctx.session.awaiting = "admin_user_lookup";
       await askStep(ctx, "🔎 Send the customer's @username or Telegram ID:");
@@ -1123,6 +1215,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       if (!uid || !Number.isFinite(usdMinor) || usdMinor <= 0) { await ctx.reply("That top-up request is invalid."); return; }
       const res = await adjustUserWalletById(uid, usdMinor, `UPI top-up approved (₹${(inrMinor / 100).toFixed(2)})`);
       if (res.ok) {
+        const tu = await getUserById(uid);
+        if (tu) {
+          await notifyTopupToAdmins(
+            { telegramHandle: null, firstName: tu.label, telegramId: tu.telegramId ? BigInt(tu.telegramId) : null, currency: tu.currency },
+            usdMinor, `UPI ₹${(inrMinor / 100).toFixed(2)}`, "", res.newBalanceMinor,
+          ).catch(() => undefined);
+        }
         await ctx.reply(
           `✅ Credited <b>$${(usdMinor / 100).toFixed(2)}</b> (₹${(inrMinor / 100).toFixed(2)} @ 100 INR = 1 USD). New balance: <b>${(Number(res.newBalanceMinor ?? 0n) / 100).toFixed(2)} ${res.currency ?? "USD"}</b>.`,
           { parse_mode: "HTML" },
@@ -1867,6 +1966,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setTranslateCreds(provider, url, key);
     await ctx.reply(`✅ Auto-translate set to <b>${provider}</b>. Product names now follow each customer's language.`, { parse_mode: "HTML" });
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_bnpl_user") {
+    const uid = ctx.session.userTarget ?? ""; ctx.session.userTarget = undefined;
+    const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!uid || !Number.isFinite(val) || val < 0) { await ctx.reply("Couldn't set that limit."); return true; }
+    await setBnplLimit(uid, Math.round(val * 100));
+    await ctx.reply(val > 0 ? `🕒 BNPL limit set to <b>${val.toFixed(2)}</b>.` : "🕒 BNPL limit removed.", { parse_mode: "HTML" });
+    await userDetailView(ctx, uid);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

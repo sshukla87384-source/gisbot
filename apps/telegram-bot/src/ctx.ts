@@ -72,6 +72,7 @@ export interface SessionData {
     | "admin_p_warrantydays"
     | "wallet_inr_amount"
     | "wallet_inr_utr"
+    | "admin_bnpl_user"
     | "admin_fx_rate"
     | "admin_tr_key"
     | "admin_tr_url"
