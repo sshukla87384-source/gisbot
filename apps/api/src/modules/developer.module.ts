@@ -1,4 +1,4 @@
-import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts } from "@gis/core";
+import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts, revealOrderDeliveries, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { Body, Controller, Get, Header, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
@@ -8,6 +8,12 @@ import { z } from "zod";
 import { ApiError, forbidden, notFound } from "../common/errors.js";
 import { DeveloperApiGuard, Scopes, type DeveloperRequest } from "../common/developer.guard.js";
 import { Public } from "../common/permissions.decorator.js";
+
+/** UNLIMITED_STOCK is an internal sentinel — never leak 9007199254740991 to API clients. */
+function stockOut(n: number): { stock: number | null; unlimited: boolean; inStock: boolean } {
+  if (n >= UNLIMITED_STOCK) return { stock: null, unlimited: true, inStock: true };
+  return { stock: n, unlimited: false, inStock: n > 0 };
+}
 
 function currencyOf(q: unknown): Currency {
   const c = String((q as { currency?: string })?.currency ?? "INR").toUpperCase();
@@ -47,7 +53,7 @@ export class DeveloperController {
   @Get("products")
   async products(@Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     const page = Math.max(1, Number.parseInt(query.page ?? "1", 10) || 1);
-    return listProducts({
+    const res = await listProducts({
       currency: currencyOf(query),
       page,
       search: query.search,
@@ -56,13 +62,56 @@ export class DeveloperController {
       userId: req.apiKey?.ownerUserId ?? undefined,
       channel: "API",
     });
+    const currency = currencyOf(query);
+    const inStockOnly = query.inStock === "true";
+    const items = res.items
+      .filter((p) => (inStockOnly ? p.inStock : true))
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        emoji: p.iconEmoji,
+        currency,
+        fromPriceMinor: p.fromPriceMinor,
+        onSale: p.onSale,
+        inStock: p.inStock,
+        // Order with any of these: POST /orders { "variantId": ... }
+        variants: p.variants.map((v) => ({
+          id: v.id,
+          name: v.name,
+          priceMinor: v.priceMinor,
+          ...stockOut(v.stock),
+        })),
+      }));
+    return { items, page: res.page, pages: res.pages, total: res.total, currency };
   }
 
   @Scopes("catalog:read")
   @Get("products/:id")
   async product(@Param("id") id: string, @Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     try {
-      return await getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API");
+      const p = await getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API");
+      return {
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        emoji: p.iconEmoji,
+        imageUrl: p.imageUrl,
+        currency: currencyOf(query),
+        type: p.type,
+        onSale: p.onSale,
+        salePercentBp: p.salePercentBp,
+        saleEndsAt: p.saleEndsAt,
+        activationGuide: p.activationGuide,
+        // true = stocked and fulfilled by an upstream supplier, delivered automatically
+        supplierBacked: p.supplierBacked,
+        variants: p.variants.map((v) => ({
+          id: v.id,
+          name: v.name,
+          priceMinor: v.priceMinor,
+          originalPriceMinor: v.originalPriceMinor,
+          ...stockOut(v.stock),
+        })),
+      };
     } catch {
       throw notFound("Product");
     }
@@ -79,7 +128,7 @@ export class DeveloperController {
         onSale: p.onSale,
         variants: p.variants.map((v) => ({
           id: v.id, name: v.name, priceMinor: v.priceMinor,
-          originalPriceMinor: v.originalPriceMinor, inStock: v.stock > 0, stock: v.stock,
+          originalPriceMinor: v.originalPriceMinor, ...stockOut(v.stock),
         })),
       };
     } catch {
@@ -165,19 +214,47 @@ export class DeveloperController {
       await addToCart(userId, variantId, quantity);
       const r = await checkoutWithWallet(userId, "API");
       if (idemKey) await getRedis().set(idemKey, r.orderNumber, "EX", 86400);
-      return {
-        orderNumber: r.orderNumber,
-        status: r.status,
-        currency: r.currency,
-        totalMinor: r.totalMinor,
-        pendingManualItems: r.pendingManualItems,
-        items: r.deliveries.map((d) => ({
+
+      let items: Array<{ product: string; variant: string; kind: string; secret: unknown; activationGuide?: string | null }> =
+        r.deliveries.map((d) => ({
           product: d.productName,
           variant: d.variantName,
-          kind: d.kind,
-          secret: d.secret,
+          kind: d.kind as string,
+          secret: d.secret as unknown,
           activationGuide: d.activationGuide,
-        })),
+        }));
+      let status: string = r.status;
+      let pending = r.pendingManualItems;
+
+      // Supplier-backed items are fulfilled right after the order transaction
+      // commits, so they are missing from `r.deliveries`. Re-read what was
+      // actually delivered so API clients get their keys in this response.
+      if (pending > 0) {
+        try {
+          const delivered = await revealOrderDeliveries(userId, r.orderId);
+          if (delivered.length > items.length) {
+            items = delivered.map((d) => ({
+              product: d.productName,
+              variant: d.variantName,
+              kind: d.payload.kind,
+              secret: d.payload as unknown,
+            }));
+            const fresh = await prisma.order.findUnique({ where: { id: r.orderId }, select: { status: true } });
+            if (fresh) status = fresh.status;
+            pending = Math.max(0, pending - (delivered.length - r.deliveries.length));
+          }
+        } catch {
+          // fall back to the transaction-time deliveries
+        }
+      }
+
+      return {
+        orderNumber: r.orderNumber,
+        status,
+        currency: r.currency,
+        totalMinor: r.totalMinor,
+        pendingManualItems: pending,
+        items,
       };
     } catch (e) {
       if (isCoreError(e)) {
@@ -230,7 +307,8 @@ Create a key in the bot: open the menu → <b>🧑‍💻 Developer API</b> → 
 <h2>Endpoints</h2>
 <div class="card">
   <div class="ep"><span class="m get">GET</span><code class="path">/health</code><span class="desc">liveness (no auth)</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products</code><span class="desc">buyable catalog</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/products</code><span class="desc">buyable catalog (incl. variantIds)</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/products?inStock=true</code><span class="desc">in-stock only</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/products/{id}</code><span class="desc">one product</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/products/{id}/stock</code><span class="desc">live stock & price</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/categories</code><span class="desc">categories</span></div>
@@ -252,8 +330,30 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
   -d '{"variantId":"VARIANT_ID","quantity":1}'</pre>
 </div>
 
+<h2>Catalog response</h2>
+<div class="card">
+<code>/products</code> returns every buyable variant inline, so you can order straight from the list — no second call needed:
+<pre>{
+  "items": [
+    { "id": "PRODUCT_ID", "name": "Youtube 3M", "currency": "INR",
+      "fromPriceMinor": 15920, "onSale": false, "inStock": true,
+      "variants": [
+        { "id": "VARIANT_ID", "name": "Standard",
+          "priceMinor": 15920, "stock": 42, "unlimited": false, "inStock": true }
+      ] }
+  ], "page": 1, "pages": 3, "total": 54, "currency": "INR"
+}</pre>
+<ul>
+<li><b>variants[].id</b> is what you send as <code>variantId</code> to <code>POST /orders</code>.</li>
+<li><b>stock</b> is the real number available. For supplier-backed products this is the upstream supplier stock.</li>
+<li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable.</li>
+<li>Add <code>?inStock=true</code> to receive only orderable products.</li>
+</ul>
+</div>
+
 <h2>Notes</h2>
 <div class="card"><ul>
+<li><b>Supplier-backed products</b> — items flagged <code>supplierBacked: true</code> are stocked upstream and delivered automatically; your keys come back in the <code>POST /orders</code> response just like local stock.</li>
 <li><b>Single balance</b> — API orders are paid from your main wallet; top up via the Deposit menu.</li>
 <li><b>Rate limit</b> — 60 requests/min per key (configurable per key).</li>
 <li>All monetary amounts are integer <b>minor units</b> (e.g. cents); currency is on each response.</li>

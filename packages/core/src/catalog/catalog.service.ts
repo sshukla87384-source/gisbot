@@ -12,6 +12,13 @@ export interface CategoryNode {
   hasChildren: boolean;
 }
 
+export interface ProductListVariant {
+  id: string;
+  name: string;
+  priceMinor: number | null;
+  stock: number;
+}
+
 export interface ProductListItem {
   id: string;
   name: string;
@@ -21,6 +28,8 @@ export interface ProductListItem {
   inStock: boolean;
   buttonStyle: string | null;
   iconCustomEmojiId: string | null;
+  /** Buyable variants — API consumers order by `variants[].id`. */
+  variants: ProductListVariant[];
 }
 
 /** Pull the first custom (premium) emoji id out of stored *Html fields, for use as a button icon. */
@@ -67,12 +76,23 @@ export interface ProductView {
   variants: VariantView[];
 }
 
-async function variantStock(variantId: string, type: string): Promise<number> {
+/** Sentinel for products that are not unit-stocked (downloads, manual services). */
+export const UNLIMITED_STOCK = Number.MAX_SAFE_INTEGER;
+
+async function variantStock(
+  variantId: string,
+  type: string,
+  supplier?: { supplierId: string | null; supplierStock: number | null },
+): Promise<number> {
+  // Supplier-backed products are stocked at the supplier, not locally.
+  if (supplier?.supplierId && supplier.supplierStock !== null && supplier.supplierStock !== undefined) {
+    return supplier.supplierStock;
+  }
   if (type === "LICENSE_KEY")
     return prisma.licenseKey.count({ where: { variantId, status: "AVAILABLE", deletedAt: null } });
   if (type === "DIGITAL_ACCOUNT")
     return prisma.digitalAccount.count({ where: { variantId, status: "AVAILABLE", deletedAt: null } });
-  return Number.MAX_SAFE_INTEGER; // downloads / manual services are not unit-stocked
+  return UNLIMITED_STOCK; // downloads / manual services are not unit-stocked
 }
 
 export async function listCategories(parentId: string | null): Promise<CategoryNode[]> {
@@ -94,10 +114,10 @@ export async function listCategories(parentId: string | null): Promise<CategoryN
 export async function getVariantAvailable(variantId: string): Promise<number> {
   const v = await prisma.productVariant.findUnique({
     where: { id: variantId },
-    include: { product: { select: { type: true } } },
+    include: { product: { select: { type: true, supplierId: true, supplierStock: true } } },
   });
   if (!v) return 0;
-  return variantStock(variantId, v.product.type);
+  return variantStock(variantId, v.product.type, v.product);
 }
 
 export async function listProducts(opts: {
@@ -146,15 +166,26 @@ export async function listProducts(opts: {
       const priced = ov !== undefined ? [ov] : p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
       let inStock = false;
       for (const v of p.variants) {
-        if ((await variantStock(v.id, p.type)) > 0) {
+        if ((await variantStock(v.id, p.type, p)) > 0) {
           inStock = true;
           break;
         }
+      }
+      const variantRows = [];
+      for (const v of p.variants) {
+        const base = v.prices[0]?.amountMinor ?? null;
+        variantRows.push({
+          id: v.id,
+          name: v.name,
+          priceMinor: ov ?? (base === null ? null : effectivePriceMinor(base, p)),
+          stock: await variantStock(v.id, p.type, p),
+        });
       }
       items.push({
         id: p.id,
         name: p.name,
         iconEmoji: p.iconEmoji,
+        variants: variantRows,
         fromPriceMinor: priced.length > 0 ? Math.min(...priced) : null,
         onSale,
         inStock,
@@ -207,7 +238,7 @@ export async function getProductView(productId: string, currency: Currency, user
       name: v.name,
       priceMinor: eff,
       originalPriceMinor: override !== null && base !== null ? base : (onSale && base !== null ? base : null),
-      stock: await variantStock(v.id, p.type),
+      stock: await variantStock(v.id, p.type, p),
     });
   }
   return {
