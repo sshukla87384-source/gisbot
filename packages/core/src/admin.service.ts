@@ -303,31 +303,43 @@ export async function listVariantsBrief(productId: string): Promise<VariantBrief
 }
 
 /** Bulk-add license keys to a variant (one per line). Returns counts. */
-export async function addLicenseKeys(variantId: string, rawKeys: string[]): Promise<{ added: number; skipped: number }> {
+export async function addLicenseKeys(variantId: string, rawKeys: string[]): Promise<{ added: number; skipped: number; relisted: number }> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
-  let added = 0, skipped = 0;
+  let added = 0, skipped = 0, relisted = 0;
   for (const raw of rawKeys) {
     const value = raw.trim();
     if (!value) continue;
     const keyHash = sha256Hex(normalizeLicenseKey(value));
     const exists = await prisma.licenseKey.findUnique({ where: { variantId_keyHash: { variantId, keyHash } } });
-    if (exists) { skipped++; continue; }
+    if (exists) {
+      // Already AVAILABLE → a true duplicate, skip. Already sold/disabled (e.g. a
+      // test delivery) → put it BACK on the shelf instead of silently skipping,
+      // and never create a second row for the same key.
+      if (exists.status === "AVAILABLE") { skipped++; continue; }
+      await prisma.licenseKey.update({
+        where: { id: exists.id },
+        data: { status: "AVAILABLE", orderItemId: null, soldAt: null, reservedUntil: null, deletedAt: null },
+      });
+      relisted++;
+      continue;
+    }
     await prisma.licenseKey.create({
       data: { variantId, keyEncrypted: encryptSecret(value, masterKey), keyHash, supplier: "bot-admin" },
     });
     added++;
   }
-  if (added > 0) {
+  if (added + relisted > 0) {
     const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
-    if (v) await announceRestock(v.productId, added, { createdById: "bot-admin" }).catch(() => undefined);
+    if (v) await announceRestock(v.productId, added + relisted, { createdById: "bot-admin" }).catch(() => undefined);
+    await invalidate("cat:*");
   }
-  return { added, skipped };
+  return { added, skipped, relisted };
 }
 
 /** Add digital-account stock (username/password lines) for a DIGITAL_ACCOUNT variant. */
-export async function addAccountStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number }> {
+export async function addAccountStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number; relisted: number }> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
-  let added = 0, skipped = 0;
+  let added = 0, skipped = 0, relisted = 0;
   for (const raw of rawLines) {
     const line = raw.trim();
     if (!line) continue;
@@ -342,10 +354,48 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
     const username = parsed.id;
     const password = parsed.pw;
     if (!username || !password) { skipped++; continue; }
+    // Same username already on this variant? Never create a second row — either
+    // it is a duplicate (skip) or it was sold/disabled (e.g. a test delivery),
+    // in which case put it back on the shelf with the credentials just pasted.
+    const usernameHash = sha256Hex(username.trim().toLowerCase());
+    let existing = await prisma.digitalAccount.findFirst({ where: { variantId, usernameHash } });
+    if (!existing) {
+      // Rows created before usernameHash existed have it NULL — decrypt those to
+      // compare, and backfill the hash so the next lookup is a plain index hit.
+      const legacy = await prisma.digitalAccount.findMany({
+        where: { variantId, usernameHash: null },
+        select: { id: true, usernameEncrypted: true },
+      });
+      for (const l of legacy) {
+        let u = "";
+        try { u = decryptSecret(l.usernameEncrypted, masterKey); } catch { continue; }
+        const h = sha256Hex(u.trim().toLowerCase());
+        await prisma.digitalAccount.update({ where: { id: l.id }, data: { usernameHash: h } }).catch(() => undefined);
+        if (h === usernameHash) { existing = await prisma.digitalAccount.findUnique({ where: { id: l.id } }); break; }
+      }
+    }
+    if (existing) {
+      if (existing.status === "AVAILABLE" && existing.usedSlots < existing.maxSlots && existing.deletedAt === null) { skipped++; continue; }
+      await prisma.digitalAccount.update({
+        where: { id: existing.id },
+        data: {
+          passwordEncrypted: encryptSecret(password, masterKey),
+          ...(parsed.twofa ? { twofaEncrypted: encryptSecret(parsed.twofa, masterKey) } : {}),
+          status: "AVAILABLE",
+          usedSlots: 0,
+          reservedUntil: null,
+          deletedAt: null,
+        },
+      });
+      await prisma.accountAssignment.deleteMany({ where: { accountId: existing.id } });
+      relisted++;
+      continue;
+    }
     await prisma.digitalAccount.create({
       data: {
         variantId,
         usernameEncrypted: encryptSecret(username, masterKey),
+        usernameHash,
         passwordEncrypted: encryptSecret(password, masterKey),
         ...(parsed.twofa ? { twofaEncrypted: encryptSecret(parsed.twofa, masterKey) } : {}),
         status: "AVAILABLE",
@@ -356,15 +406,16 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
     });
     added++;
   }
-  if (added > 0) {
+  if (added + relisted > 0) {
     const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
-    if (v) await announceRestock(v.productId, added, { createdById: "bot-admin" }).catch(() => undefined);
+    if (v) await announceRestock(v.productId, added + relisted, { createdById: "bot-admin" }).catch(() => undefined);
+    await invalidate("cat:*");
   }
-  return { added, skipped };
+  return { added, skipped, relisted };
 }
 
 /** Type-aware stock add: license keys for LICENSE_KEY variants, accounts for DIGITAL_ACCOUNT. */
-export async function addStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number; type: string }> {
+export async function addStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number; relisted: number; type: string }> {
   const v = await prisma.productVariant.findUnique({ where: { id: variantId }, include: { product: { select: { type: true } } } });
   const type = v?.product.type ?? "LICENSE_KEY";
   if (type === "DIGITAL_ACCOUNT") return { ...(await addAccountStock(variantId, rawLines)), type };
@@ -430,7 +481,15 @@ export async function createProductFull(input: {
   categoryId?: string;
   priceInrMinor: number;
   priceUsdMinor?: number;
-}): Promise<{ productId: string }> {
+}): Promise<{ productId: string; existed?: boolean }> {
+  // Same product name already in the catalogue? Reuse it instead of creating a
+  // near-duplicate — one product, one listing, stock accumulates on it.
+  const dupe = await prisma.product.findFirst({
+    where: { deletedAt: null, name: { equals: input.name.trim(), mode: "insensitive" } },
+    select: { id: true },
+  });
+  if (dupe) return { productId: dupe.id, existed: true };
+
   const spec = WIZARD_TYPES[input.typeKey] ?? { type: "LICENSE_KEY", fulfillmentMode: "AUTOMATIC" as const, label: "License Key" };
   const categoryId = input.categoryId || (await ensureUncategorized());
   const slug = await uniqueSlug(slugify(input.name));
@@ -840,11 +899,18 @@ export async function repairBrokenAccounts(): Promise<{ scanned: number; fixed: 
       continue; // cannot decrypt — leave it alone
     }
     const repaired = repairAccountPair(u, pw);
-    if (!repaired || (repaired.id === u && repaired.pw === pw)) continue;
+    if (!repaired || (repaired.id === u && repaired.pw === pw)) {
+      // Not broken — still backfill the dedupe hash while we have it decrypted.
+      await prisma.digitalAccount
+        .update({ where: { id: r.id }, data: { usernameHash: sha256Hex(u.trim().toLowerCase()) } })
+        .catch(() => undefined);
+      continue;
+    }
     await prisma.digitalAccount.update({
       where: { id: r.id },
       data: {
         usernameEncrypted: encryptSecret(repaired.id, masterKey),
+        usernameHash: sha256Hex(repaired.id.trim().toLowerCase()),
         passwordEncrypted: encryptSecret(repaired.pw, masterKey),
         ...(repaired.twofa && !r.twofaEncrypted ? { twofaEncrypted: encryptSecret(repaired.twofa, masterKey) } : {}),
       },

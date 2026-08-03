@@ -1244,7 +1244,15 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "kv": {
       ctx.session.awaiting = "admin_addkeys";
       ctx.session.admVariantId = id;
-      await ctx.reply("📦 Paste stock <b>one per line</b> — they're encrypted and added.\n• License keys: one key per line.\n• Accounts: <code>username:password</code> per line (or <code>username | password</code>).", { parse_mode: "HTML" });
+      await ctx.reply([
+        "📦 Paste stock <b>one per line</b> — encrypted and added instantly.",
+        "",
+        "• License keys: one key per line",
+        "• Accounts: <code>id|password</code> per line",
+        "• With 2FA: <code>id|password|2fa_secret</code>",
+        "",
+        "♻️ <b>Already delivered something (e.g. a test order)?</b> Just paste it again — it goes back on sale instead of creating a duplicate.",
+      ].join("\\n"), { parse_mode: "HTML" });
       return;
     }
     case "addp": {
@@ -1430,7 +1438,10 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (keys.length === 0) { await ctx.reply("❌ Nothing detected."); return true; }
     const r = await addStock(variantId, keys);
     const unit = r.type === "DIGITAL_ACCOUNT" ? "account" : "key";
-    await ctx.reply(`✅ Added ${r.added} ${unit}(s)${r.skipped ? `, skipped ${r.skipped}` : ""}.`);
+    const bits = [`✅ Added <b>${r.added}</b> ${unit}(s)`];
+    if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered ${unit}(s) — back on sale, not duplicated`);
+    if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> already in stock (duplicate)`);
+    await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
     await sendPanel(ctx, false);
     return true;
   }
@@ -1479,7 +1490,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await sendPanel(ctx, false);
       return true;
     }
-    const { productId } = await createProductFull({
+    const { productId, existed } = await createProductFull({
       name: d.name,
       nameHtml: d.nameHtml,
       description: d.description,
@@ -1495,7 +1506,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       .text("🔑 Add stock keys", cb("adm", "keys", productId)).row()
       .text("✅ Done / view", cb("adm", "prod", productId));
     await ctx.reply(
-      `✅ <b>Product created</b> (as draft).\nAdd stock, then activate to put it live & announce it to users.`,
+      existed
+        ? `♻️ <b>${escapeHtml(d.name)}</b> already exists — using the <b>same product</b> instead of creating a duplicate.\nAdd your stock to it below; it stays one single listing.`
+        : `✅ <b>Product created</b> (as draft).\nAdd stock, then activate to put it live & announce it to users.`,
       { parse_mode: "HTML", reply_markup: kb },
     );
     return true;

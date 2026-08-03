@@ -592,6 +592,7 @@ model DigitalAccount {
   variantId         String
   variant           ProductVariant  @relation(fields: [variantId], references: [id])
   usernameEncrypted String
+  usernameHash      String? // sha256 of the username — dedupe / re-list without duplicating
   passwordEncrypted String
   twofaEncrypted    String? // optional TOTP secret (paste at 2fa.live) — AES-GCM
   recoveryEmail     String?
@@ -613,7 +614,9 @@ model DigitalAccount {
 
   @@index([variantId, status])
   @@index([status, reservedUntil])
+  @@index([variantId, usernameHash])
 }
+
 
 model AccountAssignment {
   id          String         @id @default(cuid())
