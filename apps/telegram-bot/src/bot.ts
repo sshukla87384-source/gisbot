@@ -1083,7 +1083,7 @@ async function sendRevealed(
   ctx: Ctx,
   productName: string,
   variantName: string,
-  payload: { kind: string; key?: string; username?: string; password?: string; expiresAt?: string },
+  payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string },
   activationGuide?: string | null,
   allowPwChange?: boolean,
 ): Promise<void> {
@@ -1110,8 +1110,15 @@ async function sendRevealed(
       lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
     }
   }
-  if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(payload.username)}</code>`);
-  if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(payload.password)}</code>`);
+  if (payload.username) lines.push(`👤 <b>ID:</b>  <code>${escapeHtml(payload.username)}</code>`);
+  if (payload.password) lines.push(`🔐 <b>Password:</b>  <code>${escapeHtml(payload.password)}</code>`);
+  if (payload.twofa) {
+    lines.push(`🔢 <b>2FA secret:</b>  <code>${escapeHtml(payload.twofa)}</code>`);
+    lines.push("", '🔐 Paste the <b>2FA secret</b> at <a href="https://2fa.live">2fa.live</a> to get your 6-digit OTP.');
+  }
+  if (payload.username && payload.password) {
+    lines.push("", "📋 <b>Copy all credentials:</b>", `<code>${escapeHtml(payload.username)}|${escapeHtml(payload.password)}${payload.twofa ? `|${escapeHtml(payload.twofa)}` : ""}</code>`);
+  }
   if (shownCreds && payload.key) {
     const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
     if (rows.map(splitCredential).some((c) => c?.twofa)) {

@@ -593,6 +593,7 @@ model DigitalAccount {
   variant           ProductVariant  @relation(fields: [variantId], references: [id])
   usernameEncrypted String
   passwordEncrypted String
+  twofaEncrypted    String? // optional TOTP secret (paste at 2fa.live) — AES-GCM
   recoveryEmail     String?
   totpSecretEncrypted String?
   status            InventoryStatus @default(AVAILABLE)

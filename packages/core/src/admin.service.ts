@@ -6,6 +6,7 @@ import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
 import { invalidate, cached } from "./redis.js";
+import { splitCredential, sanitizeCredentialLine } from "./orders/assign.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -330,16 +331,23 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
   for (const raw of rawLines) {
     const line = raw.trim();
     if (!line) continue;
-    const m = line.match(/^(.+?)[\s:|,]+(.+)$/); // "user:pass", "user | pass", "user pass"
-    if (!m) { skipped++; continue; }
-    const username = (m[1] ?? "").trim();
-    const password = (m[2] ?? "").trim();
+    // Shared parser: strips pasted markdown/mailto links and prefers "|" over ":",
+    // so "[a@b.com](mailto:a@b.com)|pw" no longer splits inside "mailto:".
+    const parsed = splitCredential(line) ?? (() => {
+      const t = sanitizeCredentialLine(line);
+      const m = t.match(/^(\S+)\s+(\S+)(?:\s+(\S+))?$/); // "user pass [2fa]"
+      return m?.[1] && m[2] ? { id: m[1], pw: m[2], twofa: m[3] } : null;
+    })();
+    if (!parsed) { skipped++; continue; }
+    const username = parsed.id;
+    const password = parsed.pw;
     if (!username || !password) { skipped++; continue; }
     await prisma.digitalAccount.create({
       data: {
         variantId,
         usernameEncrypted: encryptSecret(username, masterKey),
         passwordEncrypted: encryptSecret(password, masterKey),
+        ...(parsed.twofa ? { twofaEncrypted: encryptSecret(parsed.twofa, masterKey) } : {}),
         status: "AVAILABLE",
         maxSlots: 1,
         usedSlots: 0,
