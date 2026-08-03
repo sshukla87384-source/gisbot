@@ -54,6 +54,7 @@ import {
 import type { Currency } from "@gis/database";
 import {
   PRODUCT_DEEPLINK_PREFIX,
+  cb,
   intArg,
   isCoreError,
   parseCb,
@@ -1096,9 +1097,9 @@ async function sendRevealed(
       shownCreds = true;
       rows.forEach((_, i) => {
         const c = creds[i] as { id: string; pw: string };
-        if (rows.length > 1) lines.push(`<b>${i + 1}.</b>`);
-        lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(c.id)}</code>`);
-        lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(c.pw)}</code>`);
+        if (rows.length > 1) lines.push(`<b>━━ Account ${i + 1} ━━</b>`);
+        lines.push(`👤 <b>ID:</b>  <code>${escapeHtml(c.id)}</code>`);
+        lines.push(`🔐 <b>Password:</b>  <code>${escapeHtml(c.pw)}</code>`);
         if (rows.length > 1 && i < rows.length - 1) lines.push("");
       });
     } else if (rows.length > 1) {
@@ -1117,6 +1118,8 @@ async function sendRevealed(
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
   lines.push("", "Saved in 🔑 My Licenses. Problem? Open a 🎫 Support ticket.");
-  const kb = new InlineKeyboard().text("🏠 Menu", "mnu:home");
+  const kb = new InlineKeyboard()
+    .text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
+    .text("🏠 Menu", "mnu:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }

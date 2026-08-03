@@ -105,13 +105,21 @@ export async function enqueueTelegramDocument(
   filename: string,
   content: string,
   caption: string,
+  buttons?: OutboxButton[],
 ): Promise<void> {
   await getQueue(QUEUE_NAMES.outbox).add("send", {
     telegramId: telegramId.toString(),
     text: caption,
     document: { filename, content },
+    ...(buttons && buttons.length > 0 ? { buttons } : {}),
   } satisfies OutboxJob);
 }
+
+/** Shown under every delivery: jump to orders, or straight back to the shop. */
+export const DELIVERY_BUTTONS: OutboxButton[] = [
+  { text: "📦 View my orders", callbackData: "ord:list:1", style: "primary" },
+  { text: "🛍 Buy more", callbackData: "shp:home:1", style: "success" },
+];
 
 export async function enqueueEmail(job: EmailJob): Promise<void> {
   await getQueue(QUEUE_NAMES.email).add("send", job);

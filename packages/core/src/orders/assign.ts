@@ -218,9 +218,9 @@ export function buildDeliveryText(
       renderedCreds = true;
       rows.forEach((_, i) => {
         const c = creds[i] as { id: string; pw: string };
-        if (rows.length > 1) lines.push(`<b>${i + 1}.</b>`);
-        lines.push(`🆔 <b>ID / Login:</b> <code>${esc(c.id)}</code>`);
-        lines.push(`🔑 <b>Password:</b> <code>${esc(c.pw)}</code>`);
+        if (rows.length > 1) lines.push(`<b>━━ Account ${i + 1} ━━</b>`);
+        lines.push(`👤 <b>ID:</b>  <code>${esc(c.id)}</code>`);
+        lines.push(`🔐 <b>Password:</b>  <code>${esc(c.pw)}</code>`);
         if (rows.length > 1 && i < rows.length - 1) lines.push("");
       });
     } else if (rows.length > 1) {
