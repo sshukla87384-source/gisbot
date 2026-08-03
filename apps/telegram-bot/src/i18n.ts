@@ -1,9 +1,11 @@
 /** Minimal i18n for the customer-facing bot. Falls back to English. */
-export type Locale = "en" | "hi" | "ar" | "zh";
+export type Locale = "en" | "hi" | "ar" | "es" | "pt" | "zh";
 export const LOCALES: Array<{ code: Locale; label: string }> = [
   { code: "en", label: "🇬🇧 English" },
   { code: "hi", label: "🇮🇳 हिन्दी" },
   { code: "ar", label: "🇸🇦 العربية" },
+  { code: "es", label: "🇪🇸 Español" },
+  { code: "pt", label: "🇧🇷 Português" },
   { code: "zh", label: "🇨🇳 中文" },
 ];
 
@@ -37,6 +39,34 @@ const hi: Dict = {
   cur_title: "💱 अपनी मुद्रा चुनें:", cur_done: "✅ मुद्रा {cur} पर सेट हुई।",
   b_currency: "💱 {cur}",
 };
+const es: Dict = {
+  tagline: "Productos digitales · entrega instantánea · mejores precios",
+  hint: "👉 Toca 🛍 Tienda, elige un artículo y pulsa ⚡ Comprar — ¡listo!",
+  welcome: "👋 ¡Bienvenido a {store}, {name}!",
+  b_shopnow: "✨🛍 COMPRAR AHORA 🛍✨",
+  b_shop: "🛍 Tienda", b_categories: "📂 Categorías", b_search: "🔍 Buscar", b_cart: "🛒 Carrito",
+  b_orders: "📦 Pedidos", b_licenses: "🔑 Mis licencias", b_wallet: "💳 Cartera", b_referral: "🎁 Refiere y gana",
+  b_helpsupport: "🎫 Ayuda y soporte",
+  b_support: "🎫 Soporte", b_language: "🌐 Idioma", b_help: "❓ Ayuda", b_developer: "🧑‍💻 API para desarrolladores",
+  b_reseller: "🏪 Panel de revendedor", wallet_orders: "Cartera: {bal} · Pedidos: {n}",
+  lang_title: "🌐 Elige tu idioma:", lang_done: "✅ Idioma actualizado.",
+  cur_title: "💱 Elige tu moneda:", cur_done: "✅ Moneda establecida en {cur}.",
+  b_currency: "💱 {cur}",
+};
+const pt: Dict = {
+  tagline: "Produtos digitais · entrega instantânea · melhores preços",
+  hint: "👉 Toque em 🛍 Loja, escolha um item e toque em ⚡ Comprar — pronto!",
+  welcome: "👋 Bem-vindo à {store}, {name}!",
+  b_shopnow: "✨🛍 COMPRAR AGORA 🛍✨",
+  b_shop: "🛍 Loja", b_categories: "📂 Categorias", b_search: "🔍 Buscar", b_cart: "🛒 Carrinho",
+  b_orders: "📦 Pedidos", b_licenses: "🔑 Minhas licenças", b_wallet: "💳 Carteira", b_referral: "🎁 Indique e ganhe",
+  b_helpsupport: "🎫 Ajuda e suporte",
+  b_support: "🎫 Suporte", b_language: "🌐 Idioma", b_help: "❓ Ajuda", b_developer: "🧑‍💻 API para desenvolvedores",
+  b_reseller: "🏪 Painel do revendedor", wallet_orders: "Carteira: {bal} · Pedidos: {n}",
+  lang_title: "🌐 Escolha seu idioma:", lang_done: "✅ Idioma atualizado.",
+  cur_title: "💱 Escolha sua moeda:", cur_done: "✅ Moeda definida para {cur}.",
+  b_currency: "💱 {cur}",
+};
 const ar: Dict = {
   tagline: "منتجات رقمية · تسليم فوري · أفضل الأسعار",
   hint: "👉 اضغط 🛍 المتجر، اختر منتجًا، ثم ⚡ اشترِ — هذا كل شيء.",
@@ -66,7 +96,7 @@ const zh: Dict = {
   b_currency: "💱 {cur}",
 };
 
-const DICTS: Record<Locale, Dict> = { en, hi, ar, zh };
+const DICTS: Record<Locale, Dict> = { en, hi, ar, es, pt, zh };
 
 export function t(locale: string | null | undefined, key: string, vars: Record<string, string | number> = {}): string {
   const loc = (locale && (locale in DICTS) ? locale : "en") as Locale;

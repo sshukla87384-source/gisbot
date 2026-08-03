@@ -215,15 +215,20 @@ export function splitCredential(line: string): { id: string; pw: string; twofa?:
     return { id, pw, ...(extra ? { twofa: extra } : {}) };
   };
 
+  // "|" is the only separator allowed to contain spaces/colons — it is explicit,
+  // so the admin opted in. Everything else must look unambiguously like a
+  // credential pair: no spaces and no colons in any part. That keeps license
+  // keys ("XKEY-1122, valid till 2027"), prose ("Note: keep this safe") and
+  // URLs ("https://x/y") from ever being split into ID/Password.
   if (t.includes("|")) return build(t.split("|"));
-  if (t.includes(",")) return build(t.split(","));
-  if (t.includes(":")) {
-    const parts = t.split(":");
-    if (parts.length >= 2 && parts.length <= 3 && parts.every((x) => x.trim() !== "" && !/\s/.test(x.trim()))) {
-      return build(parts);
-    }
-    return null;
-  }
+  // For implicit separators the WHOLE line must be whitespace-free and not a
+  // URL, otherwise prose ("Time: 12:30") and links ("https://x/y") get split.
+  const tidy = (parts: string[]): { id: string; pw: string; twofa?: string } | null => {
+    if (/\s/.test(t) || t.includes("://")) return null;
+    return parts.length >= 2 && parts.length <= 3 && parts.every((x) => x !== "") ? build(parts) : null;
+  };
+  if (t.includes(",")) return tidy(t.split(","));
+  if (t.includes(":")) return tidy(t.split(":"));
   return null;
 }
 

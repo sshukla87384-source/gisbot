@@ -64,6 +64,11 @@ const envSchema = z
     // Auto-verification via a READ-ONLY Binance API key (Pay history polling).
     BINANCE_API_KEY: z.string().optional(),
     BINANCE_API_SECRET: z.string().optional(),
+    // ── Auto-translation (product names/descriptions + UI) ──
+    // provider: none | libre | deepl | google   (none = no translation, English shown)
+    TRANSLATE_PROVIDER: z.enum(["none", "libre", "deepl", "google"]).default("none"),
+    TRANSLATE_API_URL: z.string().optional(), // e.g. https://libretranslate.com/translate
+    TRANSLATE_API_KEY: z.string().optional(),
     BINANCE_USDT_INR_RATE: z.coerce.number().positive().default(90), // INR per 1 USDT
     BINANCE_USDT_USD_RATE: z.coerce.number().positive().default(1), // USD per 1 USDT
     // In-bot admin panel: passcode gate + optional telegram-id allowlist.

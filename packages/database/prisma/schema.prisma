@@ -1216,3 +1216,16 @@ model ReplacementRequest {
   @@index([userId])
   @@index([orderItemId])
 }
+
+/// Cache of machine-translated strings so each phrase is paid for once.
+model Translation {
+  id        String   @id @default(cuid())
+  hash      String // sha256 of the source text
+  lang      String // target locale (hi, ar, es, pt, zh…)
+  source    String   @db.Text
+  output    String   @db.Text
+  createdAt DateTime @default(now())
+
+  @@unique([hash, lang])
+  @@index([lang])
+}

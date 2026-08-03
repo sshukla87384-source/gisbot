@@ -1,5 +1,6 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
+import { translateMany } from "../translate.service.js";
 import { cached } from "../redis.js";
 import { effectivePriceMinor, isSaleActive } from "../pricing.js";
 
@@ -129,10 +130,12 @@ export async function listProducts(opts: {
   pageSize?: number;
   userId?: string;
   channel?: "DIRECT" | "API";
+  locale?: string;
 }): Promise<Paged<ProductListItem>> {
   const { categoryId, search, featuredOnly, currency, page, userId, channel = "DIRECT" } = opts;
+  const locale = opts.locale ?? "en";
   const size = opts.pageSize ?? PAGE_SIZE;
-  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}:${userId ?? "-"}:${channel}`;
+  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}:${userId ?? "-"}:${channel}:${locale}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
@@ -189,6 +192,10 @@ export async function listProducts(opts: {
         iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),
       });
     }
+    if (locale !== "en" && items.length > 0) {
+      const names = await translateMany(items.map((i) => i.name), locale);
+      items.forEach((it, i) => { it.name = names[i] ?? it.name; });
+    }
     return { items, page, pages, total };
   });
 }
@@ -210,7 +217,7 @@ async function resolveUserPrice(userId: string, productId: string, channel: "DIR
   return m.get(productId) ?? null;
 }
 
-export async function getProductView(productId: string, currency: Currency, userId?: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<ProductView> {
+export async function getProductView(productId: string, currency: Currency, userId?: string, channel: "DIRECT" | "API" = "DIRECT", locale = "en"): Promise<ProductView> {
   const p = await prisma.product.findFirst({
     where: { id: productId, status: "ACTIVE", deletedAt: null },
     include: {
@@ -238,11 +245,12 @@ export async function getProductView(productId: string, currency: Currency, user
       };
     }),
   );
+  const [trName, trDesc] = locale === "en" ? [p.name, p.description ?? ""] : await translateMany([p.name, p.description], locale);
   return {
     id: p.id,
-    name: p.name,
+    name: trName || p.name,
     nameHtml: p.nameHtml,
-    description: p.description,
+    description: locale === "en" ? p.description : (trDesc || p.description),
     descriptionHtml: p.descriptionHtml,
     imageUrl: p.imageUrl,
     iconEmoji: p.iconEmoji,

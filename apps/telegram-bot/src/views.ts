@@ -46,7 +46,7 @@ export async function menuView(user: BotUser): Promise<View> {
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
-  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id });
+  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -82,7 +82,7 @@ export async function productListView(
   categoryId: string,
   page: number,
 ): Promise<View> {
-  const result = await listProducts({ categoryId, currency: user.currency as Currency, page, userId: user.id });
+  const result = await listProducts({ categoryId, currency: user.currency as Currency, page, userId: user.id, locale: user.locale });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -98,7 +98,7 @@ export async function productListView(
 }
 
 export async function searchResultsView(user: BotUser, query: string, page: number): Promise<View> {
-  const result = await listProducts({ search: query, currency: user.currency as Currency, page, userId: user.id });
+  const result = await listProducts({ search: query, currency: user.currency as Currency, page, userId: user.id, locale: user.locale });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : `from ${fmt(p.fromPriceMinor, user.currency)}`;
@@ -129,7 +129,10 @@ function timeLeft(until: Date): string {
 }
 
 export async function productView(user: BotUser, productId: string): Promise<View> {
-  const p = await getProductView(productId, user.currency as Currency, user.id);
+  const p = await getProductView(productId, user.currency as Currency, user.id, "DIRECT", user.locale);
+  // When the text was machine-translated, show the translated plain text rather
+  // than the stored premium-emoji HTML (which is still the original language).
+  const translated = (user.locale ?? "en") !== "en";
   const UNLIMITED = 1_000_000;
   const priced = p.variants.filter((v) => v.priceMinor !== null);
   const cheapest = priced.reduce<{ now: number; was: number | null } | null>((acc, v) => {
@@ -148,7 +151,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     header(p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
     "",
     `📦 ${bold("Product")}`,
-    `${p.iconEmoji ? p.iconEmoji + " " : ""}${p.nameHtml ?? escapeHtml(p.name)}`,
+    `${p.iconEmoji ? p.iconEmoji + " " : ""}${translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name))}`,
     "",
     `💎 ${bold("Price")}`,
     priceStr,
@@ -159,7 +162,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     ...(user.isVip ? [`${e("vip")} <b>VIP price applied</b>`] : []),
     (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked) ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
-    p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : ""),
+    translated ? (p.description ? escapeHtml(p.description) : "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : "")),
     HR,
   ].filter((l) => l !== "");
 

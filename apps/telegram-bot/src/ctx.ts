@@ -70,6 +70,8 @@ export interface SessionData {
     | "replace_proof"
     | "admin_reject_note"
     | "admin_p_warrantydays"
+    | "admin_tr_key"
+    | "admin_tr_url"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -77,6 +79,9 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Auto-translate provider being configured. */
+  trProvider?: string;
+  trKey?: string;
   /** Order item the customer is raising a replacement claim on. */
   replaceItemId?: string;
   /** Reason text captured before the screenshot step. */

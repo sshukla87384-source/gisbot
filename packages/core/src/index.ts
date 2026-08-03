@@ -2,6 +2,7 @@ export { getRedis, cached, invalidate } from "./redis.js";
 export * from "./queues.js";
 export * from "./users/user.service.js";
 export * from "./fx.js";
+export * from "./translate.service.js";
 export * from "./catalog/catalog.service.js";
 export * from "./cart/cart.service.js";
 export * from "./wallet/wallet.service.js";

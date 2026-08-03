@@ -16,6 +16,8 @@ import {
   setProductFulfillmentMode,
   setProductPasswordChange,
   setProductWarranty,
+  setTranslateCreds,
+  getTranslateProvider,
   setProductWarrantyDays,
   listReplacementRequests,
   getReplacementRequest,
@@ -234,6 +236,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
+      [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
@@ -1028,6 +1031,40 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_reject_note";
       await askStep(ctx, "❌ Send a short <b>reason</b> the customer will see, or <code>-</code> to decline without a note:");
       return;
+    case "trcfg": {
+      const cur = await getTranslateProvider();
+      const kb = new InlineKeyboard()
+        .add(sbtn(`${cur === "libre" ? "✅ " : ""}LibreTranslate`, cb("adm", "trset", "libre"), "primary")).row()
+        .add(sbtn(`${cur === "google" ? "✅ " : ""}Google Translate`, cb("adm", "trset", "google"), "primary")).row()
+        .add(sbtn(`${cur === "deepl" ? "✅ " : ""}DeepL`, cb("adm", "trset", "deepl"), "primary")).row()
+        .add(sbtn(`${cur === "none" ? "✅ " : ""}Off (English only)`, cb("adm", "trset", "none"), "danger")).row()
+        .text("◀️ Back", cb("adm", "m_content"));
+      await show(ctx, [
+        "🌐 <b>Auto-Translate</b>",
+        `Current: <b>${cur}</b>`,
+        "",
+        "When a customer picks a language, product names and descriptions are translated automatically and cached, so each phrase is only translated once.",
+        "",
+        "Pick a provider — you'll be asked for the API key next.",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "trset": {
+      if (id === "none") {
+        await setTranslateCreds("none", undefined, undefined);
+        await ctx.reply("🌐 Auto-translate is <b>off</b> — everyone sees the original English text.", { parse_mode: "HTML" });
+        return sendPanel(ctx, false);
+      }
+      ctx.session.trProvider = id;
+      ctx.session.awaiting = "admin_tr_key";
+      const hint = id === "libre"
+        ? "LibreTranslate: send your API key, or <code>-</code> if your instance needs none."
+        : id === "google"
+          ? "Google Translate: send your Cloud Translation API key."
+          : "DeepL: send your DeepL Auth Key.";
+      await askStep(ctx, `🌐 <b>${id}</b>\n${hint}`);
+      return;
+    }
     case "deliver": return manualDeliverView(ctx, id);
     case "dlv":
       ctx.session.admManualItemId = id;
@@ -1681,6 +1718,27 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_tr_key") {
+    const provider = ctx.session.trProvider ?? "libre";
+    ctx.session.trProvider = undefined;
+    const key = text.trim() === "-" ? undefined : text.trim();
+    ctx.session.awaiting = "admin_tr_url";
+    ctx.session.trKey = key;
+    await askStep(ctx, "🌐 Send the API <b>endpoint URL</b>, or <code>-</code> to use the provider default:");
+    ctx.session.trProvider = provider;
+    return true;
+  }
+  if (awaiting === "admin_tr_url") {
+    const provider = ctx.session.trProvider ?? "libre";
+    const key = ctx.session.trKey;
+    ctx.session.trProvider = undefined;
+    ctx.session.trKey = undefined;
+    const url = text.trim() === "-" ? undefined : text.trim();
+    await setTranslateCreds(provider, url, key);
+    await ctx.reply(`✅ Auto-translate set to <b>${provider}</b>. Product names now follow each customer's language.`, { parse_mode: "HTML" });
+    await sendPanel(ctx, false);
+    return true;
+  }
   if (awaiting === "admin_p_warrantydays") {
     const pid = ctx.session.admProductId ?? "";
     const d = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
