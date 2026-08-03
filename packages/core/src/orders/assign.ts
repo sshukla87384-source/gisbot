@@ -172,6 +172,31 @@ export interface DeliveryPayload {
 }
 
 /** HTML delivery message — same shape the bot renders (Bot UX doc §6). */
+/**
+ * Split one delivered line into an id/password pair when it looks like one
+ * ("user | pass", "user:pass"). License keys are left untouched — note that
+ * "-" is never treated as a separator because keys look like XXXX-XXXX-XXXX.
+ */
+export function splitCredential(line: string): { id: string; pw: string } | null {
+  const t = line.trim();
+  if (!t) return null;
+  const bar = t.indexOf("|");
+  if (bar > 0) {
+    const id = t.slice(0, bar).trim();
+    const pw = t.slice(bar + 1).trim();
+    if (id && pw) return { id, pw };
+    return null;
+  }
+  // exactly one colon, and neither side contains spaces → user:pass
+  const parts = t.split(":");
+  if (parts.length === 2) {
+    const id = (parts[0] ?? "").trim();
+    const pw = (parts[1] ?? "").trim();
+    if (id && pw && !/\s/.test(id) && !/\s/.test(pw)) return { id, pw };
+  }
+  return null;
+}
+
 export function buildDeliveryText(
   productName: string,
   variantName: string,
@@ -182,10 +207,32 @@ export function buildDeliveryText(
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(variantName)}`;
   const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b>${vn}`, ""];
-  if (payload.key) lines.push(`🔑 <b>Key:</b> <code>${esc(payload.key)}</code>`);
+
+  let renderedCreds = false;
+  if (payload.key) {
+    // One delivered blob may hold several lines (multi-quantity or an account list).
+    const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+    const creds = rows.map(splitCredential);
+    const allCreds = rows.length > 0 && creds.every((c) => c !== null);
+    if (allCreds) {
+      renderedCreds = true;
+      rows.forEach((_, i) => {
+        const c = creds[i] as { id: string; pw: string };
+        if (rows.length > 1) lines.push(`<b>${i + 1}.</b>`);
+        lines.push(`🆔 <b>ID / Login:</b> <code>${esc(c.id)}</code>`);
+        lines.push(`🔑 <b>Password:</b> <code>${esc(c.pw)}</code>`);
+        if (rows.length > 1 && i < rows.length - 1) lines.push("");
+      });
+    } else if (rows.length > 1) {
+      lines.push("🔑 <b>Your keys:</b>");
+      for (const r of rows) lines.push(`<code>${esc(r)}</code>`);
+    } else {
+      lines.push(`🔑 <b>Key:</b> <code>${esc(payload.key)}</code>`);
+    }
+  }
   if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${esc(payload.username)}</code>`);
   if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${esc(payload.password)}</code>`);
-  if (payload.username) {
+  if (payload.username || renderedCreds) {
     lines.push("", "ℹ️ Tap the ID or Password to copy it.");
     lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
   }
@@ -233,7 +280,23 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(it.variantName)}`;
     out.push(`<b>${i + 1}.</b> 📦 <b>${esc(it.productName)}</b>${vn}`);
     const p = it.payload;
-    if (p.key) out.push(`   🔑 Key: <code>${esc(p.key)}</code>`);
+    if (p.key) {
+      const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+      const creds = rows.map(splitCredential);
+      if (rows.length > 0 && creds.every((c) => c !== null)) {
+        rows.forEach((_, k) => {
+          const c = creds[k] as { id: string; pw: string };
+          if (rows.length > 1) out.push(`   <b>${k + 1})</b>`);
+          out.push(`   🆔 ID: <code>${esc(c.id)}</code>`);
+          out.push(`   🔑 Password: <code>${esc(c.pw)}</code>`);
+        });
+        out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
+      } else if (rows.length > 1) {
+        for (const r of rows) out.push(`   🔑 <code>${esc(r)}</code>`);
+      } else {
+        out.push(`   🔑 Key: <code>${esc(p.key)}</code>`);
+      }
+    }
     if (p.username) out.push(`   🆔 ID: <code>${esc(p.username)}</code>`);
     if (p.password) out.push(`   🔑 Password: <code>${esc(p.password)}</code>`);
     if (p.password) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
@@ -254,7 +317,19 @@ export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): s
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
     out.push(`${i + 1}) ${it.productName}${vn}`);
     const p = it.payload;
-    if (p.key) out.push(`   Key: ${p.key}`);
+    if (p.key) {
+      const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+      const creds = rows.map(splitCredential);
+      if (rows.length > 0 && creds.every((c) => c !== null)) {
+        rows.forEach((_, k) => {
+          const c = creds[k] as { id: string; pw: string };
+          out.push(`   ${rows.length > 1 ? `${k + 1}) ` : ""}ID: ${c.id}`);
+          out.push(`   ${rows.length > 1 ? "   " : ""}Password: ${c.pw}`);
+        });
+      } else {
+        for (const r of rows) out.push(`   Key: ${r}`);
+      }
+    }
     if (p.username) out.push(`   Login: ${p.username}`);
     if (p.password) out.push(`   Password: ${p.password}`);
     if (p.expiresAt) out.push(`   Valid until: ${p.expiresAt.slice(0, 10)}`);

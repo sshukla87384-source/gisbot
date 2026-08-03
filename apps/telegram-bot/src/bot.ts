@@ -33,6 +33,7 @@ import {
   removeItem,
   resolveTelegramUser,
   revealDelivery,
+  splitCredential,
   revealOrderDeliveries,
   setUserCurrency,
   setUserLocale,
@@ -1087,10 +1088,29 @@ async function sendRevealed(
 ): Promise<void> {
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(variantName)}`;
   const lines = [`📦 <b>${escapeHtml(productName)}</b>${vn}`, ""];
-  if (payload.key) lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
+  let shownCreds = false;
+  if (payload.key) {
+    const rows = payload.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+    const creds = rows.map(splitCredential);
+    if (rows.length > 0 && creds.every((c) => c !== null)) {
+      shownCreds = true;
+      rows.forEach((_, i) => {
+        const c = creds[i] as { id: string; pw: string };
+        if (rows.length > 1) lines.push(`<b>${i + 1}.</b>`);
+        lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(c.id)}</code>`);
+        lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(c.pw)}</code>`);
+        if (rows.length > 1 && i < rows.length - 1) lines.push("");
+      });
+    } else if (rows.length > 1) {
+      lines.push("🔑 <b>Your keys:</b>");
+      for (const r of rows) lines.push(`<code>${escapeHtml(r)}</code>`);
+    } else {
+      lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
+    }
+  }
   if (payload.username) lines.push(`🆔 <b>ID / Login:</b> <code>${escapeHtml(payload.username)}</code>`);
   if (payload.password) lines.push(`🔑 <b>Password:</b> <code>${escapeHtml(payload.password)}</code>`);
-  if (payload.username) {
+  if (payload.username || shownCreds) {
     lines.push("", "ℹ️ Tap the ID or Password to copy it.");
     lines.push(allowPwChange ? "🔓 This account is yours — you're welcome to change the password." : "🔒 Please do <b>not</b> change the account password.");
   }

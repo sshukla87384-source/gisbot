@@ -342,7 +342,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
 
   const tgId = item.order.user.telegramId;
   if (tgId !== null) {
-    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide));
+    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange));
     await enqueueTelegramMessage(tgId, thankYouMessage(item.order.user, loadConfig().STORE_NAME));
     const nudge = referralNudgeMessage(item.order.user.referralCode, loadConfig().BOT_USERNAME);
     if (nudge) await enqueueTelegramMessage(tgId, nudge);
