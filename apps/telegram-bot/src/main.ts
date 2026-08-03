@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { loadConfig } from "@gis/config";
 import { ensureDbObjects, prisma } from "@gis/database";
-import { getRedis, getCustomEmojiRegistry } from "@gis/core";
+import { getRedis, getCustomEmojiRegistry, primeFxRate } from "@gis/core";
 import { webhookCallback } from "grammy";
 import { createBot } from "./bot.js";
 import { setDynamicEmojis } from "./emoji.js";
@@ -13,6 +13,8 @@ async function main(): Promise<void> {
   const bot = createBot();
   // Load admin-registered custom emoji so e() renders them across the UI.
   try { setDynamicEmojis(await getCustomEmojiRegistry()); } catch { /* non-fatal */ }
+  // Load the admin-set INR<->USDT rate before serving any request.
+  try { await primeFxRate(); } catch { /* falls back to the default */ }
   await bot.api.setMyCommands([
     { command: "start", description: "Open the store" },
     { command: "shop", description: "Browse products" },

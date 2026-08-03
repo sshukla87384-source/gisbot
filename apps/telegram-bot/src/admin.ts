@@ -101,6 +101,8 @@ import {
   verifyBinanceByTxnId,
   WIZARD_TYPES,
   announcePriceChange,
+  getInrPerUsdt,
+  setInrPerUsdt,
   repairBrokenAccounts,
   announceCatalogue,
 } from "@gis/core";
@@ -230,6 +232,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
+      [["💱 INR ⇄ USD Rate", cb("adm", "fxrate"), "primary"]],
     ] },
     m_mkt: { title: "📣 <b>Marketing</b>", subtitle: "Reach & reward customers", rows: [
       [["📢 Broadcast", cb("adm", "bc"), "primary"], ["📣 Groups", cb("adm", "groups"), "primary"]],
@@ -1136,6 +1139,26 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("❌ Rejected — the customer has been told.");
       return;
     }
+    case "fxrate": {
+      const rate = await getInrPerUsdt();
+      ctx.session.awaiting = "admin_fx_rate";
+      await askStep(ctx, [
+        "💱 <b>INR ⇄ USD / USDT rate</b>",
+        "",
+        `Current: <b>${rate} INR = 1 USD (USDT)</b>`,
+        "",
+        "This one rate is used everywhere:",
+        "• wallet deductions when prices and wallet currency differ",
+        "• crediting UPI top-ups in USD",
+        "• the exact USDT amount quoted for Binance",
+        "• showing a USD price in ₹ (and vice-versa)",
+        "",
+        `Examples at ${rate}: ₹${rate} → $1.00 · $3 → ₹${rate * 3}`,
+        "",
+        "Send the new rate — how many <b>INR equal 1 USD</b> (e.g. <code>100</code>):",
+      ].join("\n"));
+      return;
+    }
     case "deliver": return manualDeliverView(ctx, id);
     case "dlv":
       ctx.session.admManualItemId = id;
@@ -1843,6 +1866,28 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const url = text.trim() === "-" ? undefined : text.trim();
     await setTranslateCreds(provider, url, key);
     await ctx.reply(`✅ Auto-translate set to <b>${provider}</b>. Product names now follow each customer's language.`, { parse_mode: "HTML" });
+    await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_fx_rate") {
+    const v = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(v) || v <= 0) {
+      ctx.session.awaiting = "admin_fx_rate";
+      await askStep(ctx, "Please send a positive number, e.g. <code>100</code>");
+      return true;
+    }
+    await setInrPerUsdt(v);
+    await ctx.reply(
+      [
+        `✅ Rate set: <b>${v} INR = 1 USD (USDT)</b>`,
+        "",
+        `₹${v} → <b>$1.00</b>`,
+        `$3.00 → <b>₹${(v * 3).toFixed(2)}</b>`,
+        "",
+        "Applies immediately to wallet deductions, UPI top-up credits, Binance quotes and price display.",
+      ].join("\n"),
+      { parse_mode: "HTML" },
+    );
     await sendPanel(ctx, false);
     return true;
   }

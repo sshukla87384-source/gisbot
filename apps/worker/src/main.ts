@@ -6,6 +6,7 @@ import {
   type EmailJob,
   type FulfillmentJob,
   type OutboxJob,
+  primeFxRate,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -23,6 +24,7 @@ import { startWebhookServer } from "./webhook-server.js";
  * - cron sweeps (reservations, holds, low stock, reconciliation)
  */
 async function main(): Promise<void> {
+  try { await primeFxRate(); } catch { /* default rate */ }
   const config = loadConfig();
   await ensureDbObjects();
 

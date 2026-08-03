@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import { loadConfig, requireJwtSecret } from "@gis/config";
 import { ensureDbObjects } from "@gis/database";
+import { primeFxRate } from "@gis/core";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
@@ -13,6 +14,8 @@ async function bootstrap(): Promise<void> {
   const config = loadConfig();
   requireJwtSecret(); // fail fast if missing
   await ensureDbObjects();
+  // Load + keep fresh the admin-set INR<->USDT rate.
+  await primeFxRate().catch(() => undefined);
 
   const app = await NestFactory.create(AppModule, { rawBody: true, logger: ["error", "warn", "log"] });
   app.setGlobalPrefix("api/v1");
