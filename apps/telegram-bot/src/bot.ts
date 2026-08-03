@@ -368,10 +368,35 @@ export function createBot(): Bot<Ctx> {
     if (awaiting === "binance_txnid") {
       const orderId = ctx.session.binanceOrderId ?? "";
       const txn = ctx.message.text.trim().slice(0, 128);
+      if (!orderId) {
+        return ctx.reply("That checkout expired — please start again from your 🛒 Cart.");
+      }
+      // Obvious non-IDs (a stray word, a menu tap) shouldn't be sent to admins.
+      if (txn.length < 6) {
+        ctx.session.awaiting = "binance_txnid";
+        return ctx.reply(
+          "🔎 That doesn't look like a Binance <b>Order ID</b>. Open the payment in Binance, copy the Order ID from the receipt and paste it here.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", `ord:binancehelp:${orderId}`) },
+        );
+      }
+      await ctx.reply("🔎 Verifying your payment…");
       const r = await verifyBinanceByTxnId(orderId, txn, ctx.user.id);
       if (r.ok) {
         ctx.session.binanceOrderId = undefined;
-        return ctx.reply("✅ Payment verified! Your order has been delivered. Check 📦 My Orders.");
+        return ctx.reply(
+          [
+            "✅ <b>Payment verified!</b>",
+            "",
+            "🚀 Your order has been <b>delivered</b> — check the message above.",
+            "💾 It is also saved in 📦 My Orders.",
+          ].join("\n"),
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("📦 View my orders", cb("ord", "list", 1))
+              .text("🛍 Buy more", cb("shp", "home", 1)),
+          },
+        );
       }
       // Not auto-verified → send admins an instant approve/reject card (fallback: ticket).
       const notified = await notifyAdminsForApproval(ctx, orderId, "Binance", txn);
@@ -390,8 +415,16 @@ export function createBot(): Bot<Ctx> {
             : r.reason === "WRONG_USER"
               ? "⚠️ That order doesn’t belong to your account. "
               : "";
+      ctx.session.awaiting = "binance_txnid"; // let them paste a corrected ID
       return ctx.reply(
-        `${note}We’ve logged your Transaction ID and our team will verify and deliver shortly. You’ll get a message here once it’s confirmed.`,
+        [
+          note ? `${note}` : "⏳ <b>We couldn't auto-verify that yet.</b>",
+          "",
+          "🧑‍💼 Our team has been notified and will verify and deliver shortly — you'll get a message here the moment it's confirmed.",
+          "",
+          "💡 Double-checked your receipt? Paste the correct Order ID here and we'll try again instantly.",
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
       );
     }
     if (awaiting === "buy_qty") {
@@ -739,6 +772,8 @@ export function createBot(): Bot<Ctx> {
           if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
           const bz = await createBinanceManualCheckout(user.id);
           ctx.session.binanceOrderId = bz.orderId;
+          // Arm the paste right away: the next message they send is treated as the Order ID.
+          ctx.session.awaiting = "binance_txnid";
           await ctx.editMessageText(
             [
               `🟡 <b>Pay via Binance Pay</b>`,
@@ -758,7 +793,11 @@ export function createBot(): Bot<Ctx> {
               "",
               "⚠️ Send the <b>exact</b> amount. A different amount cannot be matched automatically.",
               "",
-              "✅ After paying, tap <b>I've paid</b> and send your Binance <b>Order ID</b> from the receipt — we verify and deliver instantly.",
+              "✅ <b>After paying, just paste your Binance Order ID here</b> — we verify it and deliver instantly. No extra taps needed.",
+              "",
+              "<i>The Order ID is on your Binance payment receipt.</i>",
+              "",
+              "⚠️ Problem or error? Tap <b>I have paid — need help</b> and our team takes over.",
             ].join("\n"),
             {
               parse_mode: "HTML",
@@ -767,7 +806,7 @@ export function createBot(): Bot<Ctx> {
                 .row()
                 .copyText(`📋 Copy Binance Pay ID — ${bz.binanceUid}`, String(bz.binanceUid))
                 .row()
-                .text("✅ I've paid — enter Order ID", "ord:binancetxn")
+                .text("⚠️ I have paid — need help", `ord:binancehelp:${bz.orderId}`)
                 .row()
                 .text("🏠 Menu", "mnu:home"),
             },
@@ -783,6 +822,26 @@ export function createBot(): Bot<Ctx> {
           ctx.session.awaiting = "binance_txnid";
           await ctx.reply(
             "🔎 Paste your Binance <b>Order ID</b> (open the payment in Binance → it’s the ID on the receipt):",
+            { parse_mode: "HTML" },
+          );
+          break;
+        }
+        case "ord:binancehelp": {
+          await ctx.answerCallbackQuery();
+          const oid = args[0] ?? ctx.session.binanceOrderId ?? "";
+          const notified = await notifyAdminsForApproval(ctx, oid, "Binance", "customer reported an issue").catch(() => 0);
+          if (notified === 0) {
+            await createTicket(user.id, "PAYMENT_ISSUE", `Binance payment issue on order ${oid} — customer tapped "need help".`).catch(() => undefined);
+          }
+          ctx.session.awaiting = "binance_txnid"; // they can still paste the ID
+          await ctx.reply(
+            [
+              "🆘 <b>Our team has been notified</b>",
+              "",
+              "We're checking your payment now and will deliver here as soon as it's confirmed. 🙏",
+              "",
+              "💡 If you have the Binance <b>Order ID</b> from your receipt, paste it here — that usually verifies instantly.",
+            ].join("\n"),
             { parse_mode: "HTML" },
           );
           break;
