@@ -164,23 +164,19 @@ export async function listProducts(opts: {
       const onSale = isSaleActive(p);
       const ov = overrideMap.get(p.id);
       const priced = ov !== undefined ? [ov] : p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
-      let inStock = false;
-      for (const v of p.variants) {
-        if ((await variantStock(v.id, p.type, p)) > 0) {
-          inStock = true;
-          break;
-        }
-      }
-      const variantRows = [];
-      for (const v of p.variants) {
-        const base = v.prices[0]?.amountMinor ?? null;
-        variantRows.push({
-          id: v.id,
-          name: v.name,
-          priceMinor: ov ?? (base === null ? null : effectivePriceMinor(base, p)),
-          stock: await variantStock(v.id, p.type, p),
-        });
-      }
+      // One stock lookup per variant, reused for inStock and the variant rows.
+      const variantRows = await Promise.all(
+        p.variants.map(async (v) => {
+          const base = v.prices[0]?.amountMinor ?? null;
+          return {
+            id: v.id,
+            name: v.name,
+            priceMinor: ov ?? (base === null ? null : effectivePriceMinor(base, p)),
+            stock: await variantStock(v.id, p.type, p),
+          };
+        }),
+      );
+      const inStock = variantRows.some((v) => v.stock > 0);
       items.push({
         id: p.id,
         name: p.name,
@@ -229,18 +225,19 @@ export async function getProductView(productId: string, currency: Currency, user
 
   const onSale = isSaleActive(p);
   const override = userId ? await resolveUserPrice(userId, p.id, channel) : null;
-  const variants: VariantView[] = [];
-  for (const v of p.variants) {
-    const base = v.prices[0]?.amountMinor ?? null;
-    const eff = override ?? (base === null ? null : effectivePriceMinor(base, p));
-    variants.push({
-      id: v.id,
-      name: v.name,
-      priceMinor: eff,
-      originalPriceMinor: override !== null && base !== null ? base : (onSale && base !== null ? base : null),
-      stock: await variantStock(v.id, p.type, p),
-    });
-  }
+  const variants: VariantView[] = await Promise.all(
+    p.variants.map(async (v) => {
+      const base = v.prices[0]?.amountMinor ?? null;
+      const eff = override ?? (base === null ? null : effectivePriceMinor(base, p));
+      return {
+        id: v.id,
+        name: v.name,
+        priceMinor: eff,
+        originalPriceMinor: override !== null && base !== null ? base : (onSale && base !== null ? base : null),
+        stock: await variantStock(v.id, p.type, p),
+      };
+    }),
+  );
   return {
     id: p.id,
     name: p.name,

@@ -250,7 +250,11 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
   const opts = { parse_mode: "HTML" as const, reply_markup: kb };
   if (edit && ctx.callbackQuery?.message) {
-    try { await ctx.editMessageText(text, opts); return; } catch { /* fall through */ }
+    try { await ctx.editMessageText(text, opts); return; } catch (err) {
+      // "message is not modified" just means the view is already current —
+      // re-sending it would spam a duplicate panel.
+      if (String((err as { description?: string })?.description ?? err).includes("not modified")) return;
+    }
   }
   await ctx.reply(text, opts);
 }
