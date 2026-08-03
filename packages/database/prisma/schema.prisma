@@ -269,6 +269,7 @@ model User {
   refundsReviewed Refund[]        @relation("RefundReviewer")
   mediaUploaded   Media[]
   productsApproved Product[]      @relation("ProductApprover")
+  replacementRequests ReplacementRequest[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -492,6 +493,8 @@ model Product {
   buyButtonText   String? // custom Buy button label for this product
   buttonStyle     String? // button colour: success | primary | danger (list + buy)
   priceLocked     Boolean @default(false) // admin set a custom price — sync won't overwrite it
+  warranty        Boolean @default(false) // does this product come with a replacement warranty?
+  warrantyDays    Int?    // replacement window in days (null = no time limit while warranty is on)
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
   saleEndsAt      DateTime?
@@ -734,6 +737,7 @@ model OrderItem {
   downloadGrant   DownloadGrant?
   subscription    Subscription?
   commissionEntry CommissionEntry?
+  replacements    ReplacementRequest[]
   createdAt       DateTime        @default(now())
 
   @@index([orderId])
@@ -1184,4 +1188,30 @@ model FxRate {
 
   @@unique([base, quote, fetchedAt])
   @@index([base, quote, fetchedAt(sort: Desc)])
+}
+
+enum ReplacementStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// A buyer-raised request to replace a faulty delivered item (warranty claim).
+model ReplacementRequest {
+  id          String            @id @default(cuid())
+  orderItemId String
+  orderItem   OrderItem         @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User              @relation(fields: [userId], references: [id])
+  reason      String
+  proofFileId String? // Telegram file_id of the screenshot the buyer submitted
+  status      ReplacementStatus @default(PENDING)
+  adminNote   String?
+  reviewedAt  DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([status, createdAt])
+  @@index([userId])
+  @@index([orderItemId])
 }

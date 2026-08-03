@@ -15,6 +15,12 @@ import {
   setProductPublicPrice,
   setProductFulfillmentMode,
   setProductPasswordChange,
+  setProductWarranty,
+  setProductWarrantyDays,
+  listReplacementRequests,
+  getReplacementRequest,
+  approveReplacement,
+  rejectReplacement,
   listPendingManualItems,
   manualFulfillItem,
   type PriceChannel,
@@ -209,6 +215,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     ] },
     m_orders: { title: "🧾 <b>Orders</b>", subtitle: "Review and fulfil orders", rows: [
       [["🧾 Pending", cb("adm", "orders"), "primary"], ["🗂 Recent", cb("adm", "recent"), "primary"]],
+      [["🔄 Replacement Requests", cb("adm", "reps"), "success"]],
     ] },
     m_stats: { title: "📊 <b>Stats</b>", subtitle: "Your store at a glance", rows: [
       [["📊 Dashboard", cb("adm", "stats"), "primary"], ["📈 Sales", cb("adm", "sales"), "primary"]],
@@ -356,6 +363,8 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
   else kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
   if (p.type === "DIGITAL_ACCOUNT") kb.text(`🔐 Password change: ${p.allowPwChange ? "✅ Allowed → disallow" : "🚫 Not allowed → allow"}`, cb("adm", "ppw", p.id)).row();
+  kb.add(sbtn(`🛡 Warranty: ${p.warranty ? `✅ ON${p.warrantyDays ? ` (${p.warrantyDays}d)` : " (no limit)"} → turn OFF` : "🚫 OFF → turn ON"}`, cb("adm", "pwar", p.id), p.warranty ? "success" : "danger")).row();
+  if (p.warranty) kb.text(`⏱ Warranty days${p.warrantyDays ? `: ${p.warrantyDays}` : ": unlimited"}`, cb("adm", "pwardays", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
@@ -363,7 +372,8 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const deliv = p.supplierId ? "🤖 Auto (supplier)" : p.fulfillmentMode === "AUTOMATIC" ? "⚡ Auto (instant)" : "🕐 Manual";
-  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible</b>" : "🙈 <b>Hidden</b>"} · ${p.status} · ${deliv}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}`;
+  const war = p.warranty ? `🛡 Warranty${p.warrantyDays ? ` ${p.warrantyDays}d` : ""}` : "🚫 No warranty";
+  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible</b>" : "🙈 <b>Hidden</b>"} · ${p.status} · ${deliv}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""} · ${war}`;
   await show(ctx, text, kb, true);
 }
 
@@ -679,6 +689,38 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
   ].join("\n"), kb, true);
 }
 
+async function replacementsListView(ctx: Ctx): Promise<void> {
+  const rows = await listReplacementRequests("PENDING", 15);
+  const kb = new InlineKeyboard();
+  for (const r of rows) kb.text(`🔄 ${r.who} · ${r.label.slice(0, 22)} · ${r.orderNumber}`, cb("adm", "rrview", r.id)).row();
+  kb.text("◀️ Back", cb("adm", "m_orders"));
+  await show(ctx, rows.length
+    ? `🔄 <b>Replacement requests</b> (${rows.length} pending)\nTap one to review the screenshot and approve.`
+    : "🔄 <b>Replacement requests</b>\n\n✅ Nothing pending — all caught up.", kb, true);
+}
+
+async function replacementDetailView(ctx: Ctx, id: string): Promise<void> {
+  const r = await getReplacementRequest(id);
+  if (!r) { await ctx.reply("Request not found."); return replacementsListView(ctx); }
+  const kb = new InlineKeyboard();
+  if (r.proofFileId) kb.add(sbtn("📷 View screenshot", cb("adm", "rrpic", r.id), "primary")).row();
+  if (r.status === "PENDING") {
+    kb.add(sbtn("✅ Approve & replace", cb("adm", "rrok", r.id), "success")).row();
+    kb.add(sbtn("❌ Reject", cb("adm", "rrno", r.id), "danger")).row();
+  }
+  kb.text("◀️ Back", cb("adm", "reps"));
+  await show(ctx, [
+    `🔄 <b>Replacement request</b>`,
+    `👤 ${escapeHtml(r.who)}  🆔 <code>${r.telegramId || "—"}</code>`,
+    `📦 ${escapeHtml(r.label)}`,
+    `🧾 ${r.orderNumber}`,
+    `📌 Status: <b>${r.status}</b>`,
+    "",
+    `💬 ${escapeHtml(r.reason)}`,
+    r.proofFileId ? "" : "\n⚠️ No screenshot was submitted.",
+  ].join("\n"), kb, true);
+}
+
 async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void> {
   const prods = await listSupplierProducts(supplierId, 30);
   const kb = new InlineKeyboard();
@@ -951,6 +993,37 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(!cur ? "🔓 Customers can now change this account's password." : "🔒 Customers are told not to change this account's password.");
       return productView(ctx, id);
     }
+    case "pwar": {
+      const b = await getProductBriefById(id);
+      const cur = b?.warranty ?? false;
+      await setProductWarranty(id, !cur);
+      await ctx.reply(!cur ? "🛡 Warranty is ON — buyers can request a replacement for this product." : "🚫 Warranty is OFF — replacement requests will be refused for this product.");
+      return productView(ctx, id);
+    }
+    case "pwardays":
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_warrantydays";
+      await askStep(ctx, "⏱ Send the <b>replacement window in days</b> (e.g. <code>7</code>), or <code>0</code> for no time limit:");
+      return;
+    case "reps": return replacementsListView(ctx);
+    case "rrview": return replacementDetailView(ctx, id);
+    case "rrpic": {
+      const r = await getReplacementRequest(id);
+      if (!r?.proofFileId) { await ctx.reply("No screenshot on this request."); return; }
+      await ctx.replyWithPhoto(r.proofFileId, { caption: `📷 Proof — ${escapeHtml(r.label)} (${r.orderNumber})` });
+      return;
+    }
+    case "rrok": {
+      const res = await approveReplacement(id);
+      if (res.ok) await ctx.reply("✅ Replacement approved — a different unit was issued and sent to the customer.");
+      else await ctx.reply(res.reason === "NO_STOCK" ? "❌ No spare stock left to replace with. Add stock keys, then approve again." : res.reason === "ALREADY_REVIEWED" ? "This request was already reviewed." : res.reason === "NOT_AUTOMATIC" ? "❌ This product is not auto-deliverable — deliver a replacement manually from the order." : res.reason === "FAILED" ? "❌ Replacement failed (not a stock problem) — check the worker logs." : "❌ Could not replace.");
+      return replacementsListView(ctx);
+    }
+    case "rrno":
+      ctx.session.admReplaceId = id;
+      ctx.session.awaiting = "admin_reject_note";
+      await askStep(ctx, "❌ Send a short <b>reason</b> the customer will see, or <code>-</code> to decline without a note:");
+      return;
     case "deliver": return manualDeliverView(ctx, id);
     case "dlv":
       ctx.session.admManualItemId = id;
@@ -1604,6 +1677,23 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_p_warrantydays") {
+    const pid = ctx.session.admProductId ?? "";
+    const d = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    await setProductWarrantyDays(pid, Number.isFinite(d) && d > 0 ? d : null);
+    await ctx.reply(Number.isFinite(d) && d > 0 ? `⏱ Replacement window set to <b>${d} day(s)</b>.` : "⏱ Warranty has <b>no time limit</b> now.", { parse_mode: "HTML" });
+    await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_reject_note") {
+    const rid = ctx.session.admReplaceId ?? "";
+    ctx.session.admReplaceId = undefined;
+    const note = text.trim() === "-" ? undefined : text.trim().slice(0, 400);
+    const res = await rejectReplacement(rid, note);
+    await ctx.reply(res.ok ? "❌ Request declined — the customer has been told." : "Could not update that request.");
+    await replacementsListView(ctx);
+    return true;
+  }
   if (awaiting === "sale_title") {
     ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), title: composeBroadcastHtml(ctx) };
     ctx.session.awaiting = "sale_body";

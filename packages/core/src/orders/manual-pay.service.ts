@@ -372,18 +372,23 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
   try {
     const payload = await prisma.$transaction(async (tx) => {
       if (type === "LICENSE_KEY") {
-        // Detach the faulty key so the 1:1 slot is free, then assign a fresh one.
+        // Detach + permanently retire the faulty key, then assign a DIFFERENT one.
+        const bad = await tx.licenseKey.findMany({ where: { orderItemId: item.id }, select: { id: true } });
         await tx.licenseKey.updateMany({ where: { orderItemId: item.id }, data: { orderItemId: null, status: "DISABLED" } });
-        const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, false);
+        const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, false, bad.map((b) => b.id));
         return { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
       }
       // DIGITAL_ACCOUNT: free the old slot(s), then assign a fresh account.
       const olds = await tx.accountAssignment.findMany({ where: { orderItemId: item.id } });
+      const badAccountIds: string[] = [];
       for (const a of olds) {
+        badAccountIds.push(a.accountId);
         await tx.accountAssignment.delete({ where: { id: a.id } });
-        await tx.digitalAccount.update({ where: { id: a.accountId }, data: { usedSlots: { decrement: 1 }, status: "AVAILABLE" } }).catch(() => undefined);
+        // Retire the faulty account instead of returning it to the pool, or it
+        // would just be handed straight back out as the "replacement".
+        await tx.digitalAccount.updateMany({ where: { id: a.accountId }, data: { usedSlots: { decrement: 1 }, status: "DISABLED" } });
       }
-      const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, false);
+      const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, false, badAccountIds);
       return { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
     });
 
@@ -398,8 +403,10 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
       );
     }
     return { ok: true };
-  } catch {
-    return { ok: false, reason: "NO_STOCK" };
+  } catch (err) {
+    const code = err instanceof CoreError ? err.code : "";
+    if (code === "OUT_OF_STOCK") return { ok: false, reason: "NO_STOCK" };
+    return { ok: false, reason: "FAILED" };
   }
 }
 

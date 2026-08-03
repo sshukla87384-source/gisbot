@@ -160,11 +160,11 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null }
+export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null }
 
-type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null };
+type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null };
 function toBrief(p: PRow): ProductBrief {
-  return { id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId };
+  return { id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays };
 }
 
 export async function getProductBriefById(id: string): Promise<ProductBrief | null> {
@@ -256,7 +256,19 @@ export async function setProductPasswordChange(productId: string, allow: boolean
   await invalidate("cat:*");
 }
 
-/** Set a product's custom Buy button label and/or colour (success|primary|danger). */
+/** Turn the replacement warranty on/off for a product. */
+export async function setProductWarranty(productId: string, on: boolean): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { warranty: on } });
+  await invalidate("cat:*");
+}
+
+/** Replacement window in days (null/0 = unlimited while warranty is on). */
+export async function setProductWarrantyDays(productId: string, days: number | null): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { warrantyDays: days && days > 0 ? days : null } });
+  await invalidate("cat:*");
+}
+
+/** Set a product\'s custom Buy button label and/or colour (success|primary|danger). */
 export async function setProductButton(productId: string, text: string | null, style: string | null): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { ...(text !== null ? { buyButtonText: text.slice(0, 40) || null } : {}), ...(style !== null ? { buttonStyle: style || null } : {}) } });
   await invalidate("cat:*");

@@ -20,6 +20,7 @@ async function main(): Promise<void> {
     { command: "help", description: "Help & support" },
     { command: "wallet", description: "Wallet & deposit" },
     { command: "orders", description: "My orders" },
+    { command: "replace", description: "Request a replacement" },
     { command: "referral", description: "Refer & earn" },
     { command: "api", description: "Developer API" },
     { command: "language", description: "Change language" },

@@ -15,6 +15,7 @@ import {
   listApiKeysByOwner,
   listTickets,
   listVault,
+  listReplaceableItems,
   type CartView,
 } from "@gis/core";
 import { prisma, type Currency } from "@gis/database";
@@ -440,6 +441,7 @@ export function helpView(): View {
       "/support — 🎫 help & live support",
       "/referral — 🎁 refer &amp; earn",
       "/api — 🧑‍💻 developer API",
+      "/replace — 🔄 request a replacement (faulty item)",
       "/language — 🌐 change language",
       "/help — ❓ this guide",
       "",
@@ -599,6 +601,7 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
     for (const g of groups.values()) kb.text(`🔑 View ${g.name.slice(0, 26)}${g.count > 1 ? ` (×${g.count})` : ""}`, cb("lic", "view", g.firstId)).row();
     if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
   }
+  kb.text("🔄 Request a replacement", cb("rep", "home")).row();
   kb.text("◀️ Orders", cb("ord", "list", 1));
   backToMenuRow(kb);
   return { text: lines.join("\n"), kb };
@@ -619,4 +622,43 @@ export function quantityPickerView(variantId: string, stock: number, productId?:
   navRow(kb, productId ? cb("shp", "prod", productId) : cb("shp", "home", 1));
   const cap = stock >= 1_000_000 ? "" : ` (max ${stock} available)`;
   return { text: `🔢 <b>How many do you want?</b>${cap}`, kb };
+}
+
+/** 🔄 Replacement — pick a delivered item to claim on. */
+export async function replaceListView(user: BotUser): Promise<View> {
+  const items = await listReplaceableItems(user.id, 20);
+  const kb = new InlineKeyboard();
+  for (const i of items) {
+    const tag = i.eligible ? "🔄" : (i.warranty ? "⏳" : "🚫");
+    kb.text(`${tag} ${i.label.slice(0, 28)} · ${i.orderNumber}`, cb("rep", "pick", i.orderItemId)).row();
+  }
+  backToMenuRow(kb);
+  return {
+    text: items.length
+      ? [
+          header(`🔄 ${bold("Request a Replacement")}`),
+          "",
+          "Tap the item you are having trouble with.",
+          "",
+          "🔄 = covered by warranty   ⏳ = warranty expired   🚫 = no warranty",
+          "",
+          "<i>You will be asked for a short reason and a screenshot showing the problem. Our team reviews every claim.</i>",
+        ].join("\n")
+      : `${header(`🔄 ${bold("Request a Replacement")}`)}\n\nYou have no delivered items yet.`,
+    kb,
+  };
+}
+
+export function replaceAskReasonView(label: string): View {
+  const kb = new InlineKeyboard().text("✖️ Cancel", cb("rep", "home"));
+  return {
+    text: [
+      header(`🔄 ${bold("Replacement claim")}`),
+      "",
+      `📦 <b>${escapeHtml(label)}</b>`,
+      "",
+      "Step 1 of 2 — describe the problem in one message (e.g. <i>password not working</i>, <i>key already used</i>).",
+    ].join("\n"),
+    kb,
+  };
 }

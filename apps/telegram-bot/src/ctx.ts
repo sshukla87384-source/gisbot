@@ -66,6 +66,10 @@ export interface SessionData {
     | "sale_btntext"
     | "sale_timer"
     | "sale_url"
+    | "replace_reason"
+    | "replace_proof"
+    | "admin_reject_note"
+    | "admin_p_warrantydays"
     | null;
   /** Last search query, so pagination callbacks stay under 64 bytes. */
   lastSearch?: string;
@@ -73,6 +77,12 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Order item the customer is raising a replacement claim on. */
+  replaceItemId?: string;
+  /** Reason text captured before the screenshot step. */
+  replaceReason?: string;
+  /** Replacement request the admin is rejecting (awaiting a note). */
+  admReplaceId?: string;
   /** Customer Binance order awaiting a transaction ID. */
   binanceOrderId?: string;
   /** In-progress product being created via the admin wizard. */

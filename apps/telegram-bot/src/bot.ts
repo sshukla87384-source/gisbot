@@ -25,6 +25,8 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  createReplacementRequest,
+  getReplaceableItem,
   getProductIdBySlug,
   getRedis,
   enqueueAdminAlert,
@@ -212,6 +214,7 @@ export function createBot(): Bot<Ctx> {
   bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
   bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
   bot.command("api", async (ctx) => render(ctx, await views.apiKeysView(ctx.user), false));
+  bot.command("replace", async (ctx) => render(ctx, await views.replaceListView(ctx.user), false));
   bot.command(["language", "lang"], async (ctx) => render(ctx, views.languageView(ctx.user), false));
   bot.command("referral", async (ctx) => render(ctx, await views.referralView(ctx.user, ctx.me.username), false));
   // Secret admin trigger — /Shriji (case-insensitive). /admin no longer opens the panel.
@@ -293,6 +296,27 @@ export function createBot(): Bot<Ctx> {
 
   // ── Admin sends a photo to set a product image ──
   bot.on("message:photo", async (ctx) => {
+    // Customer submitting a replacement screenshot.
+    if (ctx.session.awaiting === "replace_proof") {
+      ctx.session.awaiting = null;
+      const photos = ctx.message.photo;
+      const proof = photos[photos.length - 1]?.file_id;
+      const r = await createReplacementRequest({
+        userId: ctx.user.id,
+        orderItemId: ctx.session.replaceItemId ?? "",
+        reason: ctx.session.replaceReason ?? "(no reason given)",
+        proofFileId: proof,
+      });
+      ctx.session.replaceItemId = undefined;
+      ctx.session.replaceReason = undefined;
+      await ctx.reply(
+        r.ok
+          ? "✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing your screenshot now. You will get the replacement here as soon as it is approved. Thank you for your patience. 🙏"
+          : `⚠️ ${r.reason}`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
     if (ctx.session.awaiting !== "admin_p_image") return;
     if (!(await isBotAdmin(ctx.from?.id))) return;
     const photos = ctx.message.photo;
@@ -321,6 +345,22 @@ export function createBot(): Bot<Ctx> {
     if (awaiting && (awaiting.startsWith("admin_") || awaiting.startsWith("sale_"))) {
       const handled = await handleAdminText(ctx, awaiting);
       if (handled) return;
+    }
+    if (awaiting === "replace_proof") {
+      // They typed instead of sending a photo — keep the claim alive.
+      ctx.session.awaiting = "replace_proof";
+      return ctx.reply(
+        "📷 Please send the screenshot as a <b>photo</b> (attach an image), or tap Submit without one.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📨 Submit without screenshot", "rep:nopic").text("✖️ Cancel", "rep:home") },
+      );
+    }
+    if (awaiting === "replace_reason") {
+      ctx.session.replaceReason = ctx.message.text.trim().slice(0, 1000);
+      ctx.session.awaiting = "replace_proof";
+      return ctx.reply(
+        "📷 <b>Step 2 of 2 — send a screenshot</b>\n\nPlease send a photo showing the problem (error message, login screen, etc.). This helps our team approve your replacement fast.\n\n<i>No screenshot? Tap Submit without one.</i>",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📨 Submit without screenshot", "rep:nopic").text("✖️ Cancel", "rep:home") },
+      );
     }
     if (awaiting === "binance_txnid") {
       const orderId = ctx.session.binanceOrderId ?? "";
@@ -891,6 +931,38 @@ export function createBot(): Bot<Ctx> {
           const done = await revokeApiKeyOwned(args[0] ?? "", user.id);
           await ctx.answerCallbackQuery({ text: done ? "Revoked" : "Not found" });
           await render(ctx, await views.apiKeysListView(user), true);
+          break;
+        }
+
+        case "rep:nopic": {
+          ctx.session.awaiting = null;
+          const r = await createReplacementRequest({
+            userId: user.id,
+            orderItemId: ctx.session.replaceItemId ?? "",
+            reason: ctx.session.replaceReason ?? "(no reason given)",
+          });
+          ctx.session.replaceItemId = undefined;
+          ctx.session.replaceReason = undefined;
+          await ctx.answerCallbackQuery();
+          await ctx.reply(
+            r.ok
+              ? "✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing it now — you will get your replacement here once approved. 🙏"
+              : `⚠️ ${r.reason}`,
+            { parse_mode: "HTML" },
+          );
+          break;
+        }
+        case "rep:home":
+          await render(ctx, await views.replaceListView(user), true);
+          break;
+        case "rep:pick": {
+          const it = await getReplaceableItem(user.id, args[0] ?? "");
+          if (!it) { await ctx.answerCallbackQuery({ text: "Item not found" }); break; }
+          if (!it.eligible) { await ctx.answerCallbackQuery({ text: it.reason ?? "Not eligible", show_alert: true }); break; }
+          ctx.session.replaceItemId = it.orderItemId;
+          ctx.session.replaceReason = undefined;
+          ctx.session.awaiting = "replace_reason";
+          await render(ctx, views.replaceAskReasonView(it.label), true);
           break;
         }
 

@@ -87,12 +87,15 @@ export async function assignLicenseKey(
   orderItemId: string,
   masterKey: string,
   preferReserved = false,
+  excludeIds: string[] = [],
 ): Promise<{ key: string; expiresAt: Date | null }> {
+  const exclude = excludeIds.length > 0 ? excludeIds : ["-"];
   const statuses = preferReserved ? ["RESERVED", "AVAILABLE"] : ["AVAILABLE"];
   for (const status of statuses) {
     const rows = await tx.$queryRaw<Array<{ id: string; keyEncrypted: string; expiresAt: Date | null }>>`
       SELECT "id", "keyEncrypted", "expiresAt" FROM "LicenseKey"
       WHERE "variantId" = ${variantId} AND "status" = ${status}::"InventoryStatus" AND "deletedAt" IS NULL
+        AND NOT ("id" = ANY(${exclude}::text[]))
       ORDER BY "createdAt" ASC
       LIMIT 1
       FOR UPDATE SKIP LOCKED`;
@@ -114,7 +117,9 @@ export async function assignAccountSlot(
   orderItemId: string,
   masterKey: string,
   preferReserved = false,
+  excludeIds: string[] = [],
 ): Promise<{ username: string; password: string; expiresAt: Date | null }> {
+  const exclude = excludeIds.length > 0 ? excludeIds : ["-"];
   const statuses = preferReserved ? ["RESERVED", "AVAILABLE"] : ["AVAILABLE"];
   for (const status of statuses) {
     const rows = await tx.$queryRaw<
@@ -131,6 +136,7 @@ export async function assignAccountSlot(
       FROM "DigitalAccount"
       WHERE "variantId" = ${variantId} AND "status" = ${status}::"InventoryStatus" AND "deletedAt" IS NULL
         AND "usedSlots" < "maxSlots"
+        AND NOT ("id" = ANY(${exclude}::text[]))
       ORDER BY "createdAt" ASC
       LIMIT 1
       FOR UPDATE SKIP LOCKED`;
