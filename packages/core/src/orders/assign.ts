@@ -1,4 +1,5 @@
 import type { Currency, Prisma } from "@gis/database";
+import { convertMinor } from "../fx.js";
 import { CoreError, decryptSecret } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
 
@@ -35,7 +36,8 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
           variant: {
             include: {
               product: true,
-              prices: { where: { currency, tier: { name: "RETAIL" } } },
+              // All RETAIL prices: prefer the requested currency, else convert.
+              prices: { where: { tier: { name: "RETAIL" } } },
             },
           },
         },
@@ -58,8 +60,11 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
     if (!v.isActive || v.deletedAt !== null || v.product.status !== "ACTIVE" || v.product.deletedAt !== null) {
       throw new CoreError("CART_ITEM_UNAVAILABLE", `${v.product.name} is no longer available`);
     }
-    const price = v.prices[0];
-    if (!price) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no ${currency} price`);
+    const exact = v.prices.find((p) => p.currency === currency);
+    const other = v.prices[0];
+    if (!exact && !other) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no price`);
+    // No price list in this currency → convert the one we have at the configured rate.
+    const price = exact ?? { amountMinor: convertMinor((other as NonNullable<typeof other>).amountMinor, (other as NonNullable<typeof other>).currency, currency) };
     const vipOverride = overrideByProduct.get(v.productId);
     return {
       variantId: v.id,

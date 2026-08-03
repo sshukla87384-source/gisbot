@@ -6,6 +6,7 @@ import {
   getWallet,
   getButtonConfig,
   getCartCoupon,
+  convertMinor,
   getBnplStatus,
   getReferralConfig,
   listCategories,
@@ -224,27 +225,51 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   const discount = coupon?.discountMinor ?? 0;
   const payable = Math.max(0, view.subtotalMinor - discount);
   const gateways = listEnabledProviders(user.currency);
-  const enough = wallet.balanceMinor >= BigInt(payable);
+
+  // The wallet is charged in ITS OWN currency, which may differ from the
+  // currency the customer browses in. Everything below compares wallet-currency
+  // amounts; mixing the two made the button show a wrong/zero amount.
+  const walletCur = wallet.currency as Currency;
+  let walletPayable = payable;
+  if (walletCur !== (user.currency as Currency)) {
+    try {
+      const [wView, wCoupon] = await Promise.all([
+        getCartView(user.id, walletCur),
+        getCartCoupon(user.id, walletCur),
+      ]);
+      walletPayable = Math.max(0, wView.subtotalMinor - (wCoupon?.discountMinor ?? 0));
+    } catch {
+      // No price list in the wallet currency — fall back to the configured rate.
+      walletPayable = convertMinor(payable, user.currency as Currency, walletCur);
+    }
+  }
+  const enough = wallet.balanceMinor >= BigInt(walletPayable);
+  const crossCur = walletCur !== (user.currency as Currency);
+  const walletChargeLabel = `${fmt(walletPayable, walletCur)}${walletCur === "USD" ? " USDT" : ""}`;
   const lines = [
     header(`🛒 ${bold("Checkout")}`),
     "",
     cartText(view),
     ...(coupon ? [`🎟 Coupon <b>${escapeHtml(coupon.code)}</b>: −${fmt(discount, view.currency)}`, `💳 <b>Total to pay: ${fmt(payable, view.currency)}</b>`] : []),
     "",
-    `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>`,
+    `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${walletCur === "USD" ? " USDT" : ""}`,
+    crossCur ? `🔁 Wallet charge for this order: <b>${walletChargeLabel}</b>  <i>(${fmt(payable, view.currency)})</i>` : "",
     gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
   if (coupon) kb.add(sbtn(`🎟 ${coupon.code} applied — ✖️ Remove`, cb("crt", "couponrm"), "primary")).row();
   else kb.add(sbtn("🎟 Apply coupon", cb("crt", "coupon"), "primary")).row();
   if (view.allAvailable && enough) {
-    kb.add(sbtn(`💰 Pay ${fmt(payable, view.currency)} from Wallet`, cb("ord", "paywallet"), "success")).row();
+    const label = crossCur
+      ? `💰 Pay ${walletChargeLabel} from Wallet  (${fmt(payable, view.currency)})`
+      : `💰 Pay ${fmt(payable, view.currency)} from Wallet`;
+    kb.add(sbtn(label, cb("ord", "paywallet"), "success")).row();
   } else if (view.allAvailable && wallet.balanceMinor > 0n) {
-    const need = payable - Number(wallet.balanceMinor);
-    kb.add(sbtn(`💰 Wallet ${fmt(wallet.balanceMinor, wallet.currency)} · ➕ Add ${fmt(need, view.currency)} to pay`, cb("wal", "topup"), "primary")).row();
+    const need = Math.max(0, walletPayable - Number(wallet.balanceMinor));
+    kb.add(sbtn(`💰 Wallet ${fmt(wallet.balanceMinor, walletCur)} · ➕ Add ${fmt(need, walletCur)} to pay`, cb("wal", "topup"), "primary")).row();
   }
-  if (view.allAvailable && bnpl.limitMinor > 0 && bnpl.availableMinor >= payable && payable > 0) {
-    kb.add(sbtn(`🕒 Pay Later — ${fmt(payable, view.currency)} (BNPL)`, cb("ord", "paybnpl"), "primary")).row();
+  if (view.allAvailable && bnpl.limitMinor > 0 && bnpl.availableMinor >= walletPayable && walletPayable > 0) {
+    kb.add(sbtn(`🕒 Pay Later — ${fmt(walletPayable, bnpl.currency as Currency)} (BNPL)`, cb("ord", "paybnpl"), "primary")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {
