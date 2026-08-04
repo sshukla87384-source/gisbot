@@ -101,6 +101,7 @@ import {
   verifyBinanceByTxnId,
   WIZARD_TYPES,
   announcePriceChange,
+  learnSupplierDocs,
   notifyTopupToAdmins,
   listFundedUsers,
   getUserWalletHistory,
@@ -669,6 +670,7 @@ async function suppliersView(ctx: Ctx): Promise<void> {
   for (const su of sups) {
     kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text("📂 Products", cb("adm", "supprods", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
     kb.text(`🧪 Test connection — ${su.name.slice(0, 18)}`, cb("adm", "suptest", su.id)).row();
+    kb.text(`📄 Read API docs — ${su.name.slice(0, 18)}`, cb("adm", "supdocs", su.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
   const lines = ["🏭 <b>Suppliers</b>", "", "Connect an external supplier API — sync their catalog into your shop with your markup; buyers pay your price and the key is bought from the supplier and delivered automatically.", ""];
@@ -989,6 +991,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; err?: string }));
       await ctx.reply("err" in r && r.err ? `❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}` : `✅ Synced — ${r.added} added, ${r.updated} updated.`);
       return suppliersView(ctx);
+    }
+    case "supdocs": {
+      ctx.session.supTarget = id;
+      ctx.session.awaiting = "admin_sup_docs";
+      await askStep(ctx, [
+        "📄 <b>Read the supplier's API docs</b>",
+        "",
+        "Paste either:",
+        "• the <b>link</b> to their API documentation, or",
+        "• the <b>documentation text</b> itself (copy/paste is fine)",
+        "",
+        "I'll work out their base URL, auth header, product/order endpoints and field names, save it, then run a live check.",
+      ].join("\n"));
+      return;
     }
     case "suptest": {
       const r = await testSupplier(id);
@@ -1981,6 +1997,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setBnplLimit(uid, Math.round(val * 100));
     await ctx.reply(val > 0 ? `🕒 BNPL limit set to <b>${val.toFixed(2)}</b>.` : "🕒 BNPL limit removed.", { parse_mode: "HTML" });
     await userDetailView(ctx, uid);
+    return true;
+  }
+  if (awaiting === "admin_sup_docs") {
+    const sid = ctx.session.supTarget ?? ""; ctx.session.supTarget = undefined;
+    if (!sid) { await ctx.reply("That supplier expired — open Vendor APIs again."); return true; }
+    await ctx.reply("📄 Reading the docs and running a live check…");
+    const r = await learnSupplierDocs(sid, text.trim());
+    await ctx.reply(r.detail, { parse_mode: "HTML" });
+    await sendPanel(ctx, false);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

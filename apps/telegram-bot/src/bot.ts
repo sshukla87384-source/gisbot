@@ -730,6 +730,11 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.productView(user, args[0] ?? ""), true);
           break;
 
+        case "shp:find":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "search";
+          await ctx.reply("🔍 <b>Search products</b>\n\nSend a product name or keyword (e.g. <code>netflix</code>, <code>office</code>):", { parse_mode: "HTML" });
+          break;
         case "src:pg": {
           const q = ctx.session.lastSearch ?? "";
           await render(ctx, await views.searchResultsView(user, q, intArg(args, 0, 1)), true);

@@ -1150,6 +1150,7 @@ model Supplier {
   name       String
   baseUrl    String
   apiKeyEnc  String   // AES-GCM encrypted API key
+  docsConfig Json? // endpoints/auth/field mapping learned from the supplier's own API docs
   markupBp   Int      @default(2000) // markup in basis points (2000 = +20%)
   active     Boolean  @default(true)
   balanceNote String? // last known supplier balance (display only)

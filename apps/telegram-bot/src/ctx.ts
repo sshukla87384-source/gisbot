@@ -73,6 +73,7 @@ export interface SessionData {
     | "wallet_inr_amount"
     | "wallet_inr_utr"
     | "admin_bnpl_user"
+    | "admin_sup_docs"
     | "admin_fx_rate"
     | "admin_tr_key"
     | "admin_tr_url"
@@ -83,6 +84,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Supplier being configured from its docs. */
+  supTarget?: string;
   /** Failed payment-verify attempts, so the paste state cannot stick forever. */
   payRetries?: number;
   /** INR wallet top-up being requested (minor units). */

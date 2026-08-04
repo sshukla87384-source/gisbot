@@ -66,7 +66,8 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
     kb.add(sbtn(label, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
-  kb.row().text("📂 All Categories", cb("shp", "root"));
+  kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
+  kb.text("📂 All Categories", cb("shp", "root"));
   backToMenuRow(kb);
   return {
     text: result.items.length > 0
@@ -101,7 +102,8 @@ export async function productListView(
     kb.add(sbtn(`${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
-  kb.row().text("◀️ Categories", cb("shp", "root"));
+  kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
+  kb.text("◀️ Categories", cb("shp", "root"));
   backToMenuRow(kb);
   return { text: result.total > 0 ? "🛍 <b>Products</b>" : "No products here yet.", kb };
 }
@@ -116,6 +118,8 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
     kb.add(sbtn(`${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
+  kb.row().add(sbtn("🔍 Search again", cb("shp", "find"), "primary")).row();
+  kb.text("🛍 All products", cb("shp", "home", 1));
   backToMenuRow(kb);
   return {
     text:

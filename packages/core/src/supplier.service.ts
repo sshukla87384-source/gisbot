@@ -9,7 +9,7 @@ import { usdtRate } from "./fx.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: string; markupBp: number; active: boolean }
+interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: string; markupBp: number; active: boolean; docsConfig?: unknown }
 export interface SupplierProduct { ref: string; name: string; description: string; note: string; priceMinor: number; stock: number | null; variantRef?: string }
 
 const authHeaders = (key: string): Record<string, string> => ({ Authorization: `Bearer ${key}`, "X-API-Key": key, Accept: "application/json" });
@@ -125,6 +125,27 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
 async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string }> {
   let lastRaw = "";
   let lastNote = "";
+  // Strategy: whatever we learned from the supplier's own documentation wins.
+  const doc = (s.docsConfig ?? null) as DocsConfig | null;
+  if (doc?.productsPath) {
+    for (const attempt of [doc.productsPath, `${doc.productsPath}?all=true`]) {
+      try {
+        const url = `${(doc.baseUrl ?? s.baseUrl).replace(/\/$/, "")}${attempt}`;
+        const res = await fetch(url, { headers: authHeaders(decKey(s)) });
+        const text = await res.text().catch(() => "");
+        if (!res.ok) { lastNote = `docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`; continue; }
+        let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
+        const listed = atPath(json, doc.listField);
+        const arr: any[] = Array.isArray(listed)
+          ? listed
+          : Array.isArray(json) ? json : (json.items ?? json.data ?? json.products ?? json.result ?? json.list ?? []);
+        const products = parseProductArray(Array.isArray(arr) ? arr : []);
+        if (products.length > 0) return { products, path: `docs:${attempt}`, raw: text.slice(0, 400), note: "ok" };
+        lastRaw = text.slice(0, 400);
+        lastNote = `docs ${attempt} → parsed 0 products`;
+      } catch (e) { lastNote = `docs → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+    }
+  }
   for (const path of PRODUCT_PATHS) {
     try {
       const res = await supFetch(s, path);
@@ -482,4 +503,109 @@ export async function autoFulfillSupplierItems(orderId: string): Promise<number>
     if (r.ok) done++;
   }
   return done;
+}
+
+/* ── Learn a supplier's API from their own documentation ───────────────────── */
+
+export interface DocsConfig {
+  baseUrl?: string;
+  authHeader?: string; // "Authorization: Bearer" | "X-API-Key"
+  productsPath?: string;
+  orderPath?: string;
+  balancePath?: string;
+  listField?: string; // e.g. "data.items"
+  idField?: string;
+  priceField?: string;
+  stockField?: string;
+}
+
+/** Read a nested field path like "data.items" off a parsed JSON body. */
+function atPath(obj: any, path?: string): any {
+  if (!path) return undefined;
+  return path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+/**
+ * Parse a supplier's API docs (pasted text or a URL) and extract everything the
+ * connector needs. Deliberately tolerant: anything it cannot find is left unset
+ * and the normal probing still applies.
+ */
+export async function learnSupplierDocs(supplierId: string, input: string): Promise<{ ok: boolean; detail: string; config: DocsConfig }> {
+  const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+  if (!sup) return { ok: false, detail: "Supplier not found.", config: {} };
+
+  let text = input.trim();
+  let source = "text";
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      const res = await fetch(text, { headers: { Accept: "text/html,text/plain,application/json" }, signal: AbortSignal.timeout(12_000) });
+      const body = await res.text();
+      text = body.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+      source = `url (${body.length} chars)`;
+    } catch {
+      return { ok: false, detail: "Couldn't download that docs URL. Paste the documentation text instead.", config: {} };
+    }
+  }
+
+  const cfg: DocsConfig = {};
+  // Base URL: first absolute URL that isn't an image/asset.
+  const urls = [...text.matchAll(/https?:\/\/[^\s"'`<>)]+/gi)].map((m) => m[0]);
+  const apiUrl = urls.find((u) => /\/api\b|\/v\d\b|\/functions\/|developer/i.test(u)) ?? urls[0];
+  if (apiUrl) {
+    try {
+      const u = new URL(apiUrl);
+      // Keep the whole documented path when it is versioned (…/api/v1/developer);
+      // slicing at a fixed offset dropped the trailing segment.
+      const path = u.pathname.replace(/\/+$/, "");
+      cfg.baseUrl = /\/api\/v\d/.test(path) ? `${u.origin}${path.replace(/\/(products|orders|balance).*$/, "")}` : u.origin;
+    } catch { /* ignore */ }
+  }
+  // Auth style.
+  if (/bearer/i.test(text)) cfg.authHeader = "Authorization: Bearer";
+  else if (/x-api-key/i.test(text)) cfg.authHeader = "X-API-Key";
+
+  // Endpoint paths.
+  const findPath = (re: RegExp): string | undefined => {
+    const m = text.match(re);
+    return m?.[1]?.trim();
+  };
+  cfg.productsPath = findPath(/GET\s+\/?((?:api\/)?[\w/{}.\-]*products[\w/{}.\-]*)/i)
+    ?? findPath(/\/?((?:api\/)?[\w/{}.\-]*(?:products|catalog|stock)[\w/{}.\-]*)/i);
+  cfg.orderPath = findPath(/POST\s+\/?((?:api\/)?[\w/{}.\-]*orders?[\w/{}.\-]*)/i);
+  cfg.balancePath = findPath(/GET\s+\/?((?:api\/)?[\w/{}.\-]*balance[\w/{}.\-]*)/i);
+  for (const k of ["productsPath", "orderPath", "balancePath"] as const) {
+    const v = cfg[k];
+    if (v && !v.startsWith("/")) cfg[k] = `/${v}`;
+  }
+  // Field mapping hints.
+  // Prefer an actual JSON key ("items": [ … ]) over a word that merely appears
+  // in a URL — matching "products" from "GET /products" picked the wrong field.
+  cfg.listField =
+    findPath(/"(items|products|data|results|list)"\s*:\s*\[/i) ??
+    findPath(/\b(data\.items|data\.products|data\.data|results|list)\b/i) ??
+    undefined;
+  cfg.idField = /variant_?id/i.test(text) ? "variantId" : /product_?id/i.test(text) ? "product_id" : "id";
+  if (/price_?minor|amount_?minor/i.test(text)) cfg.priceField = "priceMinor";
+
+  await prisma.supplier.update({ where: { id: supplierId }, data: { docsConfig: cfg as never } });
+
+  // Live check: does the products endpoint actually return items?
+  const probe = await probeProducts({ ...sup, docsConfig: cfg } as never).catch(() => null);
+  const found = probe?.products.length ?? 0;
+
+  const lines = [
+    "📄 <b>Docs processed</b>",
+    `• source: ${source}`,
+    cfg.baseUrl ? `• base URL: <code>${cfg.baseUrl}</code>` : "• base URL: not found (using the one you entered)",
+    cfg.authHeader ? `• auth: <code>${cfg.authHeader} KEY</code>` : "• auth: assuming Bearer + X-API-Key",
+    cfg.productsPath ? `• products: <code>${cfg.productsPath}</code>` : "• products: will auto-probe",
+    cfg.orderPath ? `• order: <code>${cfg.orderPath}</code>` : "• order: will auto-probe",
+    cfg.balancePath ? `• balance: <code>${cfg.balancePath}</code>` : "",
+    cfg.listField ? `• list field: <code>${cfg.listField}</code>` : "",
+    "",
+    found > 0
+      ? `✅ <b>Live check passed</b> — ${found} product(s) readable. Tap 🔄 Sync to import them.`
+      : "⚠️ <b>Live check found 0 products.</b> The key may lack permission, or the catalogue is empty. Tap 🔍 Diagnose for the raw response.",
+  ].filter(Boolean);
+  return { ok: found > 0, detail: lines.join("\n"), config: cfg };
 }
