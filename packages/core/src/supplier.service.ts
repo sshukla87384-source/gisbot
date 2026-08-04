@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, decryptSecret } from "@gis/shared";
 import { invalidate } from "./redis.js";
+import { logWallet } from "./logs.service.js";
 import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
 import { announceProduct, sendBroadcast } from "./broadcast.service.js";
@@ -487,6 +488,7 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
     return { ok: true };
   }
   // A charge may have gone through but we couldn't read the key — never drop it silently.
+  void logWallet("supplier.fulfil", `Supplier charged but no key parsed: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
   await enqueueAdminAlert(
     `⚠️ <b>Supplier charged but no key parsed</b>\nProduct: ${item.productNameSnap}\nReason: ${r.reason ?? "unknown"}\nDeliver this order manually. Raw supplier response (send to support to fix mapping):\n<code>${(r.raw ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 400)}</code>`,
   ).catch(() => undefined);

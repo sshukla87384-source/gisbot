@@ -25,6 +25,7 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  logError,
   grantAllScopesToOwner,
   getInrPerUsdt,
   createReplacementRequest,
@@ -1320,6 +1321,12 @@ export function createBot(): Bot<Ctx> {
     // Structured error logging; secrets never enter error paths.
     // eslint-disable-next-line no-console
     console.error("bot error", { update_id: err.ctx.update.update_id, error: String(err.error) });
+    // Also record it so an admin can read it in the bot (🩺 Logs).
+    void logError("bot", err.error, {
+      update: err.ctx.update.update_id ?? null,
+      from: err.ctx.from?.id ?? null,
+      data: err.ctx.callbackQuery?.data ?? null,
+    });
   });
 
   return bot;

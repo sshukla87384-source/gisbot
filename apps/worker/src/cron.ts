@@ -1,5 +1,6 @@
 import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdminAlert, getRedis,
   refundWalletForOrder,
+  logWallet,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -43,8 +44,11 @@ async function sweepReservationsAndOrders(): Promise<void> {
   for (const o of dying) {
     try {
       await refundWalletForOrder(o.userId, o.id, o.orderNumber, o.walletUsedMinor);
-    } catch {
+    } catch (e) {
       // leave it PENDING_PAYMENT so the next run retries rather than losing the money
+      void logWallet("cron.expireRefund", `Refund failed for ${o.orderNumber} — order left pending for retry`, {
+        orderId: o.id, amountMinor: o.walletUsedMinor, error: String(e).slice(0, 200),
+      });
     }
   }
   const expired = await prisma.order.updateMany({

@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
+import { logError, logWallet } from "../logs.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
@@ -525,6 +526,7 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
     return { ok: true };
   } catch (err) {
     const code = err instanceof CoreError ? err.code : "";
+    void logError("replaceOrderItem", err, { orderItemId });
     if (code === "OUT_OF_STOCK") return { ok: false, reason: "NO_STOCK" };
     return { ok: false, reason: "FAILED" };
   }

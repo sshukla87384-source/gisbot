@@ -102,6 +102,10 @@ import {
   WIZARD_TYPES,
   announcePriceChange,
   learnSupplierDocs,
+  readLogs,
+  clearLogs,
+  logCounts,
+  type LogChannel,
   autoFetchSupplierDocs,
   notifyTopupToAdmins,
   listFundedUsers,
@@ -254,6 +258,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
+      [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
       [["🚪 Logout", cb("adm", "logout"), "danger"], ["🚪 Logout All", cb("adm", "logoutall"), "danger"]],
     ] },
   };
@@ -725,6 +730,42 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
   ].join("\n"), kb, true);
 }
 
+async function logsMenuView(ctx: Ctx): Promise<void> {
+  const c = await logCounts();
+  const kb = new InlineKeyboard()
+    .add(sbtn(`❌ Errors (${c.error})`, cb("adm", "logv", "error"), c.error > 0 ? "danger" : "primary")).row()
+    .add(sbtn(`💰 Wallet & payments (${c.wallet})`, cb("adm", "logv", "wallet"), c.wallet > 0 ? "danger" : "primary")).row()
+    .add(sbtn(`🏭 Supplier (${c.supplier})`, cb("adm", "logv", "supplier"), "primary")).row()
+    .text("◀️ Back", cb("adm", "m_sec"));
+  await show(ctx, [
+    "🩺 <b>Logs &amp; Errors</b>",
+    "",
+    "Recent problems recorded by the bot, worker and API — newest first.",
+    c.error + c.wallet + c.supplier === 0 ? "\n✅ Nothing logged. All clear." : "",
+  ].filter(Boolean).join("\n"), kb, true);
+}
+
+async function logsView(ctx: Ctx, channel: string): Promise<void> {
+  const ch = (["error", "wallet", "payment", "supplier"].includes(channel) ? channel : "error") as LogChannel;
+  const rows = await readLogs(ch, 12);
+  const icon = (l: string) => (l === "error" ? "❌" : l === "warn" ? "⚠️" : "ℹ️");
+  const lines = [`🩺 <b>${ch === "wallet" ? "Wallet &amp; payments" : ch === "supplier" ? "Supplier" : "Errors"}</b> — last ${rows.length}`, ""];
+  if (rows.length === 0) lines.push("✅ Nothing logged here.");
+  for (const r of rows) {
+    const when = r.at.slice(5, 16).replace("T", " ");
+    const meta = r.meta
+      ? Object.entries(r.meta).filter(([, v]) => v !== null && v !== undefined && v !== "").map(([k, v]) => `${k}=${v}`).join(" ")
+      : "";
+    lines.push(`${icon(r.level)} <b>${when}</b> · <code>${escapeHtml(r.where)}</code>`);
+    lines.push(`   ${escapeHtml(r.message)}`);
+    if (meta) lines.push(`   <i>${escapeHtml(meta.slice(0, 200))}</i>`);
+  }
+  const kb = new InlineKeyboard()
+    .add(sbtn("🔄 Refresh", cb("adm", "logv", ch), "primary"), sbtn("🧹 Clear", cb("adm", "logclr", ch), "danger")).row()
+    .text("◀️ Back", cb("adm", "logs"));
+  await show(ctx, lines.join("\n").slice(0, 3900), kb, true);
+}
+
 async function fundedUsersView(ctx: Ctx): Promise<void> {
   const rows = await listFundedUsers(25);
   const kb = new InlineKeyboard();
@@ -912,6 +953,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "m_users": return usersMenuView(ctx);
     case "uview": return usersListView(ctx);
     case "uinfo": return userDetailView(ctx, id);
+    case "logs": return logsMenuView(ctx);
+    case "logv": return logsView(ctx, id);
+    case "logclr": {
+      await clearLogs((id || "error") as LogChannel);
+      await ctx.reply("🧹 Cleared.");
+      return logsMenuView(ctx);
+    }
     case "ufund": return fundedUsersView(ctx);
     case "uhist": return walletHistoryView(ctx, id);
     case "ubnpl":
