@@ -27,7 +27,7 @@ async function supFetch(s: SupplierRow, path: string, init: RequestInit = {}): P
   const headers = { ...authHeaders(decKey(s)), ...(init.headers as Record<string, string> | undefined) };
   let last: Response | null = null;
   for (const url of urlCandidates(s.baseUrl, path)) {
-    const res = await fetch(url, { ...init, headers });
+    const res = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(8000) });
     if (res.status !== 404) return res;
     last = res;
   }
@@ -82,7 +82,7 @@ function withQuery(baseUrl: string, params: Record<string, string | number>): st
 
 /** GET the supplier base URL with ?action=… (no path probing). */
 async function actionGet(s: SupplierRow, params: Record<string, string | number>): Promise<Response> {
-  return fetch(withQuery(s.baseUrl, params), { headers: authHeaders(decKey(s)) });
+  return fetch(withQuery(s.baseUrl, params), { headers: authHeaders(decKey(s)), signal: AbortSignal.timeout(8000) });
 }
 
 /** Some APIs (including ours) quote prices in integer MINOR units. */
@@ -306,6 +306,7 @@ export async function placeSupplierOrder(
           method: "POST",
           headers: { ...authHeaders(decKey(s)), "Content-Type": "application/json", "Idempotency-Key": extId },
           body: JSON.stringify({ variantId: variantRef, quantity: qty }),
+          signal: AbortSignal.timeout(12_000),
         });
         const text = await res.text().catch(() => "");
         if (res.status === 404) continue;
@@ -574,7 +575,9 @@ export async function learnSupplierDocs(supplierId: string, input: string): Prom
       // Keep the whole documented path when it is versioned (…/api/v1/developer);
       // slicing at a fixed offset dropped the trailing segment.
       const path = u.pathname.replace(/\/+$/, "");
-      cfg.baseUrl = /\/api\/v\d/.test(path) ? `${u.origin}${path.replace(/\/(products|orders|balance).*$/, "")}` : u.origin;
+      cfg.baseUrl = /\/api\/v\d/.test(path)
+        ? `${u.origin}${path.replace(/\/(products|orders|balance|docs(\.txt)?|manifest|openapi\.json|swagger\.json|api-docs|documentation|llms\.txt).*$/i, "")}`
+        : u.origin;
     } catch { /* ignore */ }
   }
   // Auth style.
@@ -591,8 +594,11 @@ export async function learnSupplierDocs(supplierId: string, input: string): Prom
   cfg.orderPath = findPath(/POST\s+\/?((?:api\/)?[\w/{}.\-]*orders?[\w/{}.\-]*)/i);
   cfg.balancePath = findPath(/GET\s+\/?((?:api\/)?[\w/{}.\-]*balance[\w/{}.\-]*)/i);
   for (const k of ["productsPath", "orderPath", "balancePath"] as const) {
-    const v = cfg[k];
-    if (v && !v.startsWith("/")) cfg[k] = `/${v}`;
+    let v = cfg[k];
+    if (!v) continue;
+    if (v.includes("://")) { cfg[k] = undefined; continue; } // an absolute URL is not a path
+    if (!v.startsWith("/")) v = `/${v}`;
+    cfg[k] = v;
   }
   // Field mapping hints.
   // Prefer an actual JSON key ("items": [ … ]) over a word that merely appears
@@ -670,7 +676,7 @@ export async function autoFetchSupplierDocs(supplierId: string): Promise<{ ok: b
       if (/"paths"\s*:/.test(raw)) score += 6; // OpenAPI
       if (text.length < 40) score = 0;
       tried.push(`${path} → ${res.status}, ${raw.length} chars, score ${score}`);
-      if (score > 0 && (!best || score > best.score)) best = { url, text: raw.slice(0, 60_000), score };
+      if (score > 0 && (!best || score > best.score)) best = { url, text: (/"paths"\s*:/.test(raw) ? raw : text).slice(0, 60_000), score };
       if (score >= 10) break; // good enough
     } catch {
       tried.push(`${path} → unreachable`);

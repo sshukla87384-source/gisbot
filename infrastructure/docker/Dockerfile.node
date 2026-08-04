@@ -47,5 +47,5 @@ WORKDIR /app
 COPY --from=deps --chown=node:node /app /app
 USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${PORT:-8080}/health" || exit 1
+  CMD node -e "require('http').get({host:'127.0.0.1',port:process.env.PORT||8080,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" || exit 1
 CMD ["sh", "-c", "exec pnpm --filter \"$APP_FILTER\" start"]

@@ -116,16 +116,22 @@ export async function translateMany(texts: Array<string | null | undefined>, loc
   const out = [...originals];
   const todo: Array<{ i: number; text: string; hash: string }> = [];
 
+  // One MGET for the whole batch instead of a round trip per string.
+  const candidates: Array<{ i: number; text: string; hash: string }> = [];
   for (let i = 0; i < originals.length; i++) {
     const text = originals[i] ?? "";
     if (shouldSkip(text)) continue;
-    const hash = sha256Hex(text);
-    try {
-      const hit = await redis.get(`tr:${locale}:${hash}`);
-      if (hit !== null) { out[i] = hit; continue; }
-    } catch { /* redis down — try the DB */ }
-    todo.push({ i, text, hash });
+    candidates.push({ i, text, hash: sha256Hex(text) });
   }
+  let hits: Array<string | null> = [];
+  if (candidates.length > 0) {
+    try { hits = await redis.mget(candidates.map((c) => `tr:${locale}:${c.hash}`)); } catch { hits = []; }
+  }
+  candidates.forEach((c, k) => {
+    const hit = hits[k];
+    if (hit !== null && hit !== undefined) out[c.i] = hit;
+    else todo.push(c);
+  });
   if (todo.length === 0) return out;
 
   // Postgres tier

@@ -72,6 +72,7 @@ export class DeveloperController {
       userId: req.apiKey?.ownerUserId ?? undefined,
       channel: "API" as const,
     };
+    let truncated = false;
     let res = await listProducts({ ...baseOpts, page: wantAll ? 1 : page, pageSize: wantAll ? 200 : limit });
     if (wantAll && res.pages > 1) {
       // Walk the remaining pages (hard-capped) so one call returns the catalogue.
@@ -80,6 +81,7 @@ export class DeveloperController {
         const more = await listProducts({ ...baseOpts, page: pg, pageSize: 200 });
         items.push(...more.items);
       }
+      truncated = res.pages > 10;
       res = { ...res, items, page: 1, pages: 1 };
     }
     const inStockOnly = query.inStock === "true";
@@ -119,7 +121,8 @@ export class DeveloperController {
       pages: res.pages,
       pageSize: wantAll ? items.length : limit,
       total: res.total,
-      hasMore: res.page < res.pages,
+      hasMore: wantAll ? items.length < res.total : res.page < res.pages,
+      truncated,
       currency: "USDT",
       nativeCurrency: currency,
       rate: { inrPerUsdt: usdtRate("INR") },
@@ -342,7 +345,7 @@ export class DeveloperController {
           for (let attempt = 0; attempt < 3; attempt++) {
             const done = await prisma.orderItem.count({ where: { orderId: r.orderId, fulfilledAt: null } });
             if (done === 0) break;
-            await new Promise((res) => setTimeout(res, 1200));
+            if (attempt < 2) await new Promise((res) => setTimeout(res, 800)); // no sleep after the last check
           }
           const delivered = await revealOrderDeliveries(userId, r.orderId);
           if (delivered.length > items.length) {

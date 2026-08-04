@@ -1,6 +1,7 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
 import { translateMany } from "../translate.service.js";
+import { convertMinor } from "../fx.js";
 import { cached } from "../redis.js";
 import { effectivePriceMinor, isSaleActive } from "../pricing.js";
 
@@ -84,6 +85,40 @@ export interface ProductView {
 /** Sentinel for products that are not unit-stocked (downloads, manual services). */
 export const UNLIMITED_STOCK = Number.MAX_SAFE_INTEGER;
 
+/**
+ * Stock for MANY variants in 2 queries instead of one COUNT each. This was the
+ * single biggest source of latency: a 100-product page issued ~105 sequential
+ * COUNTs.
+ */
+async function stockMapFor(
+  rows: Array<{ id: string; type: string; supplierId: string | null; supplierStock: number | null; variantIds: string[] }>,
+): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const keyIds: string[] = [];
+  const acctIds: string[] = [];
+  for (const p of rows) {
+    if (p.supplierId && p.supplierStock !== null && p.supplierStock !== undefined) {
+      for (const v of p.variantIds) map.set(v, p.supplierStock);
+      continue;
+    }
+    if (p.type === "LICENSE_KEY") keyIds.push(...p.variantIds);
+    else if (p.type === "DIGITAL_ACCOUNT") acctIds.push(...p.variantIds);
+    else for (const v of p.variantIds) map.set(v, UNLIMITED_STOCK);
+  }
+  const [keys, accts] = await Promise.all([
+    keyIds.length
+      ? prisma.licenseKey.groupBy({ by: ["variantId"], where: { variantId: { in: keyIds }, status: "AVAILABLE", deletedAt: null }, _count: { _all: true } })
+      : Promise.resolve([] as Array<{ variantId: string; _count: { _all: number } }>),
+    acctIds.length
+      ? prisma.digitalAccount.groupBy({ by: ["variantId"], where: { variantId: { in: acctIds }, status: "AVAILABLE", deletedAt: null }, _count: { _all: true } })
+      : Promise.resolve([] as Array<{ variantId: string; _count: { _all: number } }>),
+  ]);
+  for (const id of [...keyIds, ...acctIds]) map.set(id, 0); // absent = 0, not undefined
+  for (const r of keys) map.set(r.variantId, r._count._all);
+  for (const r of accts) map.set(r.variantId, r._count._all);
+  return map;
+}
+
 async function variantStock(
   variantId: string,
   type: string,
@@ -164,25 +199,26 @@ export async function listProducts(opts: {
     });
 
     const overrideMap = userId
-      ? await resolveUserPriceMap(userId, products.map((p) => p.id), channel)
+      ? await resolveUserPriceMap(userId, products.map((p) => p.id), channel, currency)
       : new Map<string, number>();
+    const stockMap = await stockMapFor(
+      products.map((p) => ({ id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock, variantIds: p.variants.map((v) => v.id) })),
+    );
     const items: ProductListItem[] = [];
     for (const p of products) {
       const onSale = isSaleActive(p);
       const ov = overrideMap.get(p.id);
       const priced = ov !== undefined ? [ov] : p.variants.flatMap((v) => v.prices.map((pr) => effectivePriceMinor(pr.amountMinor, p)));
       // One stock lookup per variant, reused for inStock and the variant rows.
-      const variantRows = await Promise.all(
-        p.variants.map(async (v) => {
-          const base = v.prices[0]?.amountMinor ?? null;
-          return {
-            id: v.id,
-            name: v.name,
-            priceMinor: ov ?? (base === null ? null : effectivePriceMinor(base, p)),
-            stock: await variantStock(v.id, p.type, p),
-          };
-        }),
-      );
+      const variantRows = p.variants.map((v) => {
+        const base = v.prices[0]?.amountMinor ?? null;
+        return {
+          id: v.id,
+          name: v.name,
+          priceMinor: ov ?? (base === null ? null : effectivePriceMinor(base, p)),
+          stock: stockMap.get(v.id) ?? 0,
+        };
+      });
       const inStock = variantRows.some((v) => v.stock > 0);
       const unlimited = variantRows.some((v) => v.stock >= UNLIMITED_STOCK);
       const stock = unlimited ? null : variantRows.reduce((n, v) => n + v.stock, 0);
@@ -201,8 +237,16 @@ export async function listProducts(opts: {
       });
     }
     if (locale !== "en" && items.length > 0) {
-      const names = await translateMany(items.map((i) => i.name), locale);
-      items.forEach((it, i) => { it.name = names[i] ?? it.name; });
+      // Hard 1.5s budget: a cold cache used to serialize one 8s HTTP call PER
+      // item (~160s for a 20-item page). Past the budget we show the originals
+      // and let the cache warm in the background for the next view.
+      const src = items.map((i) => i.name);
+      const names = await Promise.race([
+        translateMany(src, locale),
+        new Promise<null>((res) => setTimeout(() => res(null), 1500)),
+      ]).catch(() => null);
+      if (names) items.forEach((it, i) => { it.name = names[i] ?? it.name; });
+      else void translateMany(src, locale).catch(() => undefined);
     }
     return { items, page, pages, total };
   });
@@ -210,18 +254,26 @@ export async function listProducts(opts: {
 
 
 /** Resolve a user's per-product override for a channel: a channel-specific price (DIRECT/API) wins over a BOTH price. */
-async function resolveUserPriceMap(userId: string, productIds: string[], channel: "DIRECT" | "API"): Promise<Map<string, number>> {
+async function resolveUserPriceMap(
+  userId: string,
+  productIds: string[],
+  channel: "DIRECT" | "API",
+  currency?: Currency,
+): Promise<Map<string, number>> {
   const rows = await prisma.userPrice.findMany({ where: { userId, productId: { in: productIds }, channel: { in: [channel, "BOTH"] } } });
   const map = new Map<string, number>();
   for (const r of rows) {
+    // An override is stored in ITS OWN currency; convert before it is displayed
+    // or charged, or an INR view of a USD override is 100x wrong.
+    const amount = currency && r.currency !== currency ? convertMinor(r.amountMinor, r.currency as Currency, currency) : r.amountMinor;
     const cur = map.get(r.productId);
-    if (cur === undefined || r.channel === channel) map.set(r.productId, r.amountMinor);
+    if (cur === undefined || r.channel === channel) map.set(r.productId, amount);
   }
   return map;
 }
 
-async function resolveUserPrice(userId: string, productId: string, channel: "DIRECT" | "API"): Promise<number | null> {
-  const m = await resolveUserPriceMap(userId, [productId], channel);
+async function resolveUserPrice(userId: string, productId: string, channel: "DIRECT" | "API", currency?: Currency): Promise<number | null> {
+  const m = await resolveUserPriceMap(userId, [productId], channel, currency);
   return m.get(productId) ?? null;
 }
 
@@ -239,7 +291,7 @@ export async function getProductView(productId: string, currency: Currency, user
   if (!p) throw new CoreError("PRODUCT_NOT_FOUND");
 
   const onSale = isSaleActive(p);
-  const override = userId ? await resolveUserPrice(userId, p.id, channel) : null;
+  const override = userId ? await resolveUserPrice(userId, p.id, channel, currency) : null;
   const variants: VariantView[] = await Promise.all(
     p.variants.map(async (v) => {
       const base = v.prices[0]?.amountMinor ?? null;
@@ -253,7 +305,13 @@ export async function getProductView(productId: string, currency: Currency, user
       };
     }),
   );
-  const [trName, trDesc] = locale === "en" ? [p.name, p.description ?? ""] : await translateMany([p.name, p.description], locale);
+  const tr = locale === "en"
+    ? [p.name, p.description ?? ""]
+    : (await Promise.race([
+        translateMany([p.name, p.description], locale),
+        new Promise<null>((res) => setTimeout(() => res(null), 1500)),
+      ]).catch(() => null)) ?? [p.name, p.description ?? ""];
+  const [trName, trDesc] = tr;
   return {
     id: p.id,
     name: trName || p.name,

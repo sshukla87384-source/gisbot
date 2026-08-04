@@ -208,7 +208,9 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
     },
     { timeout: 15_000 },
   );
-  await notifyOrderToAdmins(result.orderId, channel === "API" ? "API / Wallet" : "Wallet");
+  // Fire-and-forget: this calls out to supplier APIs, which must never hold up
+  // the customer's checkout response.
+  void notifyOrderToAdmins(result.orderId, channel === "API" ? "API / Wallet" : "Wallet").catch(() => undefined);
   return result;
 }
 
@@ -284,7 +286,7 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
     },
     { timeout: 15_000 },
   );
-  await notifyOrderToAdmins(result.orderId, "Pay Later (BNPL)");
+  void notifyOrderToAdmins(result.orderId, "Pay Later (BNPL)").catch(() => undefined);
   return result;
 }
 

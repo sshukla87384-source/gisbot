@@ -27,9 +27,7 @@ export async function logEvent(
 ): Promise<void> {
   try {
     const entry: LogEntry = { at: new Date().toISOString(), level, where, message: String(message).slice(0, 600), meta };
-    const r = getRedis();
-    await r.lpush(KEY(channel), JSON.stringify(entry));
-    await r.ltrim(KEY(channel), 0, CAP - 1);
+    await getRedis().pipeline().lpush(KEY(channel), JSON.stringify(entry)).ltrim(KEY(channel), 0, CAP - 1).exec();
   } catch {
     /* ignore */
   }
@@ -44,7 +42,12 @@ export const logWallet = (where: string, message: string, meta?: LogEntry["meta"
 export async function readLogs(channel: LogChannel, limit = 15): Promise<LogEntry[]> {
   try {
     const raw = await getRedis().lrange(KEY(channel), 0, Math.max(1, limit) - 1);
-    return raw.map((r) => JSON.parse(r) as LogEntry);
+    // Parse per entry: one truncated line must not hide every other log.
+    const out: LogEntry[] = [];
+    for (const r of raw) {
+      try { out.push(JSON.parse(r) as LogEntry); } catch { /* skip that line only */ }
+    }
+    return out;
   } catch {
     return [];
   }
@@ -57,8 +60,11 @@ export async function clearLogs(channel: LogChannel): Promise<void> {
 export async function logCounts(): Promise<Record<LogChannel, number>> {
   const out = { error: 0, wallet: 0, payment: 0, supplier: 0 } as Record<LogChannel, number>;
   try {
-    const r = getRedis();
-    for (const c of ["error", "wallet", "payment", "supplier"] as LogChannel[]) out[c] = await r.llen(KEY(c));
+    const chans = ["error", "wallet", "payment", "supplier"] as LogChannel[];
+    const pipe = getRedis().pipeline();
+    for (const c of chans) pipe.llen(KEY(c));
+    const res = await pipe.exec();
+    chans.forEach((c, i) => { out[c] = Number(res?.[i]?.[1] ?? 0); });
   } catch { /* ignore */ }
   return out;
 }

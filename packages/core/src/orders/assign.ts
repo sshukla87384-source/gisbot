@@ -51,8 +51,10 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
   const overrides = await tx.userPrice.findMany({ where: { userId, channel: { in: [channel, "BOTH"] } } });
   const overrideByProduct = new Map<string, number>();
   for (const o of overrides) {
+    // Overrides carry their own currency — convert before charging.
+    const amount = o.currency === currency ? o.amountMinor : convertMinor(o.amountMinor, o.currency as Currency, currency);
     const cur = overrideByProduct.get(o.productId);
-    if (cur === undefined || o.channel === channel) overrideByProduct.set(o.productId, o.amountMinor);
+    if (cur === undefined || o.channel === channel) overrideByProduct.set(o.productId, amount);
   }
 
   return cart.items.map((item) => {

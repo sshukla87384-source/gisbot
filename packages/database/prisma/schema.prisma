@@ -359,7 +359,8 @@ model UserPrice {
   id          String       @id @default(cuid())
   userId      String
   productId   String
-  amountMinor Int          // override price (major units × 100), charged in the user's currency
+  amountMinor Int          // override price (major units × 100)
+  currency    Currency @default(USD) // the currency amountMinor is expressed in
   channel     PriceChannel @default(BOTH)
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
@@ -512,6 +513,8 @@ model Product {
   @@index([resellerId])
   @@index([type])
   @@index([isFeatured, status])
+  @@index([status, deletedAt, pinRank(sort: Desc), sortOrder, createdAt(sort: Desc)])
+  @@index([supplierId, supplierRef])
 }
 
 model ProductVariant {
