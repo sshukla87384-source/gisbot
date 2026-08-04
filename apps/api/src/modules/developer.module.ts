@@ -53,16 +53,30 @@ export class DeveloperController {
   @Get("products")
   async products(@Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     const page = Math.max(1, Number.parseInt(query.page ?? "1", 10) || 1);
-    const res = await listProducts({
-      currency: currencyOf(query),
-      page,
+    // The shared default page size is 6 (sized for Telegram buttons) — far too
+    // small for an API consumer, which is why integrations only ever saw 6
+    // products. Default to 100 here, allow up to 200, and support all=true.
+    const wantAll = query.all === "true" || query.all === "1";
+    const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit ?? query.per_page ?? "100", 10) || 100));
+    const currency = currencyOf(query);
+    const baseOpts = {
+      currency,
       search: query.search,
       categoryId: query.categoryId,
       featuredOnly: query.featured === "true",
       userId: req.apiKey?.ownerUserId ?? undefined,
-      channel: "API",
-    });
-    const currency = currencyOf(query);
+      channel: "API" as const,
+    };
+    let res = await listProducts({ ...baseOpts, page: wantAll ? 1 : page, pageSize: wantAll ? 200 : limit });
+    if (wantAll && res.pages > 1) {
+      // Walk the remaining pages (hard-capped) so one call returns the catalogue.
+      const items = [...res.items];
+      for (let pg = 2; pg <= Math.min(res.pages, 10); pg++) {
+        const more = await listProducts({ ...baseOpts, page: pg, pageSize: 200 });
+        items.push(...more.items);
+      }
+      res = { ...res, items, page: 1, pages: 1 };
+    }
     const inStockOnly = query.inStock === "true";
     const items = res.items
       .filter((p) => (inStockOnly ? p.inStock : true))
@@ -82,7 +96,15 @@ export class DeveloperController {
           ...stockOut(v.stock),
         })),
       }));
-    return { items, page: res.page, pages: res.pages, total: res.total, currency };
+    return {
+      items,
+      page: res.page,
+      pages: res.pages,
+      pageSize: wantAll ? items.length : limit,
+      total: res.total,
+      hasMore: res.page < res.pages,
+      currency,
+    };
   }
 
   @Scopes("catalog:read")
@@ -315,6 +337,8 @@ Create a key in the bot: open the menu → <b>🧑‍💻 Developer API</b> → 
 <div class="card">
   <div class="ep"><span class="m get">GET</span><code class="path">/health</code><span class="desc">liveness (no auth)</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/products</code><span class="desc">buyable catalog (incl. variantIds)</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/products?all=true</code><span class="desc">entire catalogue, one call</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/products?limit=200&amp;page=2</code><span class="desc">paged (limit 1-200, default 100)</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/products?inStock=true</code><span class="desc">in-stock only</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/products/{id}</code><span class="desc">one product</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/products/{id}/stock</code><span class="desc">live stock & price</span></div>
@@ -355,6 +379,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 <li><b>stock</b> is the real number available. For supplier-backed products this is the upstream supplier stock.</li>
 <li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable.</li>
 <li>Add <code>?inStock=true</code> to receive only orderable products.</li>
+<li><b>Getting only a handful of products?</b> Pass <code>?all=true</code> for the whole catalogue in one call, or page with <code>?limit=200&amp;page=N</code>. Default page size is <b>100</b>; the response carries <code>total</code>, <code>pages</code> and <code>hasMore</code>.</li>
 </ul>
 </div>
 
@@ -365,6 +390,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 <li><b>Rate limit</b> — 60 requests/min per key (configurable per key).</li>
 <li>All monetary amounts are integer <b>minor units</b> (e.g. cents); currency is on each response.</li>
 <li>All timestamps are <b>ISO-8601 UTC</b>.</li>
+<li><b>Full endpoint paths</b> — every route is under <code>${base}</code>, e.g. balance is <code>${base}/balance</code> (needs the <code>wallet:read</code> scope), not <code>/balance</code> at the domain root.</li>
 <li>Interactive reference: <a href="${base}/docs">${base}/docs</a></li>
 </ul></div>
 
