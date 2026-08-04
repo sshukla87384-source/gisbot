@@ -548,6 +548,21 @@ export async function learnSupplierDocs(supplierId: string, input: string): Prom
   }
 
   const cfg: DocsConfig = {};
+  // OpenAPI/Swagger: turn "paths" into the METHOD /path lines the parser expects.
+  try {
+    const spec = JSON.parse(text) as any;
+    if (spec && typeof spec === "object" && spec.paths) {
+      const lines: string[] = [];
+      for (const [pth, ops] of Object.entries(spec.paths as Record<string, any>)) {
+        for (const method of Object.keys(ops ?? {})) {
+          if (["get", "post", "put", "patch"].includes(method.toLowerCase())) lines.push(`${method.toUpperCase()} ${pth}`);
+        }
+      }
+      const servers: string[] = (spec.servers ?? []).map((sv: any) => String(sv?.url ?? "")).filter(Boolean);
+      const schemes = JSON.stringify(spec.components?.securitySchemes ?? spec.securityDefinitions ?? {});
+      text = [servers.length ? `Base URL: ${servers[0]}` : "", /bearer/i.test(schemes) ? "Authorization: Bearer KEY" : /apikey|api_key/i.test(schemes) ? "X-API-Key: KEY" : "", ...lines].filter(Boolean).join("\n");
+    }
+  } catch { /* not JSON — use the text as-is */ }
   // Base URL: first absolute URL that isn't an image/asset.
   const urls = [...text.matchAll(/https?:\/\/[^\s"'`<>)]+/gi)].map((m) => m[0]);
   const apiUrl = urls.find((u) => /\/api\b|\/v\d\b|\/functions\/|developer/i.test(u)) ?? urls[0];
@@ -608,4 +623,75 @@ export async function learnSupplierDocs(supplierId: string, input: string): Prom
       : "⚠️ <b>Live check found 0 products.</b> The key may lack permission, or the catalogue is empty. Tap 🔍 Diagnose for the raw response.",
   ].filter(Boolean);
   return { ok: found > 0, detail: lines.join("\n"), config: cfg };
+}
+
+/** Doc locations worth trying on a supplier's host, best-first. */
+const DOC_PATHS = [
+  "/api/v1/developer/docs.txt", "/api/v1/developer/manifest", "/api/v1/developer",
+  "/docs.txt", "/llms.txt", "/manifest",
+  "/openapi.json", "/swagger.json", "/api-docs", "/api/docs", "/docs", "/documentation",
+  "/api/v1/docs", "/developer", "/developers", "/api",
+];
+
+/**
+ * Auto-discover a supplier's API docs when the connector is not working. Tries
+ * the usual documentation locations on their host, picks the most informative
+ * response, and feeds it through learnSupplierDocs.
+ */
+export async function autoFetchSupplierDocs(supplierId: string): Promise<{ ok: boolean; detail: string }> {
+  const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+  if (!sup) return { ok: false, detail: "Supplier not found." };
+
+  let origin = sup.baseUrl.replace(/\/$/, "");
+  try { origin = new URL(sup.baseUrl).origin; } catch { /* keep as-is */ }
+
+  const tried: string[] = [];
+  let best: { url: string; text: string; score: number } | null = null;
+
+  for (const path of DOC_PATHS) {
+    const url = `${origin}${path}`;
+    try {
+      const res = await fetch(url, {
+        headers: { ...authHeaders(decKey(sup)), Accept: "text/plain,application/json,text/html" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) { tried.push(`${path} → ${res.status}`); continue; }
+      const raw = await res.text();
+      const text = raw.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
+      // Score by how much the parser will actually be able to use.
+      let score = 0;
+      if (/\b(GET|POST)\s+\//.test(text)) score += 5;
+      if (/products|catalog/i.test(text)) score += 3;
+      if (/orders?/i.test(text)) score += 2;
+      if (/balance/i.test(text)) score += 1;
+      if (/bearer|x-api-key/i.test(text)) score += 2;
+      if (/"paths"\s*:/.test(raw)) score += 6; // OpenAPI
+      if (text.length < 40) score = 0;
+      tried.push(`${path} → ${res.status}, ${raw.length} chars, score ${score}`);
+      if (score > 0 && (!best || score > best.score)) best = { url, text: raw.slice(0, 60_000), score };
+      if (score >= 10) break; // good enough
+    } catch {
+      tried.push(`${path} → unreachable`);
+    }
+  }
+
+  if (!best) {
+    return {
+      ok: false,
+      detail: [
+        "🔎 <b>Couldn't find any documentation</b>",
+        "",
+        "Tried on <code>" + origin + "</code>:",
+        tried.slice(0, 14).map((t) => `• ${t}`).join("\n"),
+        "",
+        "Use 📄 <b>Read API docs</b> and paste the documentation link or text instead.",
+      ].join("\n"),
+    };
+  }
+
+  const learned = await learnSupplierDocs(supplierId, best.text);
+  return {
+    ok: learned.ok,
+    detail: [`🔎 <b>Found docs at</b> <code>${best.url}</code>`, "", learned.detail].join("\n"),
+  };
 }

@@ -102,6 +102,7 @@ import {
   WIZARD_TYPES,
   announcePriceChange,
   learnSupplierDocs,
+  autoFetchSupplierDocs,
   notifyTopupToAdmins,
   listFundedUsers,
   getUserWalletHistory,
@@ -671,6 +672,7 @@ async function suppliersView(ctx: Ctx): Promise<void> {
     kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text("📂 Products", cb("adm", "supprods", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
     kb.text(`🧪 Test connection — ${su.name.slice(0, 18)}`, cb("adm", "suptest", su.id)).row();
     kb.text(`📄 Read API docs — ${su.name.slice(0, 18)}`, cb("adm", "supdocs", su.id)).row();
+    kb.add(sbtn(`🔎 Auto-find docs — ${su.name.slice(0, 14)}`, cb("adm", "supauto", su.id), "success")).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
   const lines = ["🏭 <b>Suppliers</b>", "", "Connect an external supplier API — sync their catalog into your shop with your markup; buyers pay your price and the key is bought from the supplier and delivered automatically.", ""];
@@ -991,6 +993,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; err?: string }));
       await ctx.reply("err" in r && r.err ? `❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}` : `✅ Synced — ${r.added} added, ${r.updated} updated.`);
       return suppliersView(ctx);
+    }
+    case "supauto": {
+      await ctx.reply("🔎 Looking for this supplier's documentation…");
+      const r = await autoFetchSupplierDocs(id);
+      await ctx.reply(r.detail, { parse_mode: "HTML" });
+      return sendPanel(ctx, false);
     }
     case "supdocs": {
       ctx.session.supTarget = id;
