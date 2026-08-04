@@ -25,6 +25,7 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  grantAllScopesToOwner,
   getInrPerUsdt,
   createReplacementRequest,
   getReplaceableItem,
@@ -1186,6 +1187,22 @@ export function createBot(): Bot<Ctx> {
         case "api:list":
           await render(ctx, await views.apiKeysListView(user), true);
           break;
+        case "api:fixscopes": {
+          await ctx.answerCallbackQuery({ text: "Updating…" });
+          const r = await grantAllScopesToOwner(user.id);
+          await ctx.reply(
+            [
+              `🛠 <b>Permissions updated</b> — ${r.updated} key(s).`,
+              "",
+              `Your keys now have: <code>${r.scopes.join("</code>, <code>")}</code>`,
+              "",
+              "Catalog, balance and orders endpoints will all respond now. No need to regenerate the key.",
+            ].join("\n"),
+            { parse_mode: "HTML" },
+          );
+          await render(ctx, await views.apiKeysView(user), false);
+          break;
+        }
         case "api:docs":
           await render(ctx, views.apiDocsView(), true);
           break;

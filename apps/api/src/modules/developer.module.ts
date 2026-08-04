@@ -162,6 +162,34 @@ export class DeveloperController {
     }
   }
 
+  /** Your recent orders. Probers GET the collection, so this must exist. */
+  @Scopes("orders:read")
+  @Get("orders")
+  async orders(@Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
+    const ownerId = req.apiKey?.ownerUserId ?? null;
+    if (!ownerId) throw forbidden("This API key isn't linked to a user account.");
+    const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit ?? "20", 10) || 20));
+    const rows = await prisma.order.findMany({
+      where: { userId: ownerId },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true } } },
+    });
+    return {
+      items: rows.map((o) => ({
+        orderNumber: o.orderNumber,
+        status: o.status,
+        currency: o.currency,
+        totalMinor: o.totalMinor,
+        walletUsedMinor: o.walletUsedMinor,
+        createdAt: o.createdAt,
+        paidAt: o.paidAt,
+        items: o.items.map((i) => ({ product: i.productNameSnap, variant: i.variantNameSnap, quantity: i.quantity })),
+      })),
+      total: rows.length,
+    };
+  }
+
   @Scopes("orders:read")
   @Get("orders/:orderNumber")
   async order(@Param("orderNumber") orderNumber: string, @Req() req: DeveloperRequest) {
@@ -349,7 +377,10 @@ Create a key in the bot: open the menu → <b>🧑‍💻 Developer API</b> → 
   <div class="ep"><span class="m get">GET</span><code class="path">/categories</code><span class="desc">categories</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/balance</code><span class="desc">balance + recent ledger</span></div>
   <div class="ep"><span class="m post">POST</span><code class="path">/orders</code><span class="desc">place an order</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/orders</code><span class="desc">your recent orders</span></div>
   <div class="ep"><span class="m get">GET</span><code class="path">/orders/{orderNumber}</code><span class="desc">a single order</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/wallet</code><span class="desc">balance only</span></div>
+  <div class="ep"><span class="m get">GET</span><code class="path">/ping</code><span class="desc">verify key + see its scopes</span></div>
 </div>
 
 <h2>Place an order</h2>
@@ -395,6 +426,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 <li><b>Rate limit</b> — 60 requests/min per key (configurable per key).</li>
 <li>All monetary amounts are integer <b>minor units</b> (e.g. cents); currency is on each response.</li>
 <li>All timestamps are <b>ISO-8601 UTC</b>.</li>
+<li><b>Getting 403 on /balance or /orders?</b> Your key is missing a scope. Call <code>GET /ping</code> — it lists the scopes the key actually has. <code>/balance</code> needs <code>wallet:read</code>, <code>/orders</code> needs <code>orders:read</code>, placing an order needs <code>orders:write</code>. Regenerate the key in the bot (🧑‍💻 Developer API) to get all of them.</li>
 <li><b>Full endpoint paths</b> — every route is under <code>${base}</code>, e.g. balance is <code>${base}/balance</code> (needs the <code>wallet:read</code> scope), not <code>/balance</code> at the domain root.</li>
 <li>Interactive reference: <a href="${base}/docs">${base}/docs</a></li>
 </ul></div>

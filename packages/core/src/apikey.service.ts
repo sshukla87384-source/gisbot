@@ -114,3 +114,17 @@ export async function revokeApiKeyOwned(id: string, ownerUserId: string): Promis
   });
   return res.count > 0;
 }
+
+/**
+ * Grant the full scope set to every key a user owns. Older keys were created
+ * before wallet:read/orders:* were included, which surfaces as 403 — and a
+ * prober reports that as "endpoint not found".
+ */
+export async function grantAllScopesToOwner(ownerUserId: string): Promise<{ updated: number; scopes: string[] }> {
+  const scopes = [...API_SCOPES] as string[];
+  const res = await prisma.apiKey.updateMany({
+    where: { ownerUserId, revokedAt: null },
+    data: { scopes },
+  });
+  return { updated: res.count, scopes };
+}

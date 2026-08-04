@@ -521,6 +521,7 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   if (active.length > 0) kb.text(`📋 My API keys (${active.length})`, cb("api", "list")).row();
   if (active.length > 0) kb.text("📦 API Orders", cb("api", "orders")).text("💰 API Balance", cb("api", "balance")).row();
   kb.text("📖 API Documentation", cb("api", "docs")).row();
+  if (active.length > 0) kb.add(sbtn("🛠 Fix permissions (403 errors)", cb("api", "fixscopes"), "primary")).row();
   backToMenuRow(kb);
   return {
     text: [
