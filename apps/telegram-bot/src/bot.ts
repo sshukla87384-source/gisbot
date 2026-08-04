@@ -403,7 +403,6 @@ export function createBot(): Bot<Ctx> {
       const kb = new InlineKeyboard()
         .copyText(`📋 Copy amount — ₹${rupees}`, rupees).row()
         .copyText(`📋 Copy UPI ID — ${upiId}`, upiId).row()
-        .url("📲 Open in UPI app", uri).row()
         .text("✖️ Cancel", "wal:view");
       try {
         const png = await QRCode.toBuffer(uri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
@@ -536,11 +535,28 @@ export function createBot(): Bot<Ctx> {
     }
     if (awaiting === "upi_ref") {
       const orderId = ctx.session.upiOrderId ?? "";
-      ctx.session.upiOrderId = undefined;
       const ref = ctx.message.text.trim().slice(0, 64);
+      if (!orderId) return ctx.reply("That checkout expired — please start again from your 🛒 Cart.");
+      if (ref.length < 6) {
+        ctx.session.awaiting = "upi_ref"; // keep waiting instead of dropping the order
+        return ctx.reply(
+          "🔎 That doesn't look like a <b>UTR number</b>. Open your UPI app → the payment → copy the UTR / reference number and paste it here.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid") },
+        );
+      }
+      ctx.session.upiOrderId = undefined;
       const notified = await notifyAdminsForApproval(ctx, orderId, "UPI", ref);
       if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref}.`).catch(() => undefined);
-      return ctx.reply("✅ Thanks! We've received your UPI reference. Your order will be delivered right after we verify — usually within minutes.");
+      return ctx.reply(
+        [
+          "🧾 <b>Thanks — UTR received!</b>",
+          "",
+          `🔢 <code>${escapeHtml(ref)}</code>`,
+          "",
+          "🧑‍💼 Our team is verifying your payment now. Your order is delivered here as soon as it clears. 🙏",
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
+      );
     }
     if (awaiting === "wallet_free_txn") {
       const txn = ctx.message.text.trim().slice(0, 128);
@@ -977,7 +993,17 @@ export function createBot(): Bot<Ctx> {
             );
             break;
           }
-          const up = await createUpiManualCheckout(user.id, { useWallet: args[0] === "w" });
+          let up;
+          try {
+            up = await createUpiManualCheckout(user.id, { useWallet: args[0] === "w" });
+          } catch (e) {
+            const msg = isCoreError(e) ? (ERROR_COPY[e.code] ?? e.message) : "Something went wrong creating your UPI order.";
+            await ctx.reply(`⚠️ ${msg}\n\nPlease try again, or pay with 🪙 Binance.`, {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text("🛒 Back to cart", cb("crt", "view")).text("🏠 Menu", "mnu:home"),
+            });
+            break;
+          }
           ctx.session.upiOrderId = up.orderId;
           // Arm the UTR paste right away — no extra tap needed.
           ctx.session.awaiting = "upi_ref";
@@ -1015,12 +1041,13 @@ export function createBot(): Bot<Ctx> {
             "🕐 <b>Note:</b> UPI payments are checked <b>manually by our team</b>, so delivery may be delayed.",
             "⚡ Want it instantly? Pay with <b>Binance (USDT)</b> — that verifies automatically.",
           ].join("\n");
+          // NOTE: no url() button for the upi:// link — Telegram only accepts
+          // http/https/tg in inline URL buttons and rejects the whole message
+          // with BUTTON_URL_INVALID, which made this screen fail silently.
           const upiKb = new InlineKeyboard()
             .copyText(`📋 Copy amount — ₹${amountRupees}`, amountRupees)
             .row()
             .copyText(`📋 Copy UPI ID — ${up.upiId}`, up.upiId)
-            .row()
-            .url("📲 Open in UPI app", upiUri)
             .row()
             .text("⚠️ I have paid — need help", "ord:upipaid")
             .row()
@@ -1033,10 +1060,14 @@ export function createBot(): Bot<Ctx> {
               reply_markup: upiKb,
             });
           } catch {
-            await ctx.reply(caption, {
-              parse_mode: "HTML",
-              reply_markup: upiKb,
-            });
+            // QR generation or photo send failed — still show the payment details.
+            try {
+              await ctx.reply(caption, { parse_mode: "HTML", reply_markup: upiKb });
+            } catch {
+              await ctx.reply(caption.replace(/<[^>]+>/g, ""), {
+                reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
+              });
+            }
           }
           break;
         }
