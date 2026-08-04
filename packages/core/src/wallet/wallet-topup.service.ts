@@ -120,25 +120,36 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
   const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
   if (!txn || txn.currency !== "USDT" || Math.abs(parseFloat(txn.amount)) <= 0) return { ok: false, reason: "NOT_FOUND" };
 
-  const usdt = Math.abs(parseFloat(txn.amount));
+  // Only INCOMING credits may fund a wallet. Math.abs() previously let a
+  // customer paste an OUTGOING payout id and get credited for it.
+  const signed = parseFloat(txn.amount);
+  if (!(signed > 0)) return { ok: false, reason: "NOT_FOUND" };
+  const usdt = signed;
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-  const creditMinor = user.currency === "USD"
+  // Credit in the WALLET's currency, not the user's display currency — they
+  // differ the moment someone switches to INR, and crediting INR-scaled minor
+  // units into a USD wallet multiplied every deposit by the FX rate.
+  const wallet = await prisma.wallet.findUnique({ where: { userId }, select: { currency: true } });
+  const walletCur = (wallet?.currency ?? "USD") as "USD" | "INR";
+  const creditMinor = walletCur === "USD"
     ? Math.round(usdt * 100)
     : Math.round(usdt * usdtRate("INR") * 100);
 
   const topup = await prisma.walletTopup.create({
     data: {
-      userId, amountMinor: creditMinor, currency: user.currency, binanceAsset: "USDT",
+      userId, amountMinor: creditMinor, currency: walletCur, binanceAsset: "USDT",
       binanceAmount: usdt.toFixed(2), binanceTxnId: clean, status: "CREDITED",
       creditedAt: new Date(), expiresAt: new Date(),
     },
   });
   const newBalanceMinor = await adjustWallet({
     userId, amountMinor: BigInt(creditMinor), type: "DEPOSIT",
-    note: `Binance deposit (txn ${clean})`, idempotencyKey: `topup:${topup.id}`,
+    // Key on the TRANSACTION, so two concurrent submissions of the same
+    // Binance id can never both credit (each call makes its own topup row).
+    note: `Binance deposit (txn ${clean})`, idempotencyKey: `topup-txn:${clean}`,
   });
-  await notifyTopupToAdmins(user, creditMinor, `Binance ${usdt.toFixed(2)} USDT`, clean, newBalanceMinor);
-  return { ok: true, newBalanceMinor, amountMinor: creditMinor, currency: user.currency };
+  await notifyTopupToAdmins({ ...user, currency: walletCur }, creditMinor, `Binance ${usdt.toFixed(2)} USDT`, clean, newBalanceMinor);
+  return { ok: true, newBalanceMinor, amountMinor: creditMinor, currency: walletCur };
 }
 
 /** Tell admins whenever a customer's wallet is topped up. */

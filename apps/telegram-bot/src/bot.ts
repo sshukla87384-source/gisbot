@@ -25,6 +25,7 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  getInrPerUsdt,
   createReplacementRequest,
   getReplaceableItem,
   getProductIdBySlug,
@@ -373,6 +374,7 @@ export function createBot(): Bot<Ctx> {
       }
       const minor = Math.round(val * 100);
       ctx.session.inrTopupMinor = minor;
+      const fxRate = await getInrPerUsdt();
       ctx.session.awaiting = "wallet_inr_utr";
       const upiId = config.UPI_ID ?? "";
       const payee = config.UPI_PAYEE_NAME || config.STORE_NAME;
@@ -393,7 +395,7 @@ export function createBot(): Bot<Ctx> {
         "📷 <b>Scan the QR</b> in GPay / PhonePe / Paytm — the amount is pre-filled.",
         "📋 No QR? Use the copy buttons below.",
         "",
-        `💰 Your wallet will be credited <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b>  <i>(100 INR = 1 USD)</i>`,
+        `💰 Your wallet will be credited <b>$${(Math.round(minor / fxRate) / 100).toFixed(2)}</b>  <i>(${fxRate} INR = 1 USD)</i>`,
         "",
         "✅ After paying, paste your <b>UTR number</b> here.",
         "",
@@ -414,6 +416,8 @@ export function createBot(): Bot<Ctx> {
     if (awaiting === "wallet_inr_utr") {
       const utr = ctx.message.text.trim().slice(0, 64);
       const minor = ctx.session.inrTopupMinor ?? 0;
+      const rate = await getInrPerUsdt();
+      const usdMinor = Math.max(1, Math.round(minor / rate));
       if (utr.length < 6 || minor <= 0) {
         ctx.session.awaiting = "wallet_inr_utr";
         return ctx.reply("Please paste the <b>UTR number</b> from your UPI payment receipt.", { parse_mode: "HTML" });
@@ -426,13 +430,13 @@ export function createBot(): Bot<Ctx> {
           `👤 ${escapeHtml(who)}`,
           `🆔 <code>${ctx.user.telegramId ?? "—"}</code>`,
           `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
-          `💰 Credit: <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b>  <i>(100 INR = 1 USD)</i>`,
+          `💰 Credit: <b>$${(usdMinor / 100).toFixed(2)}</b>  <i>(${rate} INR = 1 USD)</i>`,
           `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
           "",
           "Check the UTR in your UPI app, then approve to credit their wallet in USD.",
         ].join("\n"),
         [
-          { text: `✅ Approve — credit $${(Math.round(minor / 100) / 100).toFixed(2)}`, callbackData: `adm:wdok:${ctx.user.id}~${minor}~${Math.round(minor / 100)}`, style: "success" },
+          { text: `✅ Approve — credit $${(usdMinor / 100).toFixed(2)}`, callbackData: `adm:wdok:${ctx.user.id}~${minor}~${usdMinor}`, style: "success" },
           { text: "❌ Reject", callbackData: `adm:wdno:${ctx.user.id}`, style: "danger" },
         ],
       ).catch(() => undefined);
@@ -441,7 +445,7 @@ export function createBot(): Bot<Ctx> {
           "🧾 <b>Thanks — payment submitted!</b>",
           "",
           `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
-          `💰 You'll receive: <b>$${(Math.round(minor / 100) / 100).toFixed(2)}</b> <i>(100 INR = 1 USD)</i>`,
+          `💰 You'll receive: <b>$${(usdMinor / 100).toFixed(2)}</b> <i>(${rate} INR = 1 USD)</i>`,
           `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
           "",
           "🧑‍💼 Our team is verifying it now — UPI is approved by hand, so please allow a little time. Your wallet is credited as soon as it clears and you'll get a message here. 🙏",
@@ -469,6 +473,7 @@ export function createBot(): Bot<Ctx> {
       const r = await verifyBinanceByTxnId(orderId, txn, ctx.user.id);
       if (r.ok) {
         ctx.session.binanceOrderId = undefined;
+        ctx.session.payRetries = undefined;
         return ctx.reply(
           [
             "✅ <b>Payment verified!</b>",
@@ -501,7 +506,12 @@ export function createBot(): Bot<Ctx> {
             : r.reason === "WRONG_USER"
               ? "⚠️ That order doesn’t belong to your account. "
               : "";
-      ctx.session.awaiting = "binance_txnid"; // let them paste a corrected ID
+      // Re-arm only a couple of times. Leaving this state sticky turned every
+      // later chat message into a fresh "approve & deliver" card for admins.
+      const tries = (ctx.session.payRetries ?? 0) + 1;
+      ctx.session.payRetries = tries;
+      if (tries < 3) ctx.session.awaiting = "binance_txnid";
+      else ctx.session.binanceOrderId = undefined;
       return ctx.reply(
         [
           note ? `${note}` : "⏳ <b>We couldn't auto-verify that yet.</b>",
@@ -875,6 +885,7 @@ export function createBot(): Bot<Ctx> {
           if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
           const bz = await createBinanceManualCheckout(user.id, { useWallet: args[0] === "w" });
           ctx.session.binanceOrderId = bz.orderId;
+          ctx.session.payRetries = 0;
           // Arm the paste right away: the next message they send is treated as the Order ID.
           ctx.session.awaiting = "binance_txnid";
           await ctx.editMessageText(
@@ -1154,7 +1165,7 @@ export function createBot(): Bot<Ctx> {
           }
           ctx.session.awaiting = "wallet_inr_amount";
           await ctx.reply(
-            "🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).\n\n<i>Wallet is held in USD — credited at 100 INR = 1 USD, so ₹500 gives you $5.00.</i>",
+            "🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).\n\n<i>Your wallet is held in USD and credited at the store rate.</i>",
             { parse_mode: "HTML" },
           );
           break;

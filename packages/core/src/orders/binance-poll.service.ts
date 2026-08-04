@@ -105,13 +105,13 @@ export async function pollBinancePayments(): Promise<number> {
     return 0;
   }
 
-  const credits = txns.filter((t) => t.currency === "USDT" && Math.abs(parseFloat(t.amount)) > 0);
+  const credits = txns.filter((t) => t.currency === "USDT" && parseFloat(t.amount) > 0); // incoming only
   let confirmed = 0;
 
   for (const order of pending) {
     if (!order.binanceAmount) continue;
     const want = parseFloat(order.binanceAmount);
-    const match = credits.find((t) => Math.abs(Math.abs(parseFloat(t.amount)) - want) < 0.01);
+    const match = credits.find((t) => Math.abs(parseFloat(t.amount) - want) < 0.01);
     if (!match) continue;
 
     // One Binance transaction can settle only one order.
@@ -174,10 +174,10 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string, expec
   }
 
   const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
-  if (!txn || txn.currency !== "USDT" || Math.abs(parseFloat(txn.amount)) <= 0) return { ok: false, reason: "NOT_FOUND" };
+  if (!txn || txn.currency !== "USDT" || !(parseFloat(txn.amount) > 0)) return { ok: false, reason: "NOT_FOUND" };
 
   const want = parseFloat(order.binanceAmount ?? "0");
-  if (!(want > 0) || Math.abs(Math.abs(parseFloat(txn.amount)) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
+  if (!(want > 0) || Math.abs(parseFloat(txn.amount) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
 
   const claimed = await prisma.order.updateMany({
     where: { id: orderId, status: "PENDING_PAYMENT" },

@@ -24,7 +24,28 @@ export async function createStarsCheckout(userId: string): Promise<StarsCheckout
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const expiresAt = new Date(Date.now() + 60 * 60_000);
   const created = await prisma.$transaction(async (tx) => {
-    await tx.order.updateMany({
+    // Refund any wallet money on the order we are replacing.
+      {
+        const stale = await tx.order.findMany({
+          where: { userId, status: "PENDING_PAYMENT", walletUsedMinor: { gt: 0 } },
+          select: { id: true, orderNumber: true, walletUsedMinor: true },
+        });
+        for (const so of stale) {
+          const sw = await tx.wallet.findUnique({ where: { userId } });
+          if (!sw) continue;
+          const back = sw.balanceMinor + BigInt(so.walletUsedMinor);
+          await tx.walletTransaction.create({
+            data: {
+              walletId: sw.id, type: "REFUND", amountMinor: BigInt(so.walletUsedMinor), balanceAfterMinor: back,
+              currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
+              idempotencyKey: `refund-cancel:${so.id}`,
+            },
+          });
+          await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
+          await tx.order.update({ where: { id: so.id }, data: { walletUsedMinor: 0 } });
+        }
+      }
+      await tx.order.updateMany({
       where: { userId, status: "PENDING_PAYMENT" },
       data: { status: "CANCELLED", cancelledAt: new Date() },
     });

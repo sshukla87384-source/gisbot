@@ -317,6 +317,17 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
       // test delivery) → put it BACK on the shelf instead of silently skipping,
       // and never create a second row for the same key.
       if (exists.status === "AVAILABLE") { skipped++; continue; }
+      // NEVER resurrect a key that belongs to a live order — the buyer can still
+      // see it in My Orders, and nulling orderItemId would drop the unique
+      // constraint that prevents the same key being delivered twice.
+      if (exists.orderItemId) {
+        const oi = await prisma.orderItem.findUnique({
+          where: { id: exists.orderItemId },
+          select: { order: { select: { status: true } } },
+        });
+        const dead = !oi || ["CANCELLED", "EXPIRED", "REFUNDED"].includes(oi.order.status);
+        if (!dead) { skipped++; continue; } // still owned by a real customer
+      }
       await prisma.licenseKey.update({
         where: { id: exists.id },
         data: { status: "AVAILABLE", orderItemId: null, soldAt: null, reservedUntil: null, deletedAt: null },
@@ -377,6 +388,15 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
     }
     if (existing) {
       if (existing.status === "AVAILABLE" && existing.usedSlots < existing.maxSlots && existing.deletedAt === null) { skipped++; continue; }
+      // Only re-list when every assignment belongs to a dead order. Otherwise a
+      // shared account would have live customers' slots wiped and resold, and
+      // their password silently rewritten underneath them.
+      const holders = await prisma.accountAssignment.findMany({
+        where: { accountId: existing.id },
+        select: { orderItem: { select: { order: { select: { status: true } } } } },
+      });
+      const live = holders.some((h) => !["CANCELLED", "EXPIRED", "REFUNDED"].includes(h.orderItem.order.status));
+      if (live) { skipped++; continue; }
       await prisma.digitalAccount.update({
         where: { id: existing.id },
         data: {

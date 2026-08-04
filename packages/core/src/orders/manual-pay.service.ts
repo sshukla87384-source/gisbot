@@ -7,7 +7,7 @@ import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
-import { toUsdtCharge, usdtToMinor, usdtCentInMinor } from "../fx.js";
+import { toUsdtCharge, usdtToMinor, usdtCentInMinor, convertMinor } from "../fx.js";
 
 /**
  * Manual Binance Pay (P2P via UID). Binance UID transfers have no automatic
@@ -94,11 +94,18 @@ async function applyWalletTx(
   orderId: string,
   orderNumber: string,
   totalMinor: number,
-  opts: { alignToUsdtCent?: Currency } = {},
+  opts: { alignToUsdtCent?: Currency; orderCurrency?: Currency } = {},
 ): Promise<{ walletUsed: number; owed: number }> {
   const w = await tx.wallet.findUnique({ where: { userId } });
   if (!w || w.balanceMinor <= 0n) return { walletUsed: 0, owed: totalMinor };
-  let use = Number(w.balanceMinor < BigInt(totalMinor) ? w.balanceMinor : BigInt(totalMinor));
+  // The wallet and the order can be in DIFFERENT currencies (wallets are USD,
+  // an INR customer's cart is INR). Compare in the ORDER's currency, then debit
+  // the wallet in its own. Mixing them debited $2 against a Rs 500 order.
+  const orderCur = opts.orderCurrency ?? (w.currency as Currency);
+  const balanceInOrderCur = w.currency === orderCur
+    ? Number(w.balanceMinor)
+    : convertMinor(Number(w.balanceMinor), w.currency as Currency, orderCur);
+  let use = Math.min(balanceInOrderCur, totalMinor); // in ORDER currency
   if (use <= 0) return { walletUsed: 0, owed: totalMinor };
   // The remainder will be quoted in USDT, which has only 2 decimals. Let the
   // wallet swallow the sub-cent part so the gateway amount is exact — e.g. a
@@ -123,10 +130,13 @@ async function applyWalletTx(
     }
   }
   if (use <= 0) return { walletUsed: 0, owed: totalMinor };
-  const after = w.balanceMinor - BigInt(use);
+  // Debit amount expressed in the WALLET's currency.
+  const debitWalletCur = w.currency === orderCur ? use : convertMinor(use, orderCur, w.currency as Currency);
+  const debit = Math.min(debitWalletCur, Number(w.balanceMinor));
+  const after = w.balanceMinor - BigInt(debit);
   await tx.walletTransaction.create({
     data: {
-      walletId: w.id, type: "PURCHASE", amountMinor: -BigInt(use), balanceAfterMinor: after,
+      walletId: w.id, type: "PURCHASE", amountMinor: -BigInt(debit), balanceAfterMinor: after,
       currency: w.currency, orderId, referenceNote: `part-payment ${orderNumber}`,
       idempotencyKey: `partial:${orderId}`,
     },
@@ -176,7 +186,7 @@ export async function createUpiManualCheckout(userId: string, opts: { useWallet?
     if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
     // Spend wallet balance first when asked; only the remainder is paid by UPI.
     const applied = opts.useWallet
-      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor)
+      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor, { orderCurrency: user.currency })
       : { walletUsed: 0, owed: totalMinor };
     return { orderId: order.id, orderNumber, totalMinor: applied.owed, walletUsedMinor: applied.walletUsed, orderTotalMinor: totalMinor };
   });
@@ -250,7 +260,7 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
     if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
     // Wallet first when asked; the USDT amount must reflect only what is owed.
     const applied = opts.useWallet
-      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor, { alignToUsdtCent: user.currency })
+      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor, { alignToUsdtCent: user.currency, orderCurrency: user.currency })
       : { walletUsed: 0, owed: totalMinor };
     const owedUsdt = applied.walletUsed > 0 ? toUsdtAmount(applied.owed, user.currency) : usdt;
     // The 2dp USDT quote is what the customer actually sends and what the
@@ -286,6 +296,11 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         include: { user: true, items: { include: { variant: { include: { product: true } } } } },
       });
       if (!order) throw new CoreError("ORDER_NOT_FOUND");
+      // A cancelled or expired order must never be fulfilled — its wallet portion
+      // may already have been refunded, so delivering would ship goods for free.
+      if (["CANCELLED", "EXPIRED"].includes(order.status)) {
+        throw new CoreError("ORDER_NOT_FOUND", "That order was cancelled or expired — it cannot be confirmed.");
+      }
       if (["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK", "REFUNDED"].includes(order.status)) {
         return { kind: "skip" as const };
       }

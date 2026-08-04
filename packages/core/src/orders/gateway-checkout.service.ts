@@ -45,6 +45,27 @@ export async function createGatewayCheckout(
     async (tx) => {
       // One live gateway order per user: retrying with another method cancels
       // the previous attempt (its reservations expire via TTL sweep).
+      // Refund any wallet money on the order we are replacing.
+      {
+        const stale = await tx.order.findMany({
+          where: { userId, status: "PENDING_PAYMENT", walletUsedMinor: { gt: 0 } },
+          select: { id: true, orderNumber: true, walletUsedMinor: true },
+        });
+        for (const so of stale) {
+          const sw = await tx.wallet.findUnique({ where: { userId } });
+          if (!sw) continue;
+          const back = sw.balanceMinor + BigInt(so.walletUsedMinor);
+          await tx.walletTransaction.create({
+            data: {
+              walletId: sw.id, type: "REFUND", amountMinor: BigInt(so.walletUsedMinor), balanceAfterMinor: back,
+              currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
+              idempotencyKey: `refund-cancel:${so.id}`,
+            },
+          });
+          await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
+          await tx.order.update({ where: { id: so.id }, data: { walletUsedMinor: 0 } });
+        }
+      }
       await tx.order.updateMany({
         where: { userId, status: "PENDING_PAYMENT" },
         data: { status: "CANCELLED", cancelledAt: new Date() },

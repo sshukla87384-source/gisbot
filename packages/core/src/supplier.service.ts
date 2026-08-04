@@ -264,7 +264,9 @@ export async function placeSupplierOrder(
       // Accepted but still processing — poll the status endpoint once.
       const rec = await lookupSupplierOrder(s, extId, excl);
       if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
-      lastReason = "NO_KEY_IN_RESPONSE";
+      // The supplier ACCEPTED this order (HTTP 2xx). Trying the next action name
+      // would place — and pay for — a second order. Stop and let an admin look.
+      return { ok: false, keys: [], reason: "ACCEPTED_NO_KEY", raw: lastRaw };
     } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
   }
 

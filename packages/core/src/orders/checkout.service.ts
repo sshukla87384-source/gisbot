@@ -1,6 +1,7 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret } from "@gis/shared";
+import { convertMinor } from "../fx.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
@@ -298,16 +299,22 @@ export async function repayBnpl(userId: string, amountMinor?: number): Promise<B
     if (!u) throw new CoreError("USER_NOT_FOUND");
     const outstanding = u.bnplOutstandingMinor;
     if (outstanding <= 0) return { repaidMinor: 0, outstandingMinor: 0, currency: u.currency };
-    const wrows = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint }>>`
-      SELECT "id", "balanceMinor" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
+    const wrows = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+      SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
     const w = wrows[0];
     if (!w) throw new CoreError("WALLET_NOT_FOUND");
     const want = amountMinor && amountMinor > 0 ? Math.min(amountMinor, outstanding) : outstanding;
-    const pay = Math.min(want, Number(w.balanceMinor));
+    // BNPL is denominated in the USER's currency, the wallet in ITS own —
+    // subtracting one from the other cleared Rs 5 of debt for a $5 debit.
+    const balInUserCur = w.currency === u.currency
+      ? Number(w.balanceMinor)
+      : convertMinor(Number(w.balanceMinor), w.currency as Currency, u.currency as Currency);
+    const pay = Math.min(want, balInUserCur);
+    const debit = w.currency === u.currency ? pay : convertMinor(pay, u.currency as Currency, w.currency as Currency);
     if (pay <= 0) throw new CoreError("INSUFFICIENT_BALANCE");
     const newBal = w.balanceMinor - BigInt(pay);
     await tx.walletTransaction.create({
-      data: { walletId: w.id, type: "PURCHASE", amountMinor: -BigInt(pay), balanceAfterMinor: newBal, currency: u.currency, referenceNote: "BNPL repayment" },
+      data: { walletId: w.id, type: "PURCHASE", amountMinor: -BigInt(debit), balanceAfterMinor: newBal, currency: u.currency, referenceNote: "BNPL repayment" },
     });
     await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: newBal } });
     await tx.user.update({ where: { id: userId }, data: { bnplOutstandingMinor: { decrement: pay } } });

@@ -492,12 +492,15 @@ async function manualDeliverView(ctx: Ctx, orderId: string): Promise<void> {
 }
 
 async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
+  // Keep the product in session: "adm:cprm:<userId>~<channel>~<productId>" was
+  // 65-67 bytes and cb() throws over 64, which killed this whole screen.
+  ctx.session.admProductId = productId;
   const p = await getProductBriefById(productId);
   const rows = await listProductUserPrices(productId);
   const kb = new InlineKeyboard();
   kb.text("➕ Add custom price", cb("adm", "cpadd", productId)).row();
   for (const r of rows) {
-    kb.text(`✖️ ${r.label} · ${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel}~${productId}`)).row();
+    kb.text(`✖️ ${r.label} · ${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
   }
   kb.text("◀️ Back", cb("adm", "prod", productId));
   const lines = [
@@ -1291,8 +1294,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "cprm": {
-      const [uid, channel, pid] = id.split("~");
-      if (uid && channel && pid) { await removeUserPrice(uid, pid, channel as PriceChannel); await customPriceView(ctx, pid); }
+      const [uid, ch] = id.split("~");
+      const pid = ctx.session.admProductId ?? "";
+      const channel = ch === "D" ? "DIRECT" : ch === "A" ? "API" : "BOTH";
+      if (uid && pid) { await removeUserPrice(uid, pid, channel as PriceChannel); await customPriceView(ctx, pid); }
+      else await ctx.reply("That screen expired — open the product again.");
       return;
     }
 

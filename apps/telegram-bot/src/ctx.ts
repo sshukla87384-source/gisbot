@@ -83,6 +83,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Failed payment-verify attempts, so the paste state cannot stick forever. */
+  payRetries?: number;
   /** INR wallet top-up being requested (minor units). */
   inrTopupMinor?: number;
   /** Pending price-change announcement offered to the admin. */

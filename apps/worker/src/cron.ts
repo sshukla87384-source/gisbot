@@ -1,4 +1,6 @@
-import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdminAlert, getRedis } from "@gis/core";
+import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdminAlert, getRedis,
+  refundWalletForOrder,
+} from "@gis/core";
 import { prisma } from "@gis/database";
 
 /**
@@ -32,8 +34,25 @@ async function sweepReservationsAndOrders(): Promise<void> {
       data: { status: "AVAILABLE", reservedUntil: null },
     }),
   ]);
+  // Refund any wallet money applied to a part-paid order BEFORE expiring it —
+  // otherwise the customer's balance is silently destroyed with the order.
+  const dying = await prisma.order.findMany({
+    where: { status: "PENDING_PAYMENT", expiresAt: { lt: now }, walletUsedMinor: { gt: 0 } },
+    select: { id: true, userId: true, orderNumber: true, walletUsedMinor: true },
+  });
+  for (const o of dying) {
+    try {
+      await refundWalletForOrder(o.userId, o.id, o.orderNumber, o.walletUsedMinor);
+    } catch {
+      // leave it PENDING_PAYMENT so the next run retries rather than losing the money
+    }
+  }
   const expired = await prisma.order.updateMany({
-    where: { status: "PENDING_PAYMENT", expiresAt: { lt: now } },
+    where: {
+      status: "PENDING_PAYMENT",
+      expiresAt: { lt: now },
+      walletUsedMinor: 0,
+    },
     data: { status: "EXPIRED" },
   });
   if (keys.count + accounts.count + expired.count > 0) {

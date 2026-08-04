@@ -86,3 +86,34 @@ export async function adjustWallet(opts: {
     return newBalance;
   });
 }
+
+/**
+ * Refund wallet money that was applied to an order which is being cancelled or
+ * expired, then mark the order so it can never be refunded twice. Idempotent
+ * via the wallet ledger's unique idempotency key.
+ */
+export async function refundWalletForOrder(
+  userId: string,
+  orderId: string,
+  orderNumber: string,
+  amountMinor: number,
+): Promise<boolean> {
+  if (!amountMinor || amountMinor <= 0) return false;
+  return prisma.$transaction(async (tx) => {
+    const w = await tx.wallet.findUnique({ where: { userId } });
+    if (!w) return false;
+    const already = await tx.walletTransaction.findFirst({ where: { idempotencyKey: `refund-cancel:${orderId}` } });
+    if (already) return false;
+    const back = w.balanceMinor + BigInt(amountMinor);
+    await tx.walletTransaction.create({
+      data: {
+        walletId: w.id, type: "REFUND", amountMinor: BigInt(amountMinor), balanceAfterMinor: back,
+        currency: w.currency, orderId, referenceNote: `expired ${orderNumber}`,
+        idempotencyKey: `refund-cancel:${orderId}`,
+      },
+    });
+    await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
+    await tx.order.update({ where: { id: orderId }, data: { status: "EXPIRED", walletUsedMinor: 0 } });
+    return true;
+  });
+}
