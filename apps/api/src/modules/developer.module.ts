@@ -78,8 +78,10 @@ export class DeveloperController {
       res = { ...res, items, page: 1, pages: 1 };
     }
     const inStockOnly = query.inStock === "true";
+    const src = query.source; // "own" | "supplier" | undefined (both)
     const items = res.items
       .filter((p) => (inStockOnly ? p.inStock : true))
+      .filter((p) => (src === "own" ? !p.supplierBacked : src === "supplier" ? p.supplierBacked : true))
       .map((p) => ({
         id: p.id,
         name: p.name,
@@ -88,6 +90,8 @@ export class DeveloperController {
         fromPriceMinor: p.fromPriceMinor,
         onSale: p.onSale,
         inStock: p.inStock,
+        // true = fulfilled by an upstream supplier; still bought the same way.
+        supplierBacked: p.supplierBacked,
         // Order with any of these: POST /orders { "variantId": ... }
         variants: p.variants.map((v) => ({
           id: v.id,
@@ -379,6 +383,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 <li><b>stock</b> is the real number available. For supplier-backed products this is the upstream supplier stock.</li>
 <li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable.</li>
 <li>Add <code>?inStock=true</code> to receive only orderable products.</li>
+<li><b>Supplier-backed items are included and fully purchasable</b> — they carry <code>supplierBacked: true</code>, are bought with the same <code>POST /orders</code> call, and their keys come back in that response. Filter with <code>?source=supplier</code> or <code>?source=own</code>.</li>
 <li><b>Getting only a handful of products?</b> Pass <code>?all=true</code> for the whole catalogue in one call, or page with <code>?limit=200&amp;page=N</code>. Default page size is <b>100</b>; the response carries <code>total</code>, <code>pages</code> and <code>hasMore</code>.</li>
 </ul>
 </div>

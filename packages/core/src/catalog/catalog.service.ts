@@ -29,6 +29,8 @@ export interface ProductListItem {
   inStock: boolean;
   /** Total units across variants; null = unlimited (not unit-stocked). */
   stock: number | null;
+  /** true = stocked/fulfilled by an upstream supplier, still auto-delivered. */
+  supplierBacked: boolean;
   buttonStyle: string | null;
   iconCustomEmojiId: string | null;
   /** Buyable variants — API consumers order by `variants[].id`. */
@@ -193,6 +195,7 @@ export async function listProducts(opts: {
         onSale,
         inStock,
         stock,
+        supplierBacked: p.supplierId !== null,
         buttonStyle: p.buttonStyle,
         iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),
       });

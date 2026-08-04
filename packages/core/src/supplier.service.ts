@@ -10,7 +10,7 @@ import { usdtRate } from "./fx.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: string; markupBp: number; active: boolean }
-export interface SupplierProduct { ref: string; name: string; description: string; note: string; priceMinor: number; stock: number | null }
+export interface SupplierProduct { ref: string; name: string; description: string; note: string; priceMinor: number; stock: number | null; variantRef?: string }
 
 const authHeaders = (key: string): Record<string, string> => ({ Authorization: `Bearer ${key}`, "X-API-Key": key, Accept: "application/json" });
 
@@ -63,7 +63,12 @@ async function getJson(s: SupplierRow, path: string): Promise<any> {
   return res.json();
 }
 
-const PRODUCT_PATHS = ["/products", "/product", "/catalog", "/items", "/list"];
+const PRODUCT_PATHS = [
+  // A sibling shop running this same software (its own developer API).
+  "/api/v1/developer/products?all=true",
+  "/developer/products?all=true",
+  "/products", "/product", "/catalog", "/items", "/list",
+];
 /** Single-endpoint reseller APIs (Supabase functions etc.) select the operation with ?action=. */
 const PRODUCT_ACTIONS = ["products", "catalog", "list_products", "products_list", "list", "stock", "get_products"];
 
@@ -79,6 +84,28 @@ async function actionGet(s: SupplierRow, params: Record<string, string | number>
   return fetch(withQuery(s.baseUrl, params), { headers: authHeaders(decKey(s)) });
 }
 
+/** Some APIs (including ours) quote prices in integer MINOR units. */
+function priceMinorOf(p: any): number {
+  const minor = pickNum(p, ["priceMinor", "fromPriceMinor", "amountMinor", "price_minor", "unitPriceMinor"]);
+  if (minor !== null) return Math.round(minor); // already minor units — do NOT scale
+  const v = pickNum(p?.variants?.[0] ?? {}, ["priceMinor", "amountMinor"]);
+  if (v !== null) return Math.round(v);
+  const major = pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price", "unitPrice", "sell_price", "sellPrice", "total_cost", "reseller_price", "resellerPrice"]);
+  return Math.round((major ?? 0) * 100);
+}
+
+function stockOf(p: any): number | null {
+  const direct = pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count", "available_stock", "availableStock", "stock_available", "in_stock", "remaining", "count"]);
+  if (direct !== null) return direct;
+  const v = p?.variants?.[0];
+  if (v) {
+    if (v.unlimited === true) return null;
+    const vs = pickNum(v, ["stock", "available", "quantity"]);
+    if (vs !== null) return vs;
+  }
+  return null;
+}
+
 function parseProductArray(arr: any[]): SupplierProduct[] {
   return arr
     .map((p) => ({
@@ -86,8 +113,10 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
       name: pickStr(p, ["name", "title", "product", "label", "productName", "product_name"]) || "Product",
       description: pickStr(p, ["description", "desc", "details", "info", "about", "content", "body", "long_description", "longDescription", "summary"]),
       note: pickStr(p, ["note", "notes", "instructions", "instruction", "warranty", "terms", "guide", "activation", "how_to_use", "howToUse", "delivery_note", "deliveryNote"]),
-      priceMinor: Math.round((pickNum(p, ["price", "amount", "cost", "priceUsd", "rate", "unit_price", "unitPrice", "sell_price", "sellPrice", "total_cost", "reseller_price", "resellerPrice"]) ?? 0) * 100),
-      stock: pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count", "available_stock", "availableStock", "stock_available", "in_stock", "remaining", "count"]),
+      priceMinor: priceMinorOf(p),
+      stock: stockOf(p),
+      // Sibling shops need the VARIANT id to place an order, not the product id.
+      variantRef: pickStr(p?.variants?.[0] ?? {}, ["id", "variantId"]) || undefined,
     }))
     .filter((p) => p.ref && p.priceMinor > 0);
 }
@@ -231,7 +260,11 @@ export async function placeSupplierOrder(
 ): Promise<{ ok: boolean; keys: string[]; reason?: string; raw?: string }> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
-  const pid: string | number = /^\d+$/.test(ref) ? Number(ref) : ref;
+  // "productRef|variantRef" — a sibling shop running this software needs the
+  // VARIANT id to place an order.
+  const [rawRef, variantRef] = ref.includes("|") ? ref.split("|") : [ref, undefined];
+  const baseRef = rawRef ?? ref;
+  const pid: string | number = /^\d+$/.test(baseRef) ? Number(baseRef) : baseRef;
   // A STABLE id per order line: a retry must never create a second order upstream.
   const extId = externalOrderId ?? `sup-${supplierId}-${ref}-${qty}`;
   const excl = [extId, String(ref), s.id, supplierId];
@@ -242,6 +275,27 @@ export async function placeSupplierOrder(
     let j: any; try { j = JSON.parse(text); } catch { j = text; }
     return { keys: extractDeliveredKeys(j, excl), json: j };
   };
+
+  // Strategy 0 — a sibling shop running this same software.
+  if (variantRef) {
+    for (const path of ["/api/v1/developer/orders", "/developer/orders", "/orders"]) {
+      try {
+        const res = await fetch(`${s.baseUrl.replace(/\/$/, "")}${path}`, {
+          method: "POST",
+          headers: { ...authHeaders(decKey(s)), "Content-Type": "application/json", "Idempotency-Key": extId },
+          body: JSON.stringify({ variantId: variantRef, quantity: qty }),
+        });
+        const text = await res.text().catch(() => "");
+        if (res.status === 404) continue;
+        lastRaw = text.slice(0, 500);
+        if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; break; }
+        const { keys } = readKeys(text);
+        if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
+        lastReason = "ACCEPTED_NO_KEY";
+        return { ok: false, keys: [], reason: lastReason, raw: lastRaw };
+      } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
+    }
+  }
 
   // Strategy A — action-style API: GET <base>?action=place_order&product_id=..&quantity=..&external_order_id=..
   for (const action of ["place_order", "order", "create_order", "buy", "purchase", "new_order"]) {
@@ -326,7 +380,11 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
     const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
     const inrMinor = Math.round(priceMinor * rate);
     const inStock = p.stock === null || p.stock > 0; // null = API doesn't report stock → treat as available
-    const existing = await prisma.product.findFirst({ where: { supplierId: s.id, supplierRef: p.ref }, include: { variants: true } });
+    const refKey = p.variantRef ? `${p.ref}|${p.variantRef}` : p.ref;
+    const existing = await prisma.product.findFirst({
+      where: { supplierId: s.id, OR: [{ supplierRef: refKey }, { supplierRef: p.ref }] },
+      include: { variants: true },
+    });
     if (existing) {
       // Visibility follows supplier stock: shown when >0, hidden when 0.
       await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null, activationGuide: p.note.slice(0, 2000) || null, supplierStock: p.stock, status: inStock ? "ACTIVE" : "PAUSED" } });
@@ -343,7 +401,7 @@ export async function syncSupplierProducts(supplierId: string): Promise<{ added:
           slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
           activationGuide: p.note.slice(0, 2000) || null,
           type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
-          supplierId: s.id, supplierRef: p.ref, supplierStock: p.stock,
+          supplierId: s.id, supplierRef: p.variantRef ? `${p.ref}|${p.variantRef}` : p.ref, supplierStock: p.stock,
           variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
         },
       });
