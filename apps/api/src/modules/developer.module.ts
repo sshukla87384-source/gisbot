@@ -15,9 +15,11 @@ function usdtOf(minor: number | null, currency: Currency): string | null {
 }
 
 /** UNLIMITED_STOCK is an internal sentinel — never leak 9007199254740991 to API clients. */
-function stockOut(n: number): { stock: number | null; unlimited: boolean; inStock: boolean } {
-  if (n >= UNLIMITED_STOCK) return { stock: null, unlimited: true, inStock: true };
-  return { stock: n, unlimited: false, inStock: n > 0 };
+function stockOut(n: number): { stock: number | null; stockText: string; unlimited: boolean; inStock: boolean } {
+  // stockText so a naive consumer prints "Unlimited" instead of "None" when
+  // stock is null (not unit-stocked).
+  if (n >= UNLIMITED_STOCK) return { stock: null, stockText: "Unlimited", unlimited: true, inStock: true };
+  return { stock: n, stockText: String(n), unlimited: false, inStock: n > 0 };
 }
 
 function currencyOf(q: unknown): Currency {
@@ -107,6 +109,9 @@ export class DeveloperController {
         variants: p.variants.map((v) => ({
           id: v.id,
           name: v.name,
+          // A consumer that only reads variants[].name would show "Standard".
+          productName: p.name,
+          label: v.name.trim().toLowerCase() === "standard" ? p.name : `${p.name} — ${v.name}`,
           price: usdtOf(v.priceMinor, currency),
           priceUsdt: usdtOf(v.priceMinor, currency),
           currency: "USDT",
@@ -152,6 +157,8 @@ export class DeveloperController {
         variants: p.variants.map((v) => ({
           id: v.id,
           name: v.name,
+          productName: p.name,
+          label: v.name.trim().toLowerCase() === "standard" ? p.name : `${p.name} — ${v.name}`,
           price: usdtOf(v.priceMinor, currencyOf(query)),
           priceUsdt: usdtOf(v.priceMinor, currencyOf(query)),
           originalPriceUsdt: usdtOf(v.originalPriceMinor, currencyOf(query)),
@@ -178,6 +185,8 @@ export class DeveloperController {
         currency: "USDT",
         variants: p.variants.map((v) => ({
           id: v.id, name: v.name,
+          productName: p.name,
+          label: v.name.trim().toLowerCase() === "standard" ? p.name : `${p.name} — ${v.name}`,
           price: usdtOf(v.priceMinor, currencyOf(query)),
           priceUsdt: usdtOf(v.priceMinor, currencyOf(query)),
           currency: "USDT",
@@ -471,7 +480,8 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 <li><b>variants[].id</b> is what you send as <code>variantId</code> to <code>POST /orders</code>.</li>
 <li><b>All prices are USDT.</b> Every product, variant and order returns <code>price</code>/<code>priceUsdt</code> (2dp string) with <code>currency: "USDT"</code>. Raw <code>priceMinor</code> and <code>nativeCurrency</code> are also included for reference.</li>
 <li><b>stock</b> is the real number available. For supplier-backed products this is the upstream supplier stock.</li>
-<li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable.</li>
+<li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable. Use <code>stockText</code> if you want a ready-to-display value — it is the number, or <code>"Unlimited"</code>.</li>
+<li>Each variant also carries <code>productName</code> and a display-ready <code>label</code>, so a picker never shows just <code>"Standard"</code>.</li>
 <li>Add <code>?inStock=true</code> to receive only orderable products.</li>
 <li><b>Supplier-backed items are included and fully purchasable</b> — they carry <code>supplierBacked: true</code>, are bought with the same <code>POST /orders</code> call, and their keys come back in that response. Filter with <code>?source=supplier</code> or <code>?source=own</code>.</li>
 <li><b>Getting only a handful of products?</b> Pass <code>?all=true</code> for the whole catalogue in one call, or page with <code>?limit=200&amp;page=N</code>. Default page size is <b>100</b>; the response carries <code>total</code>, <code>pages</code> and <code>hasMore</code>.</li>
@@ -547,6 +557,9 @@ export class DeveloperDocsController {
         price_unit: "USDT (2dp string)",
         price_raw: "variants[].priceMinor",
         stock: "variants[].stock",
+        stock_text: "variants[].stockText",
+        variant_label: "variants[].label",
+        product_name: "variants[].productName",
         unlimited_flag: "variants[].unlimited",
         currency: "currency",
       },
@@ -599,6 +612,8 @@ export class DeveloperDocsController {
       '  price (raw): "variants[].priceMinor" + "nativeCurrency"  (integer MINOR units)',
       '  balance: "balance" / "balanceUsdt"  (USDT, 2dp string; currency is always "USDT")',
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
+      '  stock (display): "variants[].stockText"  (the number, or "Unlimited")',
+      '  variant label: "variants[].label"  (product name, or "Product — Variant")',
       "",
       "Scopes: catalog:read, orders:read, orders:write, wallet:read",
       "A 403 response means the key is missing a scope; GET /ping lists them.",
