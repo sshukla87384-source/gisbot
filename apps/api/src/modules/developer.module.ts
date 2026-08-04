@@ -356,7 +356,7 @@ function docsPage(): string {
 <h1>${store} — Developer API <span class="pill">v1</span></h1>
 <p class="sub">REST API for programmatic catalog access and order placement.</p>
 
-<div class="card"><b>Base URL</b><br/><code>${base}</code></div>
+<div class="card"><b>Base URL</b><br/><code>${base}</code><br/><br/>\n<b>Importing this API into another shop?</b> Point your importer at:<br/>\n<code>${base}/docs.txt</code> (plain text) or <code>${base}/manifest</code> (JSON)</div>
 
 <h2>Authentication</h2>
 <div class="card">Send your key on every request (except <code>/health</code>) as a header:
@@ -367,20 +367,20 @@ Create a key in the bot: open the menu → <b>🧑‍💻 Developer API</b> → 
 
 <h2>Endpoints</h2>
 <div class="card">
-  <div class="ep"><span class="m get">GET</span><code class="path">/health</code><span class="desc">liveness (no auth)</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products</code><span class="desc">buyable catalog (incl. variantIds)</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products?all=true</code><span class="desc">entire catalogue, one call</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products?limit=200&amp;page=2</code><span class="desc">paged (limit 1-200, default 100)</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products?inStock=true</code><span class="desc">in-stock only</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products/{id}</code><span class="desc">one product</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/products/{id}/stock</code><span class="desc">live stock & price</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/categories</code><span class="desc">categories</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/balance</code><span class="desc">balance + recent ledger</span></div>
-  <div class="ep"><span class="m post">POST</span><code class="path">/orders</code><span class="desc">place an order</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/orders</code><span class="desc">your recent orders</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/orders/{orderNumber}</code><span class="desc">a single order</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/wallet</code><span class="desc">balance only</span></div>
-  <div class="ep"><span class="m get">GET</span><code class="path">/ping</code><span class="desc">verify key + see its scopes</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/health</code><span class="desc">liveness (no auth)</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/products</code><span class="desc">buyable catalog (incl. variantIds)</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/products?all=true</code><span class="desc">entire catalogue, one call</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/products?limit=200&amp;page=2</code><span class="desc">paged (limit 1-200, default 100)</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/products?inStock=true</code><span class="desc">in-stock only</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/products/{id}</code><span class="desc">one product</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/products/{id}/stock</code><span class="desc">live stock & price</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/categories</code><span class="desc">categories</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/balance</code><span class="desc">balance + recent ledger</span></div>
+  <div class="ep"><span class="m post">POST </span><code class="path">/orders</code><span class="desc">place an order</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/orders</code><span class="desc">your recent orders</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/orders/{orderNumber}</code><span class="desc">a single order</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/wallet</code><span class="desc">balance only</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/ping</code><span class="desc">verify key + see its scopes</span></div>
 </div>
 
 <h2>Place an order</h2>
@@ -457,6 +457,90 @@ export class DeveloperDocsController {
   @Header("Content-Type", "text/html; charset=utf-8")
   guide(): string {
     return docsPage();
+  }
+
+  /** Machine-readable integration manifest — importers should use this. */
+  @Get("manifest")
+  manifest() {
+    const base = `${(loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "")}/api/v1/developer`;
+    return {
+      name: loadConfig().STORE_NAME,
+      version: "1",
+      base_url: base,
+      auth: { type: "bearer", header: "Authorization", format: "Bearer {API_KEY}", alt_header: "X-API-Key" },
+      endpoints: {
+        products: { method: "GET", path: "/products", query: { all: "true", limit: "1-200", page: "N", inStock: "true", source: "own|supplier" } },
+        product: { method: "GET", path: "/products/{id}" },
+        stock: { method: "GET", path: "/products/{id}/stock" },
+        balance: { method: "GET", path: "/balance", scope: "wallet:read" },
+        wallet: { method: "GET", path: "/wallet", scope: "wallet:read" },
+        orders_list: { method: "GET", path: "/orders", scope: "orders:read" },
+        order_detail: { method: "GET", path: "/orders/{orderNumber}", scope: "orders:read" },
+        place_order: { method: "POST", path: "/orders", scope: "orders:write", body: { variantId: "string", quantity: "number" }, headers: { "Idempotency-Key": "unique per order" } },
+        ping: { method: "GET", path: "/ping" },
+      },
+      response_fields: {
+        products_list: "items",
+        product_id: "id",
+        variant_id: "variants[].id",
+        price: "variants[].priceMinor",
+        price_unit: "minor",
+        stock: "variants[].stock",
+        unlimited_flag: "variants[].unlimited",
+        currency: "currency",
+      },
+      notes: [
+        "All money values are integer MINOR units (cents/paise).",
+        "Order using variants[].id as variantId.",
+        "supplierBacked=true items are fulfilled upstream but bought identically.",
+        "A 403 means the key lacks a scope — GET /ping lists the key's scopes.",
+      ],
+    };
+  }
+
+  /** Plain-text docs: easiest thing for a scraper or an LLM to read. */
+  @Get("docs.txt")
+  @Header("Content-Type", "text/plain; charset=utf-8")
+  docsText(): string {
+    const base = `${(loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "")}/api/v1/developer`;
+    return [
+      `${loadConfig().STORE_NAME} — Developer API v1`,
+      "",
+      `Base URL: ${base}`,
+      "",
+      "Authentication:",
+      "  Authorization: Bearer YOUR_API_KEY",
+      "  (or) X-API-Key: YOUR_API_KEY",
+      "",
+      "Endpoints:",
+      "  GET /ping",
+      "  GET /products",
+      "  GET /products?all=true",
+      "  GET /products?limit=200&page=1",
+      "  GET /products/{id}",
+      "  GET /products/{id}/stock",
+      "  GET /balance",
+      "  GET /wallet",
+      "  GET /orders",
+      "  GET /orders/{orderNumber}",
+      "  POST /orders",
+      "",
+      'POST /orders body: { "variantId": "VARIANT_ID", "quantity": 1 }',
+      "POST /orders header: Idempotency-Key: <unique-per-order>",
+      "",
+      "Response fields:",
+      '  products list: "items"',
+      '  product id: "id"',
+      '  variant id: "variants[].id"',
+      '  price: "variants[].priceMinor"  (integer MINOR units)',
+      '  stock: "variants[].stock"  ("unlimited": true means no limit)',
+      "",
+      "Scopes: catalog:read, orders:read, orders:write, wallet:read",
+      "A 403 response means the key is missing a scope; GET /ping lists them.",
+      "",
+      `Machine-readable manifest: ${base}/manifest`,
+      "",
+    ].join("\n");
   }
 }
 

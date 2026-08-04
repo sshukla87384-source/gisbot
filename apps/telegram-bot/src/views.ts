@@ -585,6 +585,7 @@ export function apiDocsView(): View {
   const hasUrl = (loadConfig().PUBLIC_API_URL ?? "").length > 0;
   const kb = new InlineKeyboard();
   if (hasUrl) kb.url("📖 Open full documentation", base).row();
+  if (hasUrl) kb.url("🤖 Machine-readable docs (.txt)", `${base}/docs.txt`).row();
   navRow(kb, cb("api", "home"));
   return {
     text: [
@@ -592,6 +593,15 @@ export function apiDocsView(): View {
       "",
       hasUrl ? `Base URL:\n<code>${base}</code>` : "Base URL is shown once configured by the store.",
       "",
+      ...(hasUrl
+        ? [
+            "🤖 <b>Importing into another shop or tool?</b>",
+            "Give it one of these instead of a docs page — they are made to be read automatically:",
+            `<code>${base}/docs.txt</code>`,
+            `<code>${base}/manifest</code>`,
+            "",
+          ]
+        : []),
       `${bold("Auth")} — send your key as a header:`,
       "<code>Authorization: Bearer YOUR_KEY</code>",
       "<code>X-API-Key: YOUR_KEY</code>",
