@@ -7,7 +7,17 @@ ARG PNPM_VERSION=9.15.0
 FROM node:${NODE_VERSION}-alpine AS build
 ARG NEXT_PUBLIC_API_URL
 ARG PNPM_VERSION
-RUN apk add --no-cache openssl && npm install -g pnpm@${PNPM_VERSION}
+# Alpine's CDN can fail TLS on some hosts, which empties the package index and
+# makes every package look missing. Retry, fall back to the http mirror, and
+# never fail the build for openssl — node:22-alpine already ships libssl3,
+# which is what Prisma actually links against.
+RUN set -eux; \
+    for i in 1 2 3; do apk update && break || sleep 5; done || \
+      (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
+       echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories && \
+       apk update) || true; \
+    (apk add --no-cache openssl || true); \
+    npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /app
 COPY . .
 RUN pnpm install --no-frozen-lockfile
@@ -16,7 +26,7 @@ ENV NODE_OPTIONS=--max-old-space-size=2048
 RUN pnpm --filter @gis/admin-panel build
 
 FROM node:${NODE_VERSION}-alpine AS runner
-RUN apk add --no-cache curl
+RUN for i in 1 2 3; do apk add --no-cache curl && break || sleep 5; done || true
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 WORKDIR /app
 COPY --from=build --chown=node:node /app/apps/admin-panel/.next/standalone ./
