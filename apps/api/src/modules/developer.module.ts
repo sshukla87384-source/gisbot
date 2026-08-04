@@ -1,4 +1,4 @@
-import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts, revealOrderDeliveries, UNLIMITED_STOCK } from "@gis/core";
+import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { Body, Controller, Get, Header, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
@@ -210,14 +210,25 @@ export class DeveloperController {
     };
   }
 
-  /** Your wallet balance (the account this key is linked to). */
+  /** Your wallet balance, always expressed in USDT. */
   @Scopes("wallet:read")
   @Get("wallet")
   async wallet(@Req() req: DeveloperRequest) {
     const userId = req.apiKey?.ownerUserId;
     if (!userId) throw forbidden("This API key isn't linked to a user account.");
     const w = await getWallet(userId);
-    return { balanceMinor: Number(w.balanceMinor), currency: w.currency };
+    const native = Number(w.balanceMinor);
+    const usdt = toUsdt(native, w.currency);
+    return {
+      // Primary, and what integrations should read: always USDT.
+      balance: usdt,
+      balanceUsdt: usdt,
+      currency: "USDT",
+      // The underlying wallet, for reference.
+      nativeBalanceMinor: native,
+      nativeCurrency: w.currency,
+      rate: { inrPerUsdt: usdtRate("INR") },
+    };
   }
 
   /** Balance + your recent wallet ledger (last 10 entries). */
@@ -227,11 +238,20 @@ export class DeveloperController {
     const userId = req.apiKey?.ownerUserId;
     if (!userId) throw forbidden("This API key isn't linked to a user account.");
     const [w, ledger] = await Promise.all([getWallet(userId), getLedger(userId, 1, 10)]);
+    const native = Number(w.balanceMinor);
+    const usdt = toUsdt(native, w.currency);
     return {
-      balanceMinor: Number(w.balanceMinor),
-      currency: w.currency,
+      // Always USDT — integrations should read `balance` / `balanceUsdt`.
+      balance: usdt,
+      balanceUsdt: usdt,
+      currency: "USDT",
+      nativeBalanceMinor: native,
+      nativeCurrency: w.currency,
+      rate: { inrPerUsdt: usdtRate("INR") },
       ledger: ledger.entries.map((e) => ({
         type: e.type,
+        amountUsdt: toUsdt(Number(e.amountMinor), w.currency),
+        balanceAfterUsdt: toUsdt(Number(e.balanceAfterMinor), w.currency),
         amountMinor: Number(e.amountMinor),
         balanceAfterMinor: Number(e.balanceAfterMinor),
         note: e.note,
@@ -375,7 +395,7 @@ Create a key in the bot: open the menu → <b>🧑‍💻 Developer API</b> → 
   <div class="ep"><span class="m get">GET </span><code class="path">/products/{id}</code><span class="desc">one product</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/products/{id}/stock</code><span class="desc">live stock & price</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/categories</code><span class="desc">categories</span></div>
-  <div class="ep"><span class="m get">GET </span><code class="path">/balance</code><span class="desc">balance + recent ledger</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/balance</code><span class="desc">balance in USDT + ledger</span></div>
   <div class="ep"><span class="m post">POST </span><code class="path">/orders</code><span class="desc">place an order</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/orders</code><span class="desc">your recent orders</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/orders/{orderNumber}</code><span class="desc">a single order</span></div>
@@ -422,6 +442,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 <h2>Notes</h2>
 <div class="card"><ul>
 <li><b>Supplier-backed products</b> — items flagged <code>supplierBacked: true</code> are stocked upstream and delivered automatically; your keys come back in the <code>POST /orders</code> response just like local stock.</li>
+<li><b>Balance is always USDT</b> — <code>/balance</code> and <code>/wallet</code> return <code>balance</code> / <code>balanceUsdt</code> as a 2dp USDT string with <code>currency: "USDT"</code>, whatever currency the wallet is held in. The underlying values are also included as <code>nativeBalanceMinor</code> / <code>nativeCurrency</code>, plus the <code>inrPerUsdt</code> rate used.</li>
 <li><b>Single balance</b> — API orders are paid from your main wallet; top up via the Deposit menu.</li>
 <li><b>Rate limit</b> — 60 requests/min per key (configurable per key).</li>
 <li>All monetary amounts are integer <b>minor units</b> (e.g. cents); currency is on each response.</li>
@@ -472,7 +493,7 @@ export class DeveloperDocsController {
         products: { method: "GET", path: "/products", query: { all: "true", limit: "1-200", page: "N", inStock: "true", source: "own|supplier" } },
         product: { method: "GET", path: "/products/{id}" },
         stock: { method: "GET", path: "/products/{id}/stock" },
-        balance: { method: "GET", path: "/balance", scope: "wallet:read" },
+        balance: { method: "GET", path: "/balance", scope: "wallet:read", returns: { balance: "USDT string", currency: "USDT" } },
         wallet: { method: "GET", path: "/wallet", scope: "wallet:read" },
         orders_list: { method: "GET", path: "/orders", scope: "orders:read" },
         order_detail: { method: "GET", path: "/orders/{orderNumber}", scope: "orders:read" },
@@ -494,6 +515,7 @@ export class DeveloperDocsController {
         "Order using variants[].id as variantId.",
         "supplierBacked=true items are fulfilled upstream but bought identically.",
         "A 403 means the key lacks a scope — GET /ping lists the key's scopes.",
+        "Wallet balance is always reported in USDT (balance / balanceUsdt, currency=USDT).",
       ],
     };
   }
@@ -533,6 +555,7 @@ export class DeveloperDocsController {
       '  product id: "id"',
       '  variant id: "variants[].id"',
       '  price: "variants[].priceMinor"  (integer MINOR units)',
+      '  balance: "balance" / "balanceUsdt"  (USDT, 2dp string; currency is always "USDT")',
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
       "",
       "Scopes: catalog:read, orders:read, orders:write, wallet:read",

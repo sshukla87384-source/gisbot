@@ -17,6 +17,7 @@ import {
   listTickets,
   listVault,
   listReplaceableItems,
+  toUsdt,
   type CartView,
 } from "@gis/core";
 import { prisma, type Currency } from "@gis/database";
@@ -572,9 +573,12 @@ export async function apiBalanceView(user: BotUser): Promise<View> {
     text: [
       header(`💰 ${bold("API Balance")}`),
       "",
-      `Available: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+      `Available: <b>${toUsdt(Number(wallet.balanceMinor), wallet.currency as Currency)} USDT</b>`,
+      `<i>(wallet holds ${fmt(wallet.balanceMinor, wallet.currency)} ${wallet.currency})</i>`,
       "",
-      "This is the balance the API spends when you place an order (<code>POST /orders</code>). Fetch it programmatically at <code>GET /balance</code>. Top up via ➕ Top up.",
+      "The API always reports this balance in <b>USDT</b> — <code>GET /balance</code> returns <code>balance</code> / <code>balanceUsdt</code> with <code>currency: \"USDT\"</code>.",
+      "",
+      "This is what the API spends when you place an order (<code>POST /orders</code>). Top up via ➕ Top up.",
     ].join("\n"),
     kb,
   };
