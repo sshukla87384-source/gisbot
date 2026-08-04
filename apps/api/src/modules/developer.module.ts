@@ -9,6 +9,11 @@ import { ApiError, forbidden, notFound } from "../common/errors.js";
 import { DeveloperApiGuard, Scopes, type DeveloperRequest } from "../common/developer.guard.js";
 import { Public } from "../common/permissions.decorator.js";
 
+/** Every price the API returns is expressed in USDT. */
+function usdtOf(minor: number | null, currency: Currency): string | null {
+  return minor === null ? null : toUsdt(minor, currency);
+}
+
 /** UNLIMITED_STOCK is an internal sentinel — never leak 9007199254740991 to API clients. */
 function stockOut(n: number): { stock: number | null; unlimited: boolean; inStock: boolean } {
   if (n >= UNLIMITED_STOCK) return { stock: null, unlimited: true, inStock: true };
@@ -86,7 +91,11 @@ export class DeveloperController {
         id: p.id,
         name: p.name,
         emoji: p.iconEmoji,
-        currency,
+        // Prices are ALWAYS USDT for API consumers.
+        currency: "USDT",
+        fromPrice: usdtOf(p.fromPriceMinor, currency),
+        fromPriceUsdt: usdtOf(p.fromPriceMinor, currency),
+        nativeCurrency: currency,
         fromPriceMinor: p.fromPriceMinor,
         onSale: p.onSale,
         inStock: p.inStock,
@@ -96,7 +105,11 @@ export class DeveloperController {
         variants: p.variants.map((v) => ({
           id: v.id,
           name: v.name,
+          price: usdtOf(v.priceMinor, currency),
+          priceUsdt: usdtOf(v.priceMinor, currency),
+          currency: "USDT",
           priceMinor: v.priceMinor,
+          nativeCurrency: currency,
           ...stockOut(v.stock),
         })),
       }));
@@ -107,7 +120,9 @@ export class DeveloperController {
       pageSize: wantAll ? items.length : limit,
       total: res.total,
       hasMore: res.page < res.pages,
-      currency,
+      currency: "USDT",
+      nativeCurrency: currency,
+      rate: { inrPerUsdt: usdtRate("INR") },
     };
   }
 
@@ -122,7 +137,8 @@ export class DeveloperController {
         description: p.description,
         emoji: p.iconEmoji,
         imageUrl: p.imageUrl,
-        currency: currencyOf(query),
+        currency: "USDT",
+        nativeCurrency: currencyOf(query),
         type: p.type,
         onSale: p.onSale,
         salePercentBp: p.salePercentBp,
@@ -133,6 +149,10 @@ export class DeveloperController {
         variants: p.variants.map((v) => ({
           id: v.id,
           name: v.name,
+          price: usdtOf(v.priceMinor, currencyOf(query)),
+          priceUsdt: usdtOf(v.priceMinor, currencyOf(query)),
+          originalPriceUsdt: usdtOf(v.originalPriceMinor, currencyOf(query)),
+          currency: "USDT",
           priceMinor: v.priceMinor,
           originalPriceMinor: v.originalPriceMinor,
           ...stockOut(v.stock),
@@ -152,8 +172,13 @@ export class DeveloperController {
         productId: p.id,
         name: p.name,
         onSale: p.onSale,
+        currency: "USDT",
         variants: p.variants.map((v) => ({
-          id: v.id, name: v.name, priceMinor: v.priceMinor,
+          id: v.id, name: v.name,
+          price: usdtOf(v.priceMinor, currencyOf(query)),
+          priceUsdt: usdtOf(v.priceMinor, currencyOf(query)),
+          currency: "USDT",
+          priceMinor: v.priceMinor,
           originalPriceMinor: v.originalPriceMinor, ...stockOut(v.stock),
         })),
       };
@@ -179,7 +204,11 @@ export class DeveloperController {
       items: rows.map((o) => ({
         orderNumber: o.orderNumber,
         status: o.status,
-        currency: o.currency,
+        total: toUsdt(o.totalMinor, o.currency as Currency),
+        totalUsdt: toUsdt(o.totalMinor, o.currency as Currency),
+        walletUsedUsdt: toUsdt(o.walletUsedMinor ?? 0, o.currency as Currency),
+        currency: "USDT",
+        nativeCurrency: o.currency,
         totalMinor: o.totalMinor,
         walletUsedMinor: o.walletUsedMinor,
         createdAt: o.createdAt,
@@ -202,7 +231,10 @@ export class DeveloperController {
     return {
       orderNumber: o.orderNumber,
       status: o.status,
-      currency: o.currency,
+      total: toUsdt(o.totalMinor, o.currency as Currency),
+      totalUsdt: toUsdt(o.totalMinor, o.currency as Currency),
+      currency: "USDT",
+      nativeCurrency: o.currency,
       totalMinor: o.totalMinor,
       createdAt: o.createdAt,
       paidAt: o.paidAt,
@@ -332,7 +364,10 @@ export class DeveloperController {
       return {
         orderNumber: r.orderNumber,
         status,
-        currency: r.currency,
+        charged: toUsdt(r.totalMinor, r.currency as Currency),
+        chargedUsdt: toUsdt(r.totalMinor, r.currency as Currency),
+        currency: "USDT",
+        nativeCurrency: r.currency,
         totalMinor: r.totalMinor,
         pendingManualItems: pending,
         items,
@@ -431,6 +466,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 }</pre>
 <ul>
 <li><b>variants[].id</b> is what you send as <code>variantId</code> to <code>POST /orders</code>.</li>
+<li><b>All prices are USDT.</b> Every product, variant and order returns <code>price</code>/<code>priceUsdt</code> (2dp string) with <code>currency: "USDT"</code>. Raw <code>priceMinor</code> and <code>nativeCurrency</code> are also included for reference.</li>
 <li><b>stock</b> is the real number available. For supplier-backed products this is the upstream supplier stock.</li>
 <li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable.</li>
 <li>Add <code>?inStock=true</code> to receive only orderable products.</li>
@@ -504,14 +540,16 @@ export class DeveloperDocsController {
         products_list: "items",
         product_id: "id",
         variant_id: "variants[].id",
-        price: "variants[].priceMinor",
-        price_unit: "minor",
+        price: "variants[].priceUsdt",
+        price_unit: "USDT (2dp string)",
+        price_raw: "variants[].priceMinor",
         stock: "variants[].stock",
         unlimited_flag: "variants[].unlimited",
         currency: "currency",
       },
       notes: [
-        "All money values are integer MINOR units (cents/paise).",
+        "All prices, balances and order totals are reported in USDT (price/priceUsdt/total, currency=USDT).",
+        "priceMinor/nativeCurrency are the underlying values, in integer MINOR units.",
         "Order using variants[].id as variantId.",
         "supplierBacked=true items are fulfilled upstream but bought identically.",
         "A 403 means the key lacks a scope — GET /ping lists the key's scopes.",
@@ -554,7 +592,8 @@ export class DeveloperDocsController {
       '  products list: "items"',
       '  product id: "id"',
       '  variant id: "variants[].id"',
-      '  price: "variants[].priceMinor"  (integer MINOR units)',
+      '  price: "variants[].price" / "variants[].priceUsdt"  (USDT, 2dp string)',
+      '  price (raw): "variants[].priceMinor" + "nativeCurrency"  (integer MINOR units)',
       '  balance: "balance" / "balanceUsdt"  (USDT, 2dp string; currency is always "USDT")',
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
       "",
