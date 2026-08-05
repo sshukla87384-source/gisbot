@@ -1636,7 +1636,11 @@ export function createBot(): Bot<Ctx> {
           const r = await spinForOrder(user.id, args[0] ?? "");
           if (!r.ok) {
             await ctx.answerCallbackQuery({
-              text: r.reason === "ALREADY_SPUN" ? "You already spun for this order" : r.reason === "DISABLED" ? "Not running right now" : "Not eligible",
+              text:
+                r.reason === "ALREADY_SPUN" ? "You already spun for this order"
+                : r.reason === "DAILY_LIMIT" ? `Daily limit reached — ${r.maxSpinsPerDay} spins a day. Try again tomorrow!`
+                : r.reason === "DISABLED" ? "Not running right now"
+                : "Not eligible",
               show_alert: true,
             });
             break;
@@ -1650,7 +1654,7 @@ export function createBot(): Bot<Ctx> {
                   "",
                   `🎁 <b>${fmt(r.rewardMinor ?? 0, cur)}</b> has been added to your wallet.`,
                   "",
-                  "💰 Spend it on your next order — and you get another spin with every purchase!",
+                  `💰 Spend it on your next order — you get a spin with every purchase (up to ${r.maxSpinsPerDay ?? 3} a day).`,
                 ].join("\n")
               : [
                   "🎡 <b>Better luck next time!</b> 🍀",

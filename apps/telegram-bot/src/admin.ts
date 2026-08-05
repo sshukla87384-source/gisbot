@@ -136,6 +136,8 @@ import {
   markGiftDelivered,
   getSpinConfig,
   setSpinConfig,
+  getPromoFlags,
+  setPromoFlag,
   spinStats,
   REWARD_CAP_BP,
   listTestimonials,
@@ -1082,6 +1084,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const kb = new InlineKeyboard()
         .add(sbtn(cfg.enabled ? "✅ ON — turn off" : "🚫 OFF — turn on", cb("adm", "spntog"), cfg.enabled ? "success" : "danger")).row()
         .add(sbtn("🎯 Minimum to win", cb("adm", "spnmin"), "primary"), sbtn("🎁 Max reward", cb("adm", "spnmax"), "primary")).row()
+        .add(sbtn("🔁 Spins per day", cb("adm", "spnday"), "primary")).row()
         .add(sbtn("🎯 Challenge amounts", cb("adm", "spntgt"), "primary"), sbtn("⏳ Days to finish", cb("adm", "spnexp"), "primary")).row()
         .text("◀️ Back", cb("adm", "m_users"));
       await show(ctx, [
@@ -1092,7 +1095,8 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "",
         "<b>One spin per purchase</b>:",
         `• orders under <b>${(cfg.minSpendMinor / 100).toFixed(2)}</b> → “better luck next time”`,
-        `• otherwise ${(cfg.rewardBp / 100).toFixed(1)}% of the order, capped at <b>${(cfg.maxRewardMinor / 100).toFixed(2)}</b>`,
+        `• otherwise a random <b>0.01%–${(cfg.rewardBp / 100).toFixed(1)}%</b> of the order, capped at <b>${(cfg.maxRewardMinor / 100).toFixed(2)}</b>`,
+        `• at most <b>${cfg.maxSpinsPerDay}</b> spins per customer per day`,
         "",
         `🎯 Legacy challenge amounts: ${cfg.targetsMinor.map((t) => `<b>${(t / 100).toFixed(2)}</b>`).join(" · ")}`,
         `🎁 Reward: <b>${(cfg.rewardBp / 100).toFixed(1)}%</b> of the amount (hard-capped at <b>${(REWARD_CAP_BP / 100).toFixed(0)}%</b> in code)`,
@@ -1110,6 +1114,35 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(n.enabled ? "🎡 Spin & Win is ON — customers can spin from My Account." : "🚫 Spin & Win is OFF.");
       return handleAdminCallback(ctx, "spncfg", []);
     }
+    case "promo": {
+      const f = await getPromoFlags();
+      const row = (k: string, label: string, on: boolean) => sbtn(`${on ? "✅" : "🚫"} ${label}`, cb("adm", "promotog", k), on ? "success" : "danger");
+      const kb = new InlineKeyboard()
+        .add(row("spin", "Spin & Win", f.spin)).row()
+        .add(row("referral", "Referral rewards", f.referral)).row()
+        .add(row("loyalty", "Loyalty tiers & gifts", f.loyalty)).row()
+        .add(row("cashback", "Cashback", f.cashback)).row()
+        .text("◀️ Back", cb("adm", "m_users"));
+      await show(ctx, [
+        "🎚 <b>Reward Promotions</b>",
+        "",
+        "Switch any programme off instantly — no deploy needed.",
+        "",
+        "<i>Turning one off stops the PAYOUT, not just the button. Anything already credited stays credited.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "promotog": {
+      const key = (id || "spin") as "spin" | "referral" | "loyalty" | "cashback";
+      const f = await getPromoFlags();
+      const next = await setPromoFlag(key, !f[key]);
+      await ctx.answerCallbackQuery({ text: next[key] ? "Turned on" : "Turned off" }).catch(() => undefined);
+      return handleAdminCallback(ctx, "promo", []);
+    }
+    case "spnday":
+      ctx.session.awaiting = "admin_spn_day";
+      await askStep(ctx, "🔁 How many spins may one customer take per day? (e.g. <code>3</code>)");
+      return;
     case "spnmin":
       ctx.session.awaiting = "admin_spn_min";
       await askStep(ctx, "🎯 Orders <b>below</b> this amount win nothing. Send the amount (e.g. <code>10</code>):");
@@ -2821,6 +2854,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await createGift(uid, title, text.trim() === "-" ? null : text.trim(), "bot-admin");
     await ctx.reply("🎁 <b>Gift created.</b> The customer has been notified — now send it to them and tap ✅ Mark delivered.", { parse_mode: "HTML" });
     await handleAdminCallback(ctx, "gifts", []);
+    return true;
+  }
+  if (awaiting === "admin_spn_day") {
+    const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    const c = await setSpinConfig({ maxSpinsPerDay: Number.isFinite(n) ? n : 3 });
+    await ctx.reply(`🔁 Limit set to <b>${c.maxSpinsPerDay}</b> spins per customer per day.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "spncfg", []);
     return true;
   }
   if (awaiting === "admin_spn_min") {

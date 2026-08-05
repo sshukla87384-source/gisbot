@@ -100,6 +100,7 @@ export interface SessionData {
     | "admin_spn_days"
     | "admin_spn_min"
     | "admin_spn_max"
+    | "admin_spn_day"
     | "admin_fx_rate"
     | "admin_fx_surcharge"
     | "admin_tool_adjust"

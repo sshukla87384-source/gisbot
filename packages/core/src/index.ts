@@ -4,6 +4,7 @@ export * from "./users/user.service.js";
 export * from "./logs.service.js";
 export * from "./followup.service.js";
 export * from "./testimonial.service.js";
+export * from "./promos.service.js";
 export * from "./spin.service.js";
 export * from "./totp.service.js";
 export * from "./watch.service.js";

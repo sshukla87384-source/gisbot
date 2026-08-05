@@ -4,6 +4,7 @@ import { adjustWallet } from "./wallet/wallet.service.js";
 import { enqueueTelegramMessage } from "./queues.js";
 import { convertMinor } from "./fx.js";
 import { lifetimeSpend } from "./loyalty.service.js";
+import { promoEnabled } from "./promos.service.js";
 import type { Currency } from "@gis/database";
 
 /**
@@ -26,11 +27,13 @@ export interface SpinConfig {
   minSpendMinor: number;
   /** Hard ceiling on a single spin reward. */
   maxRewardMinor: number;
+  /** Most spins one customer may take per calendar day. */
+  maxSpinsPerDay: number;
 }
 
 // Enabled by default (requested). Rewards stay bounded by REWARD_CAP_BP: with
 // these targets the most anyone can earn per challenge is $1 / $2 / $5.
-const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14, minSpendMinor: 1_000, maxRewardMinor: 1 };
+const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14, minSpendMinor: 1_000, maxRewardMinor: 1, maxSpinsPerDay: 3 };
 
 export async function getSpinConfig(): Promise<SpinConfig> {
   const row = await prisma.setting.findUnique({ where: { key: SETTING } }).catch(() => null);
@@ -43,6 +46,7 @@ export async function getSpinConfig(): Promise<SpinConfig> {
     expiryDays: Math.min(90, Math.max(1, Number(v?.expiryDays ?? DEFAULTS.expiryDays))),
     minSpendMinor: Math.max(0, Number(v?.minSpendMinor ?? DEFAULTS.minSpendMinor)),
     maxRewardMinor: Math.max(1, Number(v?.maxRewardMinor ?? DEFAULTS.maxRewardMinor)),
+    maxSpinsPerDay: Math.max(1, Math.min(50, Number(v?.maxSpinsPerDay ?? DEFAULTS.maxSpinsPerDay))),
   };
 }
 
@@ -55,6 +59,7 @@ export async function setSpinConfig(patch: Partial<SpinConfig>): Promise<SpinCon
     expiryDays: Math.min(90, Math.max(1, patch.expiryDays ?? cur.expiryDays)),
     minSpendMinor: Math.max(0, patch.minSpendMinor ?? cur.minSpendMinor),
     maxRewardMinor: Math.max(1, patch.maxRewardMinor ?? cur.maxRewardMinor),
+    maxSpinsPerDay: Math.max(1, Math.min(50, patch.maxSpinsPerDay ?? cur.maxSpinsPerDay)),
   };
   await prisma.setting.upsert({ where: { key: SETTING }, create: { key: SETTING, value: next as never }, update: { value: next as never } });
   return next;
@@ -181,7 +186,9 @@ export async function spinStats(): Promise<{ active: number; completed: number; 
 
 export interface PurchaseSpinResult {
   ok: boolean;
-  reason?: "DISABLED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "ALREADY_SPUN";
+  reason?: "DISABLED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "ALREADY_SPUN" | "DAILY_LIMIT";
+  spinsToday?: number;
+  maxSpinsPerDay?: number;
   won?: boolean;
   rewardMinor?: number;
   orderValueMinor?: number;
@@ -204,7 +211,15 @@ export async function orderSpun(orderId: string): Promise<boolean> {
  */
 export async function spinForOrder(userId: string, orderId: string): Promise<PurchaseSpinResult> {
   const cfg = await getSpinConfig();
-  if (!cfg.enabled) return { ok: false, reason: "DISABLED" };
+  if (!cfg.enabled || !(await promoEnabled("spin"))) return { ok: false, reason: "DISABLED" };
+
+  // Daily cap, regardless of how many orders they place.
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const spinsToday = await prisma.spinChallenge.count({ where: { userId, createdAt: { gte: dayStart }, orderId: { not: null } } });
+  if (spinsToday >= cfg.maxSpinsPerDay) {
+    return { ok: false, reason: "DAILY_LIMIT", spinsToday, maxSpinsPerDay: cfg.maxSpinsPerDay };
+  }
 
   const order = await prisma.order.findFirst({
     where: { id: orderId, userId },
@@ -220,7 +235,10 @@ export async function spinForOrder(userId: string, orderId: string): Promise<Pur
   const threshold = orderCur === "USD" ? cfg.minSpendMinor : convertMinor(cfg.minSpendMinor, "USD" as Currency, orderCur);
   const won = value >= threshold;
 
-  const capped = Math.min(cfg.maxRewardMinor, rewardFor(value, cfg.rewardBp));
+  // Randomised between 0.01% (1bp) and the configured rate, then hard-capped —
+  // so two identical orders do not always pay the same, but nothing exceeds the ceiling.
+  const drawnBp = 1 + Math.floor(Math.random() * Math.max(1, Math.min(REWARD_CAP_BP, cfg.rewardBp)));
+  const capped = Math.min(cfg.maxRewardMinor, rewardFor(value, drawnBp));
   const reward = won ? Math.max(1, capped) : 0;
 
   // Record the spin first, so a double-tap cannot produce a second one.
@@ -249,5 +267,8 @@ export async function spinForOrder(userId: string, orderId: string): Promise<Pur
     });
     await invalidate(`loyal:spend:${userId}`).catch(() => undefined);
   }
-  return { ok: true, won, rewardMinor: reward, orderValueMinor: value, minSpendMinor: threshold, currency: orderCur };
+  return {
+    ok: true, won, rewardMinor: reward, orderValueMinor: value, minSpendMinor: threshold,
+    currency: orderCur, spinsToday: spinsToday + 1, maxSpinsPerDay: cfg.maxSpinsPerDay,
+  };
 }

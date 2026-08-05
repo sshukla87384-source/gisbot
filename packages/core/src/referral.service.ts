@@ -1,3 +1,4 @@
+import { promoFlagsCached } from "./promos.service.js";
 import { prisma, type Prisma } from "@gis/database";
 
 type Tx = Prisma.TransactionClient;
@@ -20,6 +21,8 @@ export async function grantReferralRewardTx(
   tx: Tx,
   opts: { referrerId: string | null; referredId: string; orderId: string; netMinor: number; currency: "INR" | "USD"; isFirst: boolean },
 ): Promise<void> {
+  // Referral promotion can be switched off by an admin — stop the PAYOUT, not just the UI.
+  if (!promoFlagsCached().referral) return;
   if (!opts.referrerId || opts.netMinor <= 0) return;
   const bp = opts.isFirst ? await settingInt(tx, REF_FIRST_KEY, 500) : await settingInt(tx, REF_REPEAT_KEY, 200);
   if (bp <= 0) return;

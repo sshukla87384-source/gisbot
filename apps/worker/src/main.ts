@@ -7,6 +7,7 @@ import {
   type FulfillmentJob,
   type OutboxJob,
   primeFxRate,
+  getPromoFlags,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -25,6 +26,7 @@ import { startWebhookServer } from "./webhook-server.js";
  */
 async function main(): Promise<void> {
   try { await primeFxRate(); } catch { /* default rate */ }
+  try { await getPromoFlags(); } catch { /* defaults to all on */ }
   const config = loadConfig();
   await ensureDbObjects();
 
