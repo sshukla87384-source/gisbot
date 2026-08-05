@@ -119,6 +119,7 @@ Not a random prize wheel. The spin **assigns a task automatically**.
 3. Spin the wheel (money — build carefully, verify the 2% cap with tests)
 4. Price-drop alerts
 5. Referral leaderboard
+6. Customer utilities — A (2FA generator) first, it is small and removes a third-party dependency
 
 ## Notes for whoever picks this up
 
@@ -131,3 +132,36 @@ Not a random prize wheel. The spin **assigns a task automatically**.
 - Admin routes live behind `guard(ctx)` in `apps/telegram-bot/src/admin.ts`.
 - Errors and wallet anomalies surface in the bot at
   **/Shriji → 🔐 Security → 🩺 Logs & Errors**.
+
+---
+
+## Customer-facing utilities (agreed as useful)
+
+### A. Built-in 2FA / OTP generator  *(highest value — removes an external dependency)*
+- Products delivered as `id|password|2fa_secret` currently tell the customer to
+  paste the secret into **2fa.live**, a third-party site we do not control.
+- Instead: a **"🔢 Get my OTP"** button on the delivered item generates the
+  6-digit TOTP **inside the bot**, with the seconds remaining until it rotates.
+- Standard TOTP (RFC 6238, HMAC-SHA1, 30s window, 6 digits) computed locally —
+  no network call, and the secret never leaves the server.
+- Handle base32 secrets with/without spaces and padding; show a clear error if
+  the stored secret is not valid base32 rather than a wrong code.
+- Keep the 2fa.live instructions as a fallback for anyone who prefers it.
+
+### B. Expiry reminders + one-tap re-buy
+- Delivered items already carry `expiresAt`. Message the buyer a few days before
+  (admin-set lead time) with a **🔄 Renew now** button that re-buys the same
+  variant.
+- Recurring revenue from customers who would otherwise drift to another seller.
+- One reminder per item; never remind on refunded/replaced items.
+
+### C. Receipt / keys export
+- "📄 Download all my keys" for an order (or all orders) as a `.txt` — the
+  `buildDeliveryTxt` helper already exists.
+- Optional simple invoice for business buyers (store name, order number, date,
+  items, total).
+
+### D. "Is my key still working?"
+- One tap on any delivered item: either reassure the customer, or open a
+  replacement claim **pre-filled with that order** so they skip the picker.
+- Cuts support volume and routes genuine faults into the existing warranty flow.
