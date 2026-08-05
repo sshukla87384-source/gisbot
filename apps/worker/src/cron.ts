@@ -2,6 +2,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   refundWalletForOrder,
   logWallet,
   retryPendingSupplierFulfilment,
+  runAutoPromo,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -54,6 +55,8 @@ async function sweepReservationsAndOrders(): Promise<void> {
   }
   // Recover any paid-but-undelivered supplier items before anything else.
   await retryPendingSupplierFulfilment(20).catch(() => undefined);
+  // Rotating promo post, if the admin enabled it.
+  await runAutoPromo().catch(() => undefined);
 
   const expired = await prisma.order.updateMany({
     where: {

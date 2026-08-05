@@ -167,6 +167,13 @@ import {
   setInrPerUsdt,
   repairBrokenAccounts,
   announceCatalogue,
+  PROMO_STYLES,
+  STYLE_LABELS,
+  promoContext,
+  renderPromo,
+  announcePromo,
+  getAutoPromo,
+  setAutoPromo,
 } from "@gis/core";
 import { cb } from "@gis/shared";
 import { InlineKeyboard, InputFile } from "grammy";
@@ -304,6 +311,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔥 Flash Sale Headline", cb("adm", "flashhead"), "primary"]],
       [["🎉 Special Sale (campaign)", cb("adm", "ssale"), "success"]],
       [["🗂 Share Full Stock List", cb("adm", "cataloglist"), "success"]],
+      [["📣 Promo Templates", cb("adm", "promot"), "success"], ["🤖 Auto-Promo", cb("adm", "autop"), "primary"]],
     ] },
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
@@ -1767,6 +1775,71 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(r.announced ? `📣 Sent to ${r.targets ?? 0} customers. 🎉` : "Couldn't announce that.");
       return productView(ctx, a.productId);
     }
+    case "promot": {
+      const ps = await listProductsBrief(20);
+      const kb = new InlineKeyboard();
+      for (const pr of ps) kb.text(`${pr.iconEmoji ? `${pr.iconEmoji} ` : ""}${pr.name.slice(0, 26)}`, cb("adm", "promotp", pr.id)).row();
+      kb.text("◀️ Back", cb("adm", "m_mkt"));
+      await show(ctx, "📣 <b>Promo Templates</b>\n\nPick the product to announce. You'll choose a style, or let it rotate automatically.", kb, true);
+      return;
+    }
+    case "promotp": {
+      ctx.session.promoProduct = id;
+      const kb = new InlineKeyboard();
+      kb.add(sbtn("🎲 Auto — rotate style", cb("adm", "promoq", "auto"), "success")).row();
+      for (const st of PROMO_STYLES) kb.text(STYLE_LABELS[st], cb("adm", "promoq", st)).row();
+      kb.text("◀️ Back", cb("adm", "promot"));
+      await show(ctx, "📣 <b>Choose a style</b>\n\nTap one to preview it before sending.\n\n<i>Auto never repeats the same style twice in a row for a product.</i>", kb, true);
+      return;
+    }
+    case "promoq": {
+      const pid = ctx.session.promoProduct ?? "";
+      const c = await promoContext(pid);
+      if (!c) { await ctx.reply("That product isn't active."); return handleAdminCallback(ctx, "promot", []); }
+      const style = (id === "auto" ? PROMO_STYLES[0] : id) as (typeof PROMO_STYLES)[number];
+      ctx.session.promoStyle = id;
+      await ctx.reply(renderPromo(style, c), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .add(sbtn(id === "auto" ? "📣 Send (rotating style)" : "📣 Send this", cb("adm", "promogo"), "success")).row()
+          .text("◀️ Another style", cb("adm", "promotp", pid)),
+      });
+      return;
+    }
+    case "promogo": {
+      const pid = ctx.session.promoProduct ?? "";
+      const st = (ctx.session.promoStyle ?? "auto") as "auto" | (typeof PROMO_STYLES)[number];
+      const r = await announcePromo(pid, st);
+      await ctx.reply(r.ok ? `📣 Sent to <b>${r.targets ?? 0}</b> customers using the <b>${r.style}</b> style. 🎉` : "Couldn't send that.", { parse_mode: "HTML" });
+      return handleAdminCallback(ctx, "promot", []);
+    }
+    case "autop": {
+      const a = await getAutoPromo();
+      const kb = new InlineKeyboard()
+        .add(sbtn(a.enabled ? "✅ ON — turn off" : "🚫 OFF — turn on", cb("adm", "autoptog"), a.enabled ? "success" : "danger")).row()
+        .add(sbtn("⏱ How often", cb("adm", "autoph"), "primary")).row()
+        .text("◀️ Back", cb("adm", "m_mkt"));
+      await show(ctx, [
+        "🤖 <b>Auto-Promo</b>",
+        `Status: <b>${a.enabled ? "ON" : "OFF"}</b> · every <b>${a.everyHours}h</b>`,
+        a.lastRunAt ? `Last post: ${a.lastRunAt.slice(0, 16).replace("T", " ")}` : "",
+        "",
+        "Posts one product on its own, with a <b>different style each time</b>, so your channel stays active without looking copy-pasted.",
+        "",
+        a.productIds.length ? `🎯 Rotating <b>${a.productIds.length}</b> chosen product(s).` : "🎯 Rotating your pinned and newest active products.",
+      ].filter(Boolean).join("\n"), kb, true);
+      return;
+    }
+    case "autoptog": {
+      const a = await getAutoPromo();
+      const n = await setAutoPromo({ enabled: !a.enabled });
+      await ctx.reply(n.enabled ? `🤖 Auto-Promo is ON — next post within ${n.everyHours}h.` : "🚫 Auto-Promo is OFF.");
+      return handleAdminCallback(ctx, "autop", []);
+    }
+    case "autoph":
+      ctx.session.awaiting = "admin_autop_hours";
+      await askStep(ctx, "⏱ Post how often? Send the number of <b>hours</b> (e.g. <code>12</code>):");
+      return;
     case "cataloglist": {
       const kb = new InlineKeyboard()
         .add(sbtn("📣 Send full stock list", cb("adm", "catalogo", "all"), "success")).row()
@@ -2854,6 +2927,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await createGift(uid, title, text.trim() === "-" ? null : text.trim(), "bot-admin");
     await ctx.reply("🎁 <b>Gift created.</b> The customer has been notified — now send it to them and tap ✅ Mark delivered.", { parse_mode: "HTML" });
     await handleAdminCallback(ctx, "gifts", []);
+    return true;
+  }
+  if (awaiting === "admin_autop_hours") {
+    const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    const a = await setAutoPromo({ everyHours: Number.isFinite(n) ? Math.max(1, n) : 12 });
+    await ctx.reply(`⏱ Auto-Promo will post every <b>${a.everyHours}h</b>.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "autop", []);
     return true;
   }
   if (awaiting === "admin_spn_day") {

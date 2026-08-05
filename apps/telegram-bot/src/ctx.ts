@@ -101,6 +101,7 @@ export interface SessionData {
     | "admin_spn_min"
     | "admin_spn_max"
     | "admin_spn_day"
+    | "admin_autop_hours"
     | "admin_fx_rate"
     | "admin_fx_surcharge"
     | "admin_tool_adjust"
@@ -133,6 +134,8 @@ export interface SessionData {
   tstSearch?: string;
   tstTarget?: string;
   toolPct?: number;
+  promoProduct?: string;
+  promoStyle?: string;
   giftUser?: string;
   giftTitle?: string;
   tstDraft?: { customerName?: string; body?: string; rating?: number; productName?: string | null };
