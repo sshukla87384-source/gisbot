@@ -527,14 +527,6 @@ export async function profileView(user: BotUser): Promise<View> {
       "",
       `💱 Currency: <b>${user.currency}</b>   ·   🌐 Language: <b>${user.locale.toUpperCase()}</b>`,
       `📅 Member since ${user.createdAt.toISOString().slice(0, 10)}`,
-      ...(orders.items.length > 0
-        ? ["", HR, `📦 <b>Recent orders</b>`,
-            ...orders.items.slice(0, 5).map((o) => {
-              const icon = o.status === "COMPLETED" ? "✅" : o.status === "PENDING_PAYMENT" ? "⌛" : o.status === "CANCELLED" || o.status === "EXPIRED" ? "🚫" : "🕐";
-              return `${icon} <b>${escapeHtml(o.orderNumber)}</b> · ${fmt(o.totalPaidMinor, o.currency)}`;
-            }),
-            "<i>Tap 📦 Recent orders to open one and get your keys.</i>"]
-        : []),
     ].filter((l) => l !== "").join("\n"),
     kb,
   };
