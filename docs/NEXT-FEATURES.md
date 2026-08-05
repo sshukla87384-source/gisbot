@@ -207,3 +207,33 @@ spending real money, and discover bugs on live orders instead.
 - Acquires new customers through existing buyers.
 - Guards: recipient must have started the bot; if not, hold the gift and deliver
   on their first /start. Never expose the buyer's keys to the wrong person.
+
+---
+
+## High-demand customer features (add-on list)
+
+### D1. Show ratings on product cards  *(smallest effort, biggest conversion win)*
+- Reviews are already collected (`Review` model, ratings + comments). Only the
+  admin can see them today.
+- Show `⭐ 4.8 (24 reviews)` on the product card and in the shop list, and the
+  latest 2-3 comments on the product card.
+- Aggregate per product (reviews are currently linked to an ORDER — link or
+  derive the product so the average is per product, not global).
+- Hide the badge under ~3 reviews so one bad early rating cannot sink a product.
+
+### D2. Auto-renew subscriptions from wallet
+- Opt-in per delivered item that has an `expiresAt`.
+- On the expiry date, charge the wallet and deliver the next period automatically.
+- If the balance is short: notify a few days early, and again on the day, rather
+  than failing silently.
+- Must be cancellable in one tap, and every auto-charge needs an idempotency key
+  so a retry cannot double-charge.
+
+### D3. Instant refund to wallet
+- When an item genuinely cannot be delivered (no stock, supplier dry, admin
+  rejects a manual order), refund to the wallet immediately and tell the customer,
+  instead of leaving them waiting on a human.
+- Refund exactly what was charged, in the wallet's currency, once (idempotency
+  key on the ledger — the same pattern the expiry refund uses).
+- Admin sees it in the logs channel; customer gets the balance and a Shop again
+  button, so the money usually comes straight back as another order.
