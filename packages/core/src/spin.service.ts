@@ -24,7 +24,9 @@ export interface SpinConfig {
   expiryDays: number;
 }
 
-const DEFAULTS: SpinConfig = { enabled: false, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14 };
+// Enabled by default (requested). Rewards stay bounded by REWARD_CAP_BP: with
+// these targets the most anyone can earn per challenge is $1 / $2 / $5.
+const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14 };
 
 export async function getSpinConfig(): Promise<SpinConfig> {
   const row = await prisma.setting.findUnique({ where: { key: SETTING } }).catch(() => null);
