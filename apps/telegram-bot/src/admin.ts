@@ -112,6 +112,15 @@ import {
   renderFollowup,
   listReviews,
   reviewStats,
+  storeRating,
+  ratingBreakdown,
+  getReview,
+  approveReview,
+  rejectReview,
+  replyToReview,
+  setVerifiedPurchase,
+  moderationLog,
+  REJECT_REASONS,
   readLogs,
   clearLogs,
   logCounts,
@@ -1269,21 +1278,104 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "❌ Send a short <b>reason</b> the customer will see, or <code>-</code> to decline without a note:");
       return;
     case "revs": {
-      const [rows, st] = await Promise.all([listReviews(12), reviewStats()]);
-      const kb = new InlineKeyboard().text("🔄 Refresh", cb("adm", "revs")).text("◀️ Back", cb("adm", "m_content"));
-      const lines = [
-        "⭐ <b>Customer Reviews</b>",
-        st.count > 0 ? `${"⭐️".repeat(Math.round(st.avg))} <b>${st.avg.toFixed(1)}</b>/5 from <b>${st.count}</b> review(s)` : "",
-        "",
-      ].filter(Boolean);
-      if (rows.length === 0) lines.push("<i>No reviews yet — they arrive 10 minutes after each delivery.</i>");
-      for (const r of rows) {
-        lines.push(`${"⭐️".repeat(r.rating)} · <b>${escapeHtml(r.who)}</b> · ${r.at.toISOString().slice(5, 16).replace("T", " ")}`);
-        if (r.comment) lines.push(`   <i>${escapeHtml(r.comment).slice(0, 300)}</i>`);
+      const page = Math.max(1, Number.parseInt(id || "1", 10) || 1);
+      const filter = (ctx.session.revFilter ?? "pending") as "pending" | "approved" | "rejected" | "all";
+      const [list, st, dist] = await Promise.all([listReviews(page, 6, filter), storeRating(), ratingBreakdown()]);
+      const kb = new InlineKeyboard();
+      for (const r of list.rows) {
+        const tag = r.status === "PENDING" ? "🕐" : r.status === "APPROVED" ? "✅" : "❌";
+        kb.text(`${tag} ${"⭐".repeat(r.rating)} ${r.who.slice(0, 12)}${r.product ? ` · ${r.product.slice(0, 12)}` : ""}`, cb("adm", "revv", r.id)).row();
       }
+      if (list.pages > 1) {
+        const nav: Array<ReturnType<typeof sbtn>> = [];
+        if (list.page > 1) nav.push(sbtn("◀️ Prev", cb("adm", "revs", String(list.page - 1)), "primary"));
+        if (list.page < list.pages) nav.push(sbtn("Next ▶️", cb("adm", "revs", String(list.page + 1)), "primary"));
+        if (nav.length) kb.add(...nav).row();
+      }
+      kb.add(sbtn(`🔎 ${filter}`, cb("adm", "revfilt"), "primary"), sbtn("🔄 Refresh", cb("adm", "revs", String(list.page)), "primary")).row();
+      kb.text("◀️ Back", cb("adm", "m_content"));
+      const max = Math.max(1, ...dist.map((d) => d.count));
+      const chart = st.count > 0 ? dist.map((d) => `${d.stars}⭐ ${"█".repeat(Math.round((d.count / max) * 12)).padEnd(12, "░")} ${d.count}`) : [];
+      const lines = [
+        "⭐ <b>Reviews &amp; Moderation</b>",
+        st.count > 0 ? `${st.stars} <b>${st.avg.toFixed(1)}</b>/5 from <b>${st.count}</b> approved review(s)` : "<i>No approved reviews yet.</i>",
+        list.pending > 0 ? `🕐 <b>${list.pending}</b> awaiting your approval` : "✅ Nothing pending",
+        "",
+        ...(chart.length ? [...chart, ""] : []),
+        `Showing <b>${filter}</b> · page ${list.page}/${list.pages} · ${list.total} total`,
+        "",
+      ];
+      for (const r of list.rows) {
+        const tag = r.status === "PENDING" ? "🕐" : r.status === "APPROVED" ? "✅" : "❌";
+        lines.push(`${tag} ${"⭐".repeat(r.rating)} · <b>${escapeHtml(r.who)}</b>${r.verified ? " ✅<i>verified</i>" : ""} · ${r.at.toISOString().slice(5, 16).replace("T", " ")}`);
+        if (r.product) lines.push(`   📦 ${escapeHtml(r.product)}`);
+        if (r.comment) lines.push(`   <i>${escapeHtml(r.comment).slice(0, 200)}</i>`);
+        if (r.rejectReason) lines.push(`   ❌ ${escapeHtml(r.rejectReason)}`);
+      }
+      lines.push("", "<i>Tap a review to moderate. You can approve, reject or reply — the star rating and the customer's words can never be edited.</i>");
       await show(ctx, lines.join("\n").slice(0, 3900), kb, true);
       return;
     }
+    case "revfilt": {
+      const order = ["pending", "approved", "rejected", "all"] as const;
+      const cur = (ctx.session.revFilter ?? "pending") as (typeof order)[number];
+      ctx.session.revFilter = order[(order.indexOf(cur) + 1) % order.length];
+      return handleAdminCallback(ctx, "revs", ["1"]);
+    }
+    case "revv": {
+      const r = await getReview(id);
+      if (!r) { await ctx.reply("That review is gone."); return handleAdminCallback(ctx, "revs", ["1"]); }
+      const log = await moderationLog(id, 5);
+      const kb = new InlineKeyboard();
+      if (r.status !== "APPROVED") kb.add(sbtn("✅ Approve", cb("adm", "revok", r.id), "success")).row();
+      if (r.status !== "REJECTED") kb.add(sbtn("❌ Reject", cb("adm", "revno", r.id), "danger")).row();
+      kb.add(sbtn("💬 Reply", cb("adm", "revrep", r.id), "primary"), sbtn(r.verified ? "✅ Verified — unmark" : "☑️ Mark verified", cb("adm", "revver", r.id), "primary")).row();
+      kb.text("◀️ Back", cb("adm", "revs", "1"));
+      await show(ctx, [
+        `⭐ <b>Review</b> — ${"⭐".repeat(r.rating)} <b>${r.rating}/5</b>`,
+        `📌 Status: <b>${r.status}</b>${r.verified ? " · ✅ verified purchase" : ""}`,
+        `👤 ${escapeHtml(r.who)}  🆔 <code>${r.telegramId || "—"}</code>`,
+        r.product ? `📦 ${escapeHtml(r.product)}` : "",
+        "",
+        r.comment ? `💬 <i>${escapeHtml(r.comment)}</i>` : "<i>No written comment.</i>",
+        r.reply ? `\n🏬 <b>Your reply:</b> ${escapeHtml(r.reply)}` : "",
+        r.rejectReason ? `\n❌ Rejected: ${escapeHtml(r.rejectReason)}` : "",
+        log.length ? `\n🧾 <b>History</b>\n${log.map((l) => `• ${l.action}${l.reason ? ` — ${escapeHtml(l.reason)}` : ""} · ${l.at.toISOString().slice(5, 16).replace("T", " ")}`).join("\n")}` : "",
+      ].filter(Boolean).join("\n"), kb, true);
+      return;
+    }
+    case "revok": {
+      const ok = await approveReview(id);
+      await ctx.reply(ok ? "✅ Approved — it is now public and counts toward your rating." : "Couldn't approve that.");
+      return handleAdminCallback(ctx, "revs", ["1"]);
+    }
+    case "revno": {
+      const kb = new InlineKeyboard();
+      for (const reason of REJECT_REASONS) kb.text(`❌ ${reason}`, cb("adm", "revnodo", `${id}~${reason.slice(0, 6)}`)).row();
+      kb.text("◀️ Back", cb("adm", "revv", id));
+      await show(ctx, "❌ <b>Why are you rejecting this review?</b>\n\nThe customer's rating and words are kept on record — the review simply is not published and does not count.", kb, true);
+      return;
+    }
+    case "revnodo": {
+      const [rid, code] = (id || "").split("~");
+      const reason = REJECT_REASONS.find((r) => r.startsWith(code ?? "")) ?? "Rejected";
+      const ok = await rejectReview(rid ?? "", reason);
+      await ctx.reply(ok ? `❌ Rejected (${reason}). It stays out of your public rating.` : "Couldn't reject that.");
+      return handleAdminCallback(ctx, "revs", ["1"]);
+    }
+    case "revrep":
+      ctx.session.revTarget = id;
+      ctx.session.awaiting = "admin_rev_reply";
+      await askStep(ctx, "💬 Send your public reply to this review.\n\n<i>This is shown under the review. It does not change what the customer wrote or scored.</i>");
+      return;
+    case "revver": {
+      const r = await getReview(id);
+      if (!r) return;
+      await setVerifiedPurchase(id, !r.verified);
+      await ctx.answerCallbackQuery({ text: r.verified ? "Unmarked" : "Marked verified" }).catch(() => undefined);
+      return handleAdminCallback(ctx, "revv", [id]);
+    }
+
     case "fup": {
       const c = await getFollowupConfig();
       const kb = new InlineKeyboard()
@@ -2228,6 +2320,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await ctx.reply(`🔗 Button set: <b>${escapeHtml(label)}</b> → ${escapeHtml(url)}`, { parse_mode: "HTML" });
     }
     await handleAdminCallback(ctx, "fup", []);
+    return true;
+  }
+  if (awaiting === "admin_rev_reply") {
+    const rid = ctx.session.revTarget ?? ""; ctx.session.revTarget = undefined;
+    const ok = await replyToReview(rid, text.trim());
+    await ctx.reply(ok ? "💬 Reply saved — it shows under that review." : "Couldn't save that reply.");
+    await handleAdminCallback(ctx, "revs", ["1"]);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

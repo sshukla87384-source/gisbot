@@ -67,6 +67,7 @@ export interface SessionData {
     | "sale_timer"
     | "sale_url"
     | "review_comment"
+    | "admin_rev_reply"
     | "replace_reason"
     | "replace_proof"
     | "admin_reject_note"
@@ -102,6 +103,9 @@ export interface SessionData {
   /** Auto-translate provider being configured. */
   trProvider?: string;
   trKey?: string;
+  /** Admin review-list filter. */
+  revFilter?: "pending" | "approved" | "rejected" | "all";
+  revTarget?: string;
   /** Review awaiting an optional written comment. */
   reviewId?: string;
   /** Order item the customer is raising a replacement claim on. */

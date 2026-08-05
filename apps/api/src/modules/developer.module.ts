@@ -1,4 +1,4 @@
-import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
+import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { Body, Controller, Get, Header, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
@@ -88,6 +88,7 @@ export class DeveloperController {
     }
     const inStockOnly = query.inStock === "true";
     const src = query.source; // "own" | "supplier" | undefined (both)
+    const rat = await productRatings(res.items.map((p) => p.id));
     const items = res.items
       .filter((p) => (inStockOnly ? p.inStock : true))
       .filter((p) => (src === "own" ? !p.supplierBacked : src === "supplier" ? p.supplierBacked : true))
@@ -138,7 +139,10 @@ export class DeveloperController {
   @Get("products/:id")
   async product(@Param("id") id: string, @Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     try {
-      const p = await getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API");
+      const [p, detailRating] = await Promise.all([
+        getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API"),
+        productRating(id),
+      ]);
       return {
         id: p.id,
         name: p.name,
@@ -156,6 +160,8 @@ export class DeveloperController {
         supplierBacked: p.supplierBacked,
         warranty: p.warranty,
         warrantyDays: p.warrantyDays,
+        rating: detailRating.count > 0 ? detailRating.avg : null,
+        reviewCount: detailRating.count,
         variants: p.variants.map((v) => ({
           id: v.id,
           name: v.name,

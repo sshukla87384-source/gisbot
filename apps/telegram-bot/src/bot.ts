@@ -27,6 +27,7 @@ import {
   createTicket,
   addStock,
   saveReview,
+  orderAlreadyRated,
   addReviewComment,
   logError,
   grantAllScopesToOwner,
@@ -1293,6 +1294,10 @@ export function createBot(): Bot<Ctx> {
         case "rev:new": {
           await ctx.answerCallbackQuery();
           const oid = args[0] ?? "";
+          if (oid && (await orderAlreadyRated(oid))) {
+            await ctx.reply("🙏 You've already rated this order — thank you! One rating per order keeps them honest.");
+            break;
+          }
           const kb = new InlineKeyboard()
             .text("⭐️", `rev:rate:${oid}:1`).text("⭐️⭐️", `rev:rate:${oid}:2`).row()
             .text("⭐️⭐️⭐️", `rev:rate:${oid}:3`).row()
@@ -1307,7 +1312,17 @@ export function createBot(): Bot<Ctx> {
         case "rev:rate": {
           const oid = args[0] ?? "";
           const rating = Math.min(5, Math.max(1, Number.parseInt(args[1] ?? "5", 10) || 5));
-          const saved = await saveReview(user.id, rating, oid || undefined);
+          let saved: { id: string; alreadyRated: boolean };
+          try {
+            saved = await saveReview(user.id, rating, oid || undefined);
+          } catch (err) {
+            const m = String(err instanceof Error ? err.message : err);
+            await ctx.answerCallbackQuery({
+              text: m.includes("NOT_ELIGIBLE") ? "Only delivered orders can be rated." : "That order was not found.",
+              show_alert: true,
+            }).catch(() => undefined);
+            break;
+          }
           ctx.session.reviewId = saved.id;
           await ctx.answerCallbackQuery({ text: "Thank you! 🙏" });
           const stars = "⭐️".repeat(rating);
@@ -1320,6 +1335,8 @@ export function createBot(): Bot<Ctx> {
                 "Your support genuinely means a lot to us — it is customers like you that keep this store going. 🙏✨",
                 "",
                 "🛍 We'll keep the best deals coming just for you!",
+                "",
+                "<i>Your review will appear publicly once our team checks it.</i>",
               ]
             : [
                 `🙏 <b>Thank you for the honest feedback, ${escapeHtml(greetName(user))}.</b>`,
@@ -1337,9 +1354,22 @@ export function createBot(): Bot<Ctx> {
               .text("✍️ Add a comment", "rev:comment").row()
               .text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
           });
-          // Let admins see it immediately.
+          // Admins moderate before anything is published.
           await enqueueAdminAlert(
-            [`⭐ <b>New review</b> — ${stars} (${rating}/5)`, `👤 ${escapeHtml(greetName(user))}`, `🆔 <code>${user.telegramId ?? "—"}</code>`].join("\n"),
+            [
+              `⭐ <b>New review — awaiting approval</b>`,
+              `${stars} <b>${rating}/5</b>`,
+              `👤 ${escapeHtml(greetName(user))}`,
+              `🆔 <code>${user.telegramId ?? "—"}</code>`,
+              oid ? `🧾 Order <code>${escapeHtml(oid.slice(-8))}</code>` : "",
+              "",
+              "<i>It is not visible to customers until you approve it.</i>",
+            ].filter(Boolean).join("\n"),
+            [
+              { text: "✅ Approve", callbackData: `adm:revok:${saved.id}`, style: "success" },
+              { text: "❌ Reject", callbackData: `adm:revno:${saved.id}`, style: "danger" },
+              { text: "💬 Reply", callbackData: `adm:revrep:${saved.id}`, style: "primary" },
+            ],
           ).catch(() => undefined);
           break;
         }

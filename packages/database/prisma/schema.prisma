@@ -1242,15 +1242,44 @@ model Translation {
 }
 
 /// A customer's review of a delivered order.
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model Review {
   id        String   @id @default(cuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id])
-  orderId   String?
-  rating    Int      // 1-5
-  comment   String?  @db.Text
+  orderId   String?  @unique // one rating per completed order
+  productId String?
+  rating    Int      // 1-5 — written ONLY from the customer's own tap
+  comment   String?  @db.Text // the customer's words; admins cannot edit this
+  status    ReviewStatus @default(PENDING) // nothing is published until approved
+  verifiedPurchase Boolean @default(false)
+  rejectReason String?
+  adminReply   String?  @db.Text
+  reviewedBy   String?
+  reviewedAt   DateTime?
+  createdAt DateTime @default(now())
+  moderation ReviewModeration[]
+
+  @@index([status, createdAt])
+  @@index([productId, status])
+  @@index([userId])
+}
+
+/// Append-only audit trail of every moderation decision.
+model ReviewModeration {
+  id        String   @id @default(cuid())
+  reviewId  String
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  action    String // APPROVED | REJECTED | REPLIED | VERIFIED | REOPENED
+  reason    String?
+  actor     String // which admin
   createdAt DateTime @default(now())
 
+  @@index([reviewId, createdAt])
   @@index([createdAt])
-  @@index([userId])
 }

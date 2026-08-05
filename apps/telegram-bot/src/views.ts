@@ -17,6 +17,9 @@ import {
   listTickets,
   listVault,
   listReplaceableItems,
+  productRating,
+  storeRating,
+  productRatings,
   greetName,
   toUsdt,
   type CartView,
@@ -144,7 +147,11 @@ function timeLeft(until: Date): string {
 }
 
 export async function productView(user: BotUser, productId: string): Promise<View> {
-  const p = await getProductView(productId, user.currency as Currency, user.id, "DIRECT", user.locale);
+  const [p, rating, store] = await Promise.all([
+    getProductView(productId, user.currency as Currency, user.id, "DIRECT", user.locale),
+    productRating(productId),
+    storeRating(),
+  ]);
   // When the text was machine-translated, show the translated plain text rather
   // than the stored premium-emoji HTML (which is still the original language).
   const translated = (user.locale ?? "en") !== "en";
@@ -180,6 +187,13 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       : user.isVip
         ? [`${e("vip")} <b>VIP price applied</b>`]
         : []),
+    // Real rating from visible reviews. Hidden under 3 so one early review
+    // cannot define a product — the store rating is shown instead.
+    rating.count >= 3
+      ? `${rating.stars} <b>${rating.avg.toFixed(1)}</b>/5 · <i>${num(rating.count)} review${rating.count === 1 ? "" : "s"}</i>`
+      : store.count >= 3
+        ? `${store.stars} <b>${store.avg.toFixed(1)}</b>/5 store rating · <i>${num(store.count)} reviews</i>`
+        : "",
     (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked) ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
     // Warranty shown exactly as the admin set it, with the day count.
     p.warranty
