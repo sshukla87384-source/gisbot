@@ -102,6 +102,7 @@ import {
   WIZARD_TYPES,
   announcePriceChange,
   learnSupplierDocs,
+  normalizeSupplierBase,
   readLogs,
   clearLogs,
   logCounts,
@@ -1038,8 +1039,16 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "supsync": {
       await ctx.reply("🔄 Syncing catalog…");
-      const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; err?: string }));
-      await ctx.reply("err" in r && r.err ? `❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}` : `✅ Synced — ${r.added} added, ${r.updated} updated.`);
+      const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; busy?: boolean; err?: string }));
+      if ("busy" in r && r.busy) {
+        await ctx.reply("⏳ A sync is already running for this supplier — waiting for it to finish. Tapping 🔄 again won't speed it up.");
+      } else if ("err" in r && r.err) {
+        await ctx.reply(`❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}`);
+      } else if (r.added + r.updated === 0) {
+        await ctx.reply("ℹ️ Synced — nothing imported.\n\nUsually the base URL or key is wrong. Tap 🔎 <b>Auto-find docs</b>, or 🔍 <b>Diagnose</b> to see the raw response.", { parse_mode: "HTML" });
+      } else {
+        await ctx.reply(`✅ Synced — ${r.added} added, ${r.updated} updated.`);
+      }
       return suppliersView(ctx);
     }
     case "supauto": {
@@ -1816,6 +1825,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (!d.name || !d.url || !d.key) { await ctx.reply("Draft incomplete — start again from 🏭 Suppliers."); await sendPanel(ctx, false); return true; }
     const { id } = await addSupplier(d.name, d.url, d.key, Number.isFinite(pct) ? pct : 20);
     await ctx.reply("✅ Supplier added. Testing connection…");
+    // A pasted Swagger/docs URL is not an API base — fix it before testing.
+    const norm = await normalizeSupplierBase(id).catch(() => ({ changed: false, detail: "" }));
+    if (norm.changed && norm.detail) await ctx.reply(norm.detail, { parse_mode: "HTML" });
     const t = await testSupplier(id);
     await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`);
     await suppliersView(ctx);

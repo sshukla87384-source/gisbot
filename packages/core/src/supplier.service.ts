@@ -1,7 +1,7 @@
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, decryptSecret } from "@gis/shared";
-import { invalidate } from "./redis.js";
+import { invalidate, getRedis } from "./redis.js";
 import { logWallet } from "./logs.service.js";
 import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
@@ -156,7 +156,10 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); lastNote = `${path || "/"} → non-JSON response`; continue; }
       const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
-      if (products.length > 0) return { products, path: path || "/", raw: text.slice(0, 400), note: "ok" };
+      if (products.length > 0) {
+        void prisma.supplier.update({ where: { id: s.id }, data: { docsConfig: { ...(doc ?? {}), productsPath: path } as never } }).catch(() => undefined);
+        return { products, path: path || "/", raw: text.slice(0, 400), note: "ok" };
+      }
       lastRaw = text.slice(0, 400);
       lastNote = `${path || "/"} → parsed 0 products`;
     } catch (e) { lastNote = `${path || "/"} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
@@ -389,7 +392,61 @@ async function lookupSupplierOrder(s: SupplierRow, extId: string, excl: string[]
 }
 
 /** Import/refresh a supplier's catalog into our products (with markup). */
-export async function syncSupplierProducts(supplierId: string): Promise<{ added: number; updated: number }> {
+
+/** Docs/UI suffixes that are NOT an API base. */
+const DOCS_SUFFIX_RE = /\/(swagger(-ui)?|api-docs|apidocs|docs|documentation|redoc|openapi|scalar)(\.html?|\/)?$/i;
+
+/**
+ * People paste the Swagger/docs page as the "API base URL" — the connector then
+ * fetches HTML and every call 401s. Detect that, strip back to the real base,
+ * and read the OpenAPI spec sitting next to it so endpoints self-configure.
+ */
+export async function normalizeSupplierBase(supplierId: string): Promise<{ changed: boolean; detail: string }> {
+  const sup = await prisma.supplier.findUnique({ where: { id: supplierId } });
+  if (!sup) return { changed: false, detail: "Supplier not found." };
+  const raw = sup.baseUrl.replace(/\/+$/, "");
+  if (!DOCS_SUFFIX_RE.test(raw)) return { changed: false, detail: "" };
+
+  const stripped = raw.replace(DOCS_SUFFIX_RE, "");
+  const specUrls = [`${raw}.json`, `${raw}/swagger.json`, `${raw}/openapi.json`, `${stripped}/swagger.json`, `${stripped}/openapi.json`, `${stripped}/v1/swagger.json`];
+  let learned = "";
+  await prisma.supplier.update({ where: { id: supplierId }, data: { baseUrl: stripped } });
+  for (const u of specUrls) {
+    try {
+      const res = await fetch(u, { headers: authHeaders(decKey(sup)), signal: AbortSignal.timeout(8000) });
+      if (!res.ok) continue;
+      const body = await res.text();
+      if (!/"paths"\s*:/.test(body)) continue;
+      const r = await learnSupplierDocs(supplierId, body);
+      learned = `\n📄 Read the OpenAPI spec at <code>${u}</code>\n${r.detail}`;
+      break;
+    } catch { /* next candidate */ }
+  }
+  return {
+    changed: true,
+    detail: [
+      "🔧 <b>That looked like a documentation page, not an API base.</b>",
+      `Base URL corrected to <code>${stripped}</code>.`,
+      learned || "\n⚠️ No OpenAPI spec found beside it — tap 🔎 Auto-find docs.",
+    ].join("\n"),
+  };
+}
+
+/** One sync at a time per supplier — repeated 🔄 taps used to stack probe storms. */
+export async function syncSupplierProducts(
+  supplierId: string,
+): Promise<{ added: number; updated: number; busy?: boolean }> {
+  const lockKey = `suplock:${supplierId}`;
+  const got = await getRedis().set(lockKey, "1", "EX", 120, "NX").catch(() => "OK");
+  if (got !== "OK") return { added: 0, updated: 0, busy: true };
+  try {
+    return await syncSupplierProductsInner(supplierId);
+  } finally {
+    await getRedis().del(lockKey).catch(() => undefined);
+  }
+}
+
+async function syncSupplierProductsInner(supplierId: string): Promise<{ added: number; updated: number }> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { added: 0, updated: 0 };
   const prods = await fetchSupplierProducts(s);
