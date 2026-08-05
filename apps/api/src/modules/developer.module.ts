@@ -154,6 +154,8 @@ export class DeveloperController {
         activationGuide: p.activationGuide,
         // true = stocked and fulfilled by an upstream supplier, delivered automatically
         supplierBacked: p.supplierBacked,
+        warranty: p.warranty,
+        warrantyDays: p.warrantyDays,
         variants: p.variants.map((v) => ({
           id: v.id,
           name: v.name,

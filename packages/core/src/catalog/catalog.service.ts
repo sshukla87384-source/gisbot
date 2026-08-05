@@ -76,6 +76,8 @@ export interface ProductView {
   activationGuide: string | null;
   isPlatform: boolean;
   supplierBacked: boolean;
+  warranty: boolean;
+  warrantyDays: number | null;
   buyButtonText: string | null;
   buttonStyle: string | null;
   iconCustomEmojiId: string | null;
@@ -341,6 +343,8 @@ export async function getProductView(productId: string, currency: Currency, user
     activationGuide: p.activationGuide,
     isPlatform: p.resellerId === null,
     supplierBacked: p.supplierId !== null,
+    warranty: p.warranty,
+    warrantyDays: p.warrantyDays,
     buyButtonText: p.buyButtonText,
     buttonStyle: p.buttonStyle,
     iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),

@@ -175,6 +175,12 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     "",
     ...(user.isVip ? [`${e("vip")} <b>VIP price applied</b>`] : []),
     (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked) ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
+    // Warranty shown exactly as the admin set it, with the day count.
+    p.warranty
+      ? (p.warrantyDays
+          ? `🛡 <b>${p.warrantyDays}-day replacement warranty</b> — faulty item? we replace it free`
+          : "🛡 <b>Replacement warranty included</b> — faulty item? we replace it free")
+      : "",
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
     translated ? (p.description ? escapeHtml(p.description) : "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : "")),
     HR,
