@@ -25,6 +25,9 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  getWallet,
+  convertMinor,
+  getCartView,
   addStock,
   saveReview,
   orderAlreadyRated,
@@ -73,6 +76,7 @@ import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
 import { adminCommand, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
+import { sbtn } from "./keyboard.js";
 import { t } from "./i18n.js";
 import { vipAnimation, successCard, num } from "./premium.js";
 import * as views from "./views.js";
@@ -858,7 +862,44 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.checkoutSummaryView(user), true);
           break;
 
+        // Wallet pay is a two-step: confirm what will be charged, THEN charge.
         case "ord:paywallet": {
+          await ctx.answerCallbackQuery();
+          const [cv, w] = await Promise.all([
+            getCartView(user.id, user.currency as Currency),
+            getWallet(user.id),
+          ]);
+          if (cv.lines.length === 0) { await ctx.reply(ERROR_COPY.CART_EMPTY ?? "🛒 Your cart is empty."); break; }
+          const walletCur = w.currency as Currency;
+          const payable = cv.subtotalMinor;
+          const charge = walletCur === (user.currency as Currency) ? payable : convertMinor(payable, user.currency as Currency, walletCur);
+          const after = Number(w.balanceMinor) - charge;
+          await ctx.reply(
+            [
+              "🧾 <b>Confirm your purchase</b>",
+              "",
+              ...cv.lines.map((l) => `📦 ${escapeHtml(l.productName)}${l.quantity > 1 ? ` ×${l.quantity}` : ""} — ${l.lineTotalMinor === null ? "—" : fmt(l.lineTotalMinor, cv.currency)}`),
+              "",
+              `💳 <b>Total: ${fmt(payable, cv.currency)}</b>`,
+              walletCur !== (user.currency as Currency) ? `🔁 Charged from wallet: <b>${fmt(charge, walletCur)}</b>` : "",
+              "",
+              `💰 Wallet now: <b>${fmt(w.balanceMinor, walletCur)}</b>`,
+              `💰 After payment: <b>${fmt(Math.max(0, after), walletCur)}</b>`,
+              "",
+              after < 0 ? "⚠️ Not enough balance — top up first." : "⚡ Your item is delivered here the moment you confirm.",
+            ].filter((l) => l !== "").join("\n"),
+            {
+              parse_mode: "HTML",
+              reply_markup: after < 0
+                ? new InlineKeyboard().text("➕ Add balance", cb("wal", "topup")).row().text("✖️ Cancel", cb("crt", "view"))
+                : new InlineKeyboard()
+                    .add(sbtn(`✅ Confirm & pay ${fmt(charge, walletCur)}`, cb("ord", "paywalletok"), "success")).row()
+                    .text("✖️ Cancel", cb("crt", "view")),
+            },
+          );
+          break;
+        }
+        case "ord:paywalletok": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
           await vipAnimation(ctx);
           const result = await checkoutWithWallet(user.id);
