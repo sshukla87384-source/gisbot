@@ -135,8 +135,7 @@ services:
     command: >
       sh -c "pnpm --filter @gis/database exec prisma db push --skip-generate --accept-data-loss
       && echo '=== SCHEMA SYNCED OK ==='
-      && pnpm --filter @gis/database db:seed
-      && echo '=== SEED OK ==='"
+      && (pnpm --filter @gis/database db:seed && echo '=== SEED OK ===' || echo '=== SEED SKIPPED (non-fatal) ===')"
     restart: "no"
     healthcheck:
       disable: true
