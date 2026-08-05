@@ -469,6 +469,7 @@ export async function profileView(user: BotUser): Promise<View> {
   const spent = orders.items.reduce((n, o) => n + o.totalPaidMinor, 0);
   const done = orders.items.filter((o) => o.status === "COMPLETED").length;
   const kb = new InlineKeyboard()
+    .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
     .add(sbtn("📦 My orders", cb("ord", "list", 1), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
     .add(sbtn("🔑 My keys", cb("lic", "list", 1), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
     .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
@@ -495,6 +496,14 @@ export async function profileView(user: BotUser): Promise<View> {
       "",
       `💱 Currency: <b>${user.currency}</b>   ·   🌐 Language: <b>${user.locale.toUpperCase()}</b>`,
       `📅 Member since ${user.createdAt.toISOString().slice(0, 10)}`,
+      ...(orders.items.length > 0
+        ? ["", HR, `📦 <b>Recent orders</b>`,
+            ...orders.items.slice(0, 3).map((o) => {
+              const icon = o.status === "COMPLETED" ? "✅" : o.status === "PENDING_PAYMENT" ? "⌛" : o.status === "CANCELLED" || o.status === "EXPIRED" ? "🚫" : "🕐";
+              return `${icon} <b>${escapeHtml(o.orderNumber)}</b> · ${fmt(o.totalPaidMinor, o.currency)}`;
+            }),
+            "<i>Tap 📦 My orders for all of them and your keys.</i>"]
+        : []),
     ].filter((l) => l !== "").join("\n"),
     kb,
   };
