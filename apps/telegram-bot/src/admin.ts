@@ -938,6 +938,9 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
 function saleTargetKb(): InlineKeyboard {
   return new InlineKeyboard()
     .text("🛍 Open Shop", cb("adm", "ssaletgt", "menu")).text("📦 A product", cb("adm", "ssaletgt", "prod")).row()
+    .text("🎯 Today's Deals", cb("adm", "ssaletgt", "deals")).text("🎁 Refer & Earn", cb("adm", "ssaletgt", "refer")).row()
+    .text("🎡 Spin & Win", cb("adm", "ssaletgt", "spin")).text("🎯 Missions", cb("adm", "ssaletgt", "mission")).row()
+    .text("🏆 My Tier", cb("adm", "ssaletgt", "tier")).text("💳 Add balance", cb("adm", "ssaletgt", "topup")).row()
     .text("🔗 Custom link", cb("adm", "ssaletgt", "url")).text("🚫 No button", cb("adm", "ssaletgt", "none")).row();
 }
 
@@ -1004,7 +1007,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "ssaletgt": {
       const d = ctx.session.saleDraft ?? {};
       if (id === "none") { ctx.session.saleDraft = { ...d, btnText: undefined, btnUrl: undefined }; ctx.session.awaiting = "sale_timer"; await askStep(ctx, "⏳ Send a countdown in <b>hours</b> (e.g. 24), or <code>-</code> to skip:"); return; }
-      if (id === "menu") { ctx.session.saleDraft = { ...d, btnUrl: `https://t.me/${ctx.me.username}?start=menu` }; ctx.session.awaiting = "sale_btntext"; await askStep(ctx, "Send the <b>button label</b> (e.g. 🛍 Shop the sale):"); return; }
+      // Any in-bot section can be the button target via a start deep link.
+      const sections: Record<string, string> = { menu: "shop", deals: "deals", refer: "refer", spin: "spin", mission: "mission", tier: "tier", topup: "topup" };
+      if (sections[id]) {
+        ctx.session.saleDraft = { ...d, btnUrl: `https://t.me/${ctx.me.username}?start=${sections[id]}` };
+        ctx.session.awaiting = "sale_btntext";
+        await askStep(ctx, "Send the <b>button label</b> (e.g. 🎁 Refer &amp; earn now):");
+        return;
+      }
       if (id === "url") { ctx.session.awaiting = "sale_url"; await askStep(ctx, "🔗 Send the full <b>URL</b> the button should open:"); return; }
       if (id === "prod") { await show(ctx, "📦 Pick the product to link:", await (async () => { const kb = new InlineKeyboard(); const ps = await listProductsBrief(30); for (const pr of ps) kb.text(`${pr.iconEmoji ? pr.iconEmoji + " " : ""}${pr.name.slice(0, 30)}`, cb("adm", "ssaleprod", pr.id)).row(); kb.text("◀️ Back", cb("adm", "home")); return kb; })(), true); return; }
       return;

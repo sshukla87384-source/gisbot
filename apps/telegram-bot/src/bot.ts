@@ -212,6 +212,19 @@ export function createBot(): Bot<Ctx> {
       const productId = await getProductIdBySlug(payload.slice(PRODUCT_DEEPLINK_PREFIX.length));
       if (productId) { ctx.session.buyProductId = productId; return render(ctx, await views.productView(ctx.user, productId), false); }
     }
+    // Deep links so an announcement button can open ANY section of the bot.
+    switch (payload) {
+      case "shop": return render(ctx, await views.shopHomeView(ctx.user, 1), false);
+      case "deals": return render(ctx, await views.dealsView(ctx.user), false);
+      case "refer": return render(ctx, await views.referralView(ctx.user, ctx.me.username), false);
+      case "spin": return render(ctx, await views.spinView(ctx.user), false);
+      case "mission": return render(ctx, await views.missionView(ctx.user), false);
+      case "tier": return render(ctx, await views.tierView(ctx.user), false);
+      case "account": return render(ctx, await views.profileView(ctx.user), false);
+      case "topup": return render(ctx, await views.walletView(ctx.user), false);
+      case "orders": return render(ctx, await views.ordersView(ctx.user, 1), false);
+      default: break;
+    }
     // Standalone single emoji → Telegram plays a fullscreen animation for the user.
     if (config.CELEBRATION_EMOJI) await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
     const who = greetName(ctx.user);
