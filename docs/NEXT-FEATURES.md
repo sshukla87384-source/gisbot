@@ -120,6 +120,8 @@ Not a random prize wheel. The spin **assigns a task automatically**.
 4. Price-drop alerts
 5. Referral leaderboard
 6. Customer utilities — A (2FA generator) first, it is small and removes a third-party dependency
+7. Reseller: R1 sandbox keys (unblocks reseller integrations), then R2 webhooks, then R3 dashboard
+8. C1 gift a product
 
 ## Notes for whoever picks this up
 
@@ -165,3 +167,43 @@ Not a random prize wheel. The spin **assigns a task automatically**.
 - One tap on any delivered item: either reassure the customer, or open a
   replacement claim **pre-filled with that order** so they skip the picker.
 - Cuts support volume and routes genuine faults into the existing warranty flow.
+
+---
+
+## Reseller-facing features (agreed as useful)
+
+### R1. Sandbox / test API keys  *(build first — solves an observed problem)*
+A reseller's importer reported: *"order: from the docs, not tested — a test would
+place a real paid order."* So resellers cannot verify their purchase code without
+spending real money, and discover bugs on live orders instead.
+
+- A key flagged `testMode` behaves identically but:
+  - returns realistic **fake** delivered keys (clearly marked `TEST-…`)
+  - never consumes stock, never debits a wallet, never calls a supplier
+  - orders are recorded with a `test` flag and excluded from stats/profit
+- Same endpoints, same response shapes, so integration code needs no changes.
+- Toggle in the bot: 🧑‍💻 Developer API → "🧪 Create test key".
+
+### R2. Webhooks
+- Resellers register a URL and receive events instead of polling `/products`:
+  `stock.changed`, `price.changed`, `product.added`, `order.delivered`.
+- Signed with an HMAC secret per endpoint; retries with backoff; deliveries
+  visible in the bot so they can debug their own receiver.
+- Also reduces load on our API as reseller count grows.
+
+### R3. Reseller dashboard (in the bot)
+- Their own numbers: spend, orders, top products, wallet burn rate, and API
+  usage against their rate limit.
+- Reduces "how much have I spent?" support messages.
+
+---
+
+## Customer feature
+
+### C1. Gift a product to another user
+- Buy and send directly to a friend's @username; the recipient gets the keys with
+  "🎁 A gift from {buyer}".
+- No payment complexity — a normal purchase with a different delivery target.
+- Acquires new customers through existing buyers.
+- Guards: recipient must have started the bot; if not, hold the gift and deliver
+  on their first /start. Never expose the buyer's keys to the wrong person.
