@@ -98,6 +98,8 @@ export interface SessionData {
     | "admin_gift_detail"
     | "admin_spn_targets"
     | "admin_spn_days"
+    | "admin_spn_min"
+    | "admin_spn_max"
     | "admin_fx_rate"
     | "admin_fx_surcharge"
     | "admin_tool_adjust"

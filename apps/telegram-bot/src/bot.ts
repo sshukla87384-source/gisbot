@@ -37,6 +37,7 @@ import {
   unwatchProduct,
   getProductView,
   spin,
+  spinForOrder,
   claimChallenge,
   getBnplStatus,
   addStock,
@@ -941,14 +942,14 @@ export function createBot(): Bot<Ctx> {
             const [ts, scfg] = await Promise.all([tierOf(user.id), getSpinConfig()]);
             const rowKb = new InlineKeyboard();
             rowKb.text("🏆 My Tier", cb("prf", "tier"));
-            if (scfg.enabled) rowKb.text("🎡 Spin & Win", cb("spn", "home"));
+            if (scfg.enabled) rowKb.text("🎡 Spin & Win", cb("spn", "ord", result.orderId));
             await ctx.reply(
               [
                 `🏆 <b>${ts.tier.name} member</b> — ${escapeHtml(ts.tier.perk)}`,
                 ts.next
                   ? `📈 Spend <b>${fmt(ts.toNextMinor, ts.currency)}</b> more to reach <b>${ts.next.name}</b>`
                   : "👑 You're at the top tier — thank you!",
-                scfg.enabled ? "\n🎡 <b>Spin for a challenge</b> and earn wallet credit." : "",
+                scfg.enabled ? "\n🎡 <b>You earned a spin!</b> Tap below to try your luck." : "",
               ].filter(Boolean).join("\n"),
               { parse_mode: "HTML", reply_markup: rowKb },
             );
@@ -1631,6 +1632,37 @@ export function createBot(): Bot<Ctx> {
         case "prf:tier":
           await render(ctx, await views.tierView(user), true);
           break;
+        case "spn:ord": {
+          const r = await spinForOrder(user.id, args[0] ?? "");
+          if (!r.ok) {
+            await ctx.answerCallbackQuery({
+              text: r.reason === "ALREADY_SPUN" ? "You already spun for this order" : r.reason === "DISABLED" ? "Not running right now" : "Not eligible",
+              show_alert: true,
+            });
+            break;
+          }
+          await ctx.answerCallbackQuery({ text: "🎡 Spinning…" });
+          const cur = (r.currency ?? user.currency) as Currency;
+          await ctx.reply(
+            r.won
+              ? [
+                  "🎡✨ <b>YOU WON!</b> ✨🎡",
+                  "",
+                  `🎁 <b>${fmt(r.rewardMinor ?? 0, cur)}</b> has been added to your wallet.`,
+                  "",
+                  "💰 Spend it on your next order — and you get another spin with every purchase!",
+                ].join("\n")
+              : [
+                  "🎡 <b>Better luck next time!</b> 🍀",
+                  "",
+                  `This spin didn't win — orders under <b>${fmt(r.minSpendMinor ?? 0, cur)}</b> aren't eligible for a prize.`,
+                  "",
+                  `🛍 Your order was <b>${fmt(r.orderValueMinor ?? 0, cur)}</b>. Spend a little more next time and your spin can win!`,
+                ].join("\n"),
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🛍 Shop", cb("shp", "home", 1)) },
+          );
+          break;
+        }
         case "spn:home":
           await render(ctx, await views.spinView(user), true);
           break;

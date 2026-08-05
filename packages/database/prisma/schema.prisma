@@ -1373,6 +1373,8 @@ enum ChallengeStatus {
 /// in code (see spin.service.ts) and paid to the wallet once, idempotently.
 model SpinChallenge {
   id            String          @id @default(cuid())
+  orderId       String?         @unique // one spin per purchase
+  won           Boolean         @default(false)
   userId        String
   user          User            @relation(fields: [userId], references: [id])
   targetMinor   Int

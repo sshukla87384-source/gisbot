@@ -1081,6 +1081,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const [cfg, st] = await Promise.all([getSpinConfig(), spinStats()]);
       const kb = new InlineKeyboard()
         .add(sbtn(cfg.enabled ? "✅ ON — turn off" : "🚫 OFF — turn on", cb("adm", "spntog"), cfg.enabled ? "success" : "danger")).row()
+        .add(sbtn("🎯 Minimum to win", cb("adm", "spnmin"), "primary"), sbtn("🎁 Max reward", cb("adm", "spnmax"), "primary")).row()
         .add(sbtn("🎯 Challenge amounts", cb("adm", "spntgt"), "primary"), sbtn("⏳ Days to finish", cb("adm", "spnexp"), "primary")).row()
         .text("◀️ Back", cb("adm", "m_users"));
       await show(ctx, [
@@ -1089,7 +1090,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "",
         "A spin assigns a <b>spend challenge</b>. When the customer reaches it, the reward is credited to their wallet automatically.",
         "",
-        `🎯 Amounts drawn: ${cfg.targetsMinor.map((t) => `<b>${(t / 100).toFixed(2)}</b>`).join(" · ")}`,
+        "<b>One spin per purchase</b>:",
+        `• orders under <b>${(cfg.minSpendMinor / 100).toFixed(2)}</b> → “better luck next time”`,
+        `• otherwise ${(cfg.rewardBp / 100).toFixed(1)}% of the order, capped at <b>${(cfg.maxRewardMinor / 100).toFixed(2)}</b>`,
+        "",
+        `🎯 Legacy challenge amounts: ${cfg.targetsMinor.map((t) => `<b>${(t / 100).toFixed(2)}</b>`).join(" · ")}`,
         `🎁 Reward: <b>${(cfg.rewardBp / 100).toFixed(1)}%</b> of the amount (hard-capped at <b>${(REWARD_CAP_BP / 100).toFixed(0)}%</b> in code)`,
         `⏳ Time to finish: <b>${cfg.expiryDays}</b> days`,
         "",
@@ -1105,6 +1110,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(n.enabled ? "🎡 Spin & Win is ON — customers can spin from My Account." : "🚫 Spin & Win is OFF.");
       return handleAdminCallback(ctx, "spncfg", []);
     }
+    case "spnmin":
+      ctx.session.awaiting = "admin_spn_min";
+      await askStep(ctx, "🎯 Orders <b>below</b> this amount win nothing. Send the amount (e.g. <code>10</code>):");
+      return;
+    case "spnmax":
+      ctx.session.awaiting = "admin_spn_max";
+      await askStep(ctx, "🎁 Most a single spin can ever pay. Send the amount (e.g. <code>0.01</code>):");
+      return;
     case "spntgt":
       ctx.session.awaiting = "admin_spn_targets";
       await askStep(ctx, "🎯 Send the challenge amounts, comma separated (e.g. <code>50, 100, 250</code>):");
@@ -2808,6 +2821,20 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await createGift(uid, title, text.trim() === "-" ? null : text.trim(), "bot-admin");
     await ctx.reply("🎁 <b>Gift created.</b> The customer has been notified — now send it to them and tap ✅ Mark delivered.", { parse_mode: "HTML" });
     await handleAdminCallback(ctx, "gifts", []);
+    return true;
+  }
+  if (awaiting === "admin_spn_min") {
+    const v = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    const c = await setSpinConfig({ minSpendMinor: Math.max(0, Math.round((Number.isFinite(v) ? v : 10) * 100)) });
+    await ctx.reply(`🎯 Orders under <b>${(c.minSpendMinor / 100).toFixed(2)}</b> now win nothing.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "spncfg", []);
+    return true;
+  }
+  if (awaiting === "admin_spn_max") {
+    const v = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    const c = await setSpinConfig({ maxRewardMinor: Math.max(1, Math.round((Number.isFinite(v) ? v : 0.01) * 100)) });
+    await ctx.reply(`🎁 A single spin can now pay at most <b>${(c.maxRewardMinor / 100).toFixed(2)}</b>.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "spncfg", []);
     return true;
   }
   if (awaiting === "admin_spn_targets") {

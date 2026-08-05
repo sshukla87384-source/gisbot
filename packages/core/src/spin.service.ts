@@ -19,14 +19,18 @@ const SETTING = "spin.config";
 
 export interface SpinConfig {
   enabled: boolean;
-  targetsMinor: number[]; // e.g. [5000, 10000, 25000] = $50/$100/$250
+  targetsMinor: number[]; // legacy challenge mode (kept for existing rows)
   rewardBp: number; // capped at REWARD_CAP_BP
   expiryDays: number;
+  /** Purchases below this win nothing ("better luck next time"). */
+  minSpendMinor: number;
+  /** Hard ceiling on a single spin reward. */
+  maxRewardMinor: number;
 }
 
 // Enabled by default (requested). Rewards stay bounded by REWARD_CAP_BP: with
 // these targets the most anyone can earn per challenge is $1 / $2 / $5.
-const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14 };
+const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14, minSpendMinor: 1_000, maxRewardMinor: 1 };
 
 export async function getSpinConfig(): Promise<SpinConfig> {
   const row = await prisma.setting.findUnique({ where: { key: SETTING } }).catch(() => null);
@@ -37,6 +41,8 @@ export async function getSpinConfig(): Promise<SpinConfig> {
     // Never trust a stored value above the cap.
     rewardBp: Math.min(REWARD_CAP_BP, Math.max(1, Number(v?.rewardBp ?? DEFAULTS.rewardBp))),
     expiryDays: Math.min(90, Math.max(1, Number(v?.expiryDays ?? DEFAULTS.expiryDays))),
+    minSpendMinor: Math.max(0, Number(v?.minSpendMinor ?? DEFAULTS.minSpendMinor)),
+    maxRewardMinor: Math.max(1, Number(v?.maxRewardMinor ?? DEFAULTS.maxRewardMinor)),
   };
 }
 
@@ -47,6 +53,8 @@ export async function setSpinConfig(patch: Partial<SpinConfig>): Promise<SpinCon
     targetsMinor: (patch.targetsMinor ?? cur.targetsMinor).filter((n) => n > 0).slice(0, 6),
     rewardBp: Math.min(REWARD_CAP_BP, Math.max(1, patch.rewardBp ?? cur.rewardBp)),
     expiryDays: Math.min(90, Math.max(1, patch.expiryDays ?? cur.expiryDays)),
+    minSpendMinor: Math.max(0, patch.minSpendMinor ?? cur.minSpendMinor),
+    maxRewardMinor: Math.max(1, patch.maxRewardMinor ?? cur.maxRewardMinor),
   };
   await prisma.setting.upsert({ where: { key: SETTING }, create: { key: SETTING, value: next as never }, update: { value: next as never } });
   return next;
@@ -167,4 +175,79 @@ export async function spinStats(): Promise<{ active: number; completed: number; 
     prisma.spinChallenge.aggregate({ where: { status: "COMPLETED" }, _sum: { rewardMinor: true } }),
   ]);
   return { active, completed, paidMinor: agg._sum.rewardMinor ?? 0 };
+}
+
+/* ── Per-purchase spin: 1 purchase = 1 spin ───────────────────────────────── */
+
+export interface PurchaseSpinResult {
+  ok: boolean;
+  reason?: "DISABLED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "ALREADY_SPUN";
+  won?: boolean;
+  rewardMinor?: number;
+  orderValueMinor?: number;
+  minSpendMinor?: number;
+  currency?: Currency;
+}
+
+/** Has this order already been spun? */
+export async function orderSpun(orderId: string): Promise<boolean> {
+  if (!orderId) return false;
+  return (await prisma.spinChallenge.findUnique({ where: { orderId }, select: { id: true } })) !== null;
+}
+
+/**
+ * One spin per completed purchase.
+ * Below `minSpendMinor` the spin loses ("better luck next time"). Otherwise the
+ * reward is 2% of the order, hard-capped by `maxRewardMinor` — so a big order
+ * cannot pay out more than the ceiling you set.
+ * Credited once: the ledger key is derived from the ORDER, not the spin row.
+ */
+export async function spinForOrder(userId: string, orderId: string): Promise<PurchaseSpinResult> {
+  const cfg = await getSpinConfig();
+  if (!cfg.enabled) return { ok: false, reason: "DISABLED" };
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, userId },
+    select: { status: true, subtotalMinor: true, discountMinor: true, currency: true },
+  });
+  if (!order) return { ok: false, reason: "NOT_FOUND" };
+  if (!["COMPLETED", "PAID", "PENDING_FULFILLMENT"].includes(order.status)) return { ok: false, reason: "NOT_ELIGIBLE" };
+  if (await orderSpun(orderId)) return { ok: false, reason: "ALREADY_SPUN" };
+
+  const value = Math.max(0, order.subtotalMinor - order.discountMinor);
+  const orderCur = order.currency as Currency;
+  // Compare against the threshold in the ORDER's currency.
+  const threshold = orderCur === "USD" ? cfg.minSpendMinor : convertMinor(cfg.minSpendMinor, "USD" as Currency, orderCur);
+  const won = value >= threshold;
+
+  const capped = Math.min(cfg.maxRewardMinor, rewardFor(value, cfg.rewardBp));
+  const reward = won ? Math.max(1, capped) : 0;
+
+  // Record the spin first, so a double-tap cannot produce a second one.
+  const row = await prisma.spinChallenge
+    .create({
+      data: {
+        orderId, userId, won,
+        targetMinor: value, rewardMinor: reward, currency: orderCur,
+        baselineMinor: value, status: "COMPLETED", claimedAt: new Date(),
+        expiresAt: new Date(),
+      },
+    })
+    .catch(() => null);
+  if (!row) return { ok: false, reason: "ALREADY_SPUN" };
+
+  if (won && reward > 0) {
+    const w = await prisma.wallet.findUnique({ where: { userId }, select: { currency: true } });
+    const walletCur = (w?.currency ?? orderCur) as Currency;
+    const credit = walletCur === orderCur ? reward : convertMinor(reward, orderCur, walletCur);
+    await adjustWallet({
+      userId,
+      amountMinor: BigInt(Math.max(1, credit)),
+      type: "CASHBACK",
+      note: `Spin win on order`,
+      idempotencyKey: `spin-order:${orderId}`,
+    });
+    await invalidate(`loyal:spend:${userId}`).catch(() => undefined);
+  }
+  return { ok: true, won, rewardMinor: reward, orderValueMinor: value, minSpendMinor: threshold, currency: orderCur };
 }
