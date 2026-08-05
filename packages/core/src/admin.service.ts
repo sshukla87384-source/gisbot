@@ -6,7 +6,7 @@ import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
 import { invalidate, cached } from "./redis.js";
-import { usdtRate } from "./fx.js";
+import { usdtRate, priceInrFromUsd, priceUsdFromInr } from "./fx.js";
 import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./orders/assign.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
@@ -627,11 +627,11 @@ export async function setProductPublicPrice(
   const oldMinor = beforeRows[0]?.amountMinor ?? null;
   // Whichever currency you skip is derived from the other at the store rate, so a
   // product is never left unpriced for half your customers.
-  const rate = usdtRate("INR"); // INR per 1 USD
+  // INR prices carry the surcharge so USDT stays the cheaper, instant option.
   let usd = prices.usdMinor && prices.usdMinor > 0 ? prices.usdMinor : 0;
   let inr = prices.inrMinor && prices.inrMinor > 0 ? prices.inrMinor : 0;
-  if (usd > 0 && inr === 0) inr = Math.max(1, Math.round(usd * rate));
-  else if (inr > 0 && usd === 0) usd = Math.max(1, Math.round(inr / rate));
+  if (usd > 0 && inr === 0) inr = priceInrFromUsd(usd);
+  else if (inr > 0 && usd === 0) usd = priceUsdFromInr(inr);
   const entries: Array<["USD" | "INR", number]> = [];
   if (usd > 0) entries.push(["USD", usd]);
   if (inr > 0) entries.push(["INR", inr]);

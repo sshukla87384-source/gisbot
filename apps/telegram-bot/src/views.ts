@@ -346,7 +346,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${walletCur === "USD" ? " USDT" : ""}`,
     crossCur ? `🔁 Wallet charge for this order: <b>${walletChargeLabel}</b>  <i>(${fmt(payable, view.currency)})</i>` : "",
     (user.currency as string) === "INR" && loadConfig().UPI_ID
-      ? "\n⚡ <b>Binance (USDT) delivers instantly.</b>\n🕐 UPI is verified by hand, so it can take longer — prefer Binance if you need it now."
+      ? "\n💡 <b>Paying in USDT is cheaper</b> — INR prices include a small handling fee.\n⚡ Binance (USDT) also delivers instantly, while UPI is verified by hand."
       : "",
     gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");

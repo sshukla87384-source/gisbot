@@ -44,10 +44,13 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 export async function primeFxRate(): Promise<number> {
   loadedAt = 0;
   const v = await getInrPerUsdt();
+  await getInrSurchargeBp().catch(() => undefined);
   if (!refreshTimer) {
     refreshTimer = setInterval(() => {
       loadedAt = 0;
+      surchargeLoadedAt = 0;
       void getInrPerUsdt().catch(() => undefined);
+      void getInrSurchargeBp().catch(() => undefined);
     }, TTL_MS);
     refreshTimer.unref?.(); // never hold the process open
   }
@@ -111,4 +114,71 @@ export function usdtCentInMinor(currency: Currency): number {
 /** Convert a USDT amount string back to minor units of `currency` (exact bookkeeping). */
 export function usdtToMinor(usdt: string, currency: Currency): number {
   return Math.round(Number.parseFloat(usdt) * usdtRate(currency) * 100);
+}
+
+/* ── INR price surcharge ──────────────────────────────────────────────────────
+ * INR/UPI costs you manual verification, so INR PRICES carry a surcharge to
+ * steer customers toward instant USDT. Default 5%.
+ *
+ * Deliberately applied to PRICES ONLY — never to wallet balances, deposits or
+ * refunds. Converting money someone already holds must stay exact, or a deposit
+ * and a withdrawal of the same amount would not agree.
+ */
+const SURCHARGE_KEY = "fx.inr_surcharge_bp";
+export const INR_SURCHARGE_BP_DEFAULT = 500; // 500bp = 5%
+
+let cachedSurcharge = INR_SURCHARGE_BP_DEFAULT;
+let surchargeLoadedAt = 0;
+
+export function inrSurchargeBp(): number {
+  return cachedSurcharge;
+}
+
+export async function getInrSurchargeBp(): Promise<number> {
+  if (Date.now() - surchargeLoadedAt < TTL_MS) return cachedSurcharge;
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: SURCHARGE_KEY } });
+    const v = Number((row?.value as { bp?: number } | null)?.bp);
+    cachedSurcharge = Number.isFinite(v) && v >= 0 ? v : INR_SURCHARGE_BP_DEFAULT;
+  } catch {
+    /* keep last known */
+  }
+  surchargeLoadedAt = Date.now();
+  return cachedSurcharge;
+}
+
+/** Admin: set the INR price surcharge in basis points (500 = 5%). */
+export async function setInrSurchargeBp(bp: number): Promise<number> {
+  const v = Math.max(0, Math.min(5000, Math.round(bp))); // cap at 50% as a sanity guard
+  await prisma.setting.upsert({
+    where: { key: SURCHARGE_KEY },
+    create: { key: SURCHARGE_KEY, value: { bp: v } as never },
+    update: { value: { bp: v } as never },
+  });
+  cachedSurcharge = v;
+  surchargeLoadedAt = Date.now();
+  return v;
+}
+
+/** INR price for a USD price — FX rate PLUS the surcharge. */
+export function priceInrFromUsd(usdMinor: number): number {
+  const base = usdMinor * usdtRate("INR");
+  return Math.max(1, Math.round((base * (10_000 + cachedSurcharge)) / 10_000));
+}
+
+/** USD price for an INR price — removes the surcharge, so the pair round-trips. */
+export function priceUsdFromInr(inrMinor: number): number {
+  const base = (inrMinor * 10_000) / (10_000 + cachedSurcharge);
+  return Math.max(1, Math.round(base / usdtRate("INR")));
+}
+
+/**
+ * Convert a PRICE between currencies (surcharge-aware). Use this for prices;
+ * use convertMinor for balances.
+ */
+export function convertPriceMinor(amountMinor: number, from: Currency, to: Currency): number {
+  if (from === to) return Math.round(amountMinor);
+  if (from === "USD" && to === "INR") return priceInrFromUsd(amountMinor);
+  if (from === "INR" && to === "USD") return priceUsdFromInr(amountMinor);
+  return convertMinor(amountMinor, from, to);
 }

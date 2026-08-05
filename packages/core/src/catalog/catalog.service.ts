@@ -1,7 +1,7 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
 import { translateMany } from "../translate.service.js";
-import { convertMinor } from "../fx.js";
+import { convertMinor, convertPriceMinor } from "../fx.js";
 import { cached } from "../redis.js";
 import { effectivePriceMinor, isSaleActive } from "../pricing.js";
 
@@ -282,7 +282,7 @@ async function resolveUserPriceMap(
   for (const r of rows) {
     // An override is stored in ITS OWN currency; convert before it is displayed
     // or charged, or an INR view of a USD override is 100x wrong.
-    const amount = currency && r.currency !== currency ? convertMinor(r.amountMinor, r.currency as Currency, currency) : r.amountMinor;
+    const amount = currency && r.currency !== currency ? convertPriceMinor(r.amountMinor, r.currency as Currency, currency) : r.amountMinor;
     const cur = map.get(r.productId);
     if (cur === undefined || r.channel === channel) map.set(r.productId, amount);
   }

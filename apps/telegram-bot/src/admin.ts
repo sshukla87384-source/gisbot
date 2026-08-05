@@ -153,6 +153,8 @@ import {
   getUserWalletHistory,
   closeBnpl,
   getInrPerUsdt,
+  getInrSurchargeBp,
+  setInrSurchargeBp,
   setInrPerUsdt,
   repairBrokenAccounts,
   announceCatalogue,
@@ -285,6 +287,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
       [["💱 INR ⇄ USD Rate", cb("adm", "fxrate"), "primary"]],
+      [["🇮🇳 INR Surcharge", cb("adm", "fxsur"), "primary"]],
     ] },
     m_mkt: { title: "📣 <b>Marketing</b>", subtitle: "Reach & reward customers", rows: [
       [["📢 Broadcast", cb("adm", "bc"), "primary"], ["📣 Groups", cb("adm", "groups"), "primary"]],
@@ -1788,6 +1791,25 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("❌ Rejected — the customer has been told.");
       return;
     }
+    case "fxsur": {
+      const [bp, rate] = await Promise.all([getInrSurchargeBp(), getInrPerUsdt()]);
+      ctx.session.awaiting = "admin_fx_surcharge";
+      await askStep(ctx, [
+        "🇮🇳 <b>INR price surcharge</b>",
+        "",
+        `Current: <b>${(bp / 100).toFixed(1)}%</b> on top of the converted price.`,
+        "",
+        "INR/UPI costs you manual verification, so INR prices carry a surcharge — that makes <b>USDT the cheaper, instant option</b> and steers customers there.",
+        "",
+        `Example at ${rate} INR = \$1 and ${(bp / 100).toFixed(1)}%:`,
+        `• \$10.00 → <b>₹${(1000 * rate * (10000 + bp) / 10000 / 100).toFixed(2)}</b> (₹${(1000 * rate / 100).toFixed(2)} without it)`,
+        "",
+        "⚠️ Applies to PRICES only — wallet balances, deposits and refunds convert exactly.",
+        "",
+        "Send the new percentage (e.g. <code>5</code>), or <code>0</code> for none:",
+      ].join("\n"));
+      return;
+    }
     case "fxrate": {
       const rate = await getInrPerUsdt();
       ctx.session.awaiting = "admin_fx_rate";
@@ -2716,6 +2738,24 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const c = await setSpinConfig({ expiryDays: Number.isFinite(n) ? n : 14 });
     await ctx.reply(`⏳ Customers get <b>${c.expiryDays}</b> days.`, { parse_mode: "HTML" });
     await handleAdminCallback(ctx, "spncfg", []);
+    return true;
+  }
+  if (awaiting === "admin_fx_surcharge") {
+    const v = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(v) || v < 0) { ctx.session.awaiting = "admin_fx_surcharge"; await askStep(ctx, "Send a percentage, e.g. <code>5</code>"); return true; }
+    const bp = await setInrSurchargeBp(Math.round(v * 100));
+    const rate = await getInrPerUsdt();
+    await ctx.reply(
+      [
+        `✅ INR surcharge set to <b>${(bp / 100).toFixed(1)}%</b>.`,
+        "",
+        `\$10.00 now prices at <b>₹${(1000 * rate * (10000 + bp) / 10000 / 100).toFixed(2)}</b>.`,
+        "",
+        "New prices and any derived INR price use it immediately. Existing INR prices you typed by hand are unchanged — re-save a product to re-derive.",
+      ].join("\n"),
+      { parse_mode: "HTML" },
+    );
+    await sendPanel(ctx, false);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

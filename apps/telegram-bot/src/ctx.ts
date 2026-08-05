@@ -98,6 +98,7 @@ export interface SessionData {
     | "admin_spn_targets"
     | "admin_spn_days"
     | "admin_fx_rate"
+    | "admin_fx_surcharge"
     | "admin_tr_key"
     | "admin_tr_url"
     | null;

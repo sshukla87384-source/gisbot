@@ -1,6 +1,6 @@
 import type { Currency, Prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
-import { convertMinor } from "../fx.js";
+import { convertMinor, convertPriceMinor } from "../fx.js";
 import { CoreError, decryptSecret } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
 
@@ -74,7 +74,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
     const other = v.prices[0];
     if (!exact && !other) throw new CoreError("PRICE_UNAVAILABLE", `${v.product.name} has no price`);
     // No price list in this currency → convert the one we have at the configured rate.
-    const price = exact ?? { amountMinor: convertMinor((other as NonNullable<typeof other>).amountMinor, (other as NonNullable<typeof other>).currency, currency) };
+    const price = exact ?? { amountMinor: convertPriceMinor((other as NonNullable<typeof other>).amountMinor, (other as NonNullable<typeof other>).currency as Currency, currency) };
     const vipOverride = overrideByProduct.get(v.productId);
     return {
       variantId: v.id,
