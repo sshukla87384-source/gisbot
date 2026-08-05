@@ -385,7 +385,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       const instr = await deliveryInstructionsMessage();
       if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
     }
-    if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `🔄 ${outcome.pendingManual} item(s) are being prepared — arriving here shortly.`);
+    if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `⏳ <b>${outcome.pendingManual} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
   }
   await notifyOrderToAdmins(outcome.orderId, "Payment confirmed");
@@ -464,11 +464,9 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   const tgId = item.order.user.telegramId;
   if (tgId !== null) {
     await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange), { buttons: deliveryButtons(credsOf(payload)) });
-    await enqueueTelegramMessage(tgId, thankYouMessage(item.order.user, loadConfig().STORE_NAME));
-    const nudge = referralNudgeMessage(item.order.user.referralCode, loadConfig().BOT_USERNAME);
-    if (nudge) await enqueueTelegramMessage(tgId, nudge);
-    const instr = await deliveryInstructionsMessage();
-    if (instr) await enqueueTelegramMessage(tgId, instr);
+    // Deliver the item and nothing else. The thank-you, referral nudge and
+    // delivery instructions are ORDER-level and were already sent at payment —
+    // re-sending them here is what produced the duplicated messages.
   }
   return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
 }

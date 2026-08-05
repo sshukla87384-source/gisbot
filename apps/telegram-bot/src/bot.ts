@@ -916,13 +916,16 @@ export function createBot(): Bot<Ctx> {
           await deliverAll(ctx, result.deliveries, result.orderNumber);
           if (result.pendingManualItems > 0) {
             await ctx.reply(
-              `🔄 ${result.pendingManualItems} item(s) are being prepared — arriving here shortly.`,
+              `⏳ <b>${result.pendingManualItems} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`,
+              { parse_mode: "HTML" },
             );
           }
-          const nudge = referralNudgeMessage(user.referralCode, ctx.me.username);
-          if (nudge) await ctx.reply(nudge, { parse_mode: "HTML" });
-          const instr = await deliveryInstructionsMessage();
-          if (instr) await ctx.reply(instr, { parse_mode: "HTML" }).catch(() => undefined);
+          // One tidy closing message: instructions + referral, not three separate ones.
+          const closing = [
+            await deliveryInstructionsMessage(),
+            referralNudgeMessage(user.referralCode, ctx.me.username),
+          ].filter(Boolean).join("\n\n");
+          if (closing) await ctx.reply(closing, { parse_mode: "HTML" }).catch(() => undefined);
           break;
         }
         // Pay Later is credit — confirm the debt before it is taken on.

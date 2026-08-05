@@ -285,7 +285,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       if (outcome.pendingManual > 0) {
         await enqueueTelegramMessage(
           outcome.telegramId,
-          `🔄 ${outcome.pendingManual} item(s) are being prepared — arriving here shortly.`,
+          `⏳ <b>${outcome.pendingManual} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`,
         );
       }
       if (outcome.awaitingStock > 0) {

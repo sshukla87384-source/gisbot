@@ -1,6 +1,7 @@
 import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdminAlert, getRedis,
   refundWalletForOrder,
   logWallet,
+  retryPendingSupplierFulfilment,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -51,6 +52,9 @@ async function sweepReservationsAndOrders(): Promise<void> {
       });
     }
   }
+  // Recover any paid-but-undelivered supplier items before anything else.
+  await retryPendingSupplierFulfilment(20).catch(() => undefined);
+
   const expired = await prisma.order.updateMany({
     where: {
       status: "PENDING_PAYMENT",

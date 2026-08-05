@@ -781,3 +781,33 @@ export async function autoFetchSupplierDocs(supplierId: string): Promise<{ ok: b
     detail: [`🔎 <b>Found docs at</b> <code>${best.url}</code>`, "", learned.detail].join("\n"),
   };
 }
+
+/**
+ * Safety net: retry supplier fulfilment for paid orders whose items are still
+ * undelivered. Supplier purchase happens fire-and-forget right after checkout
+ * (so a slow vendor cannot stall the customer), which means a crash, restart or
+ * transient vendor error would otherwise leave a paid item never delivered —
+ * the customer sees "being prepared" forever and has to check My Orders.
+ */
+export async function retryPendingSupplierFulfilment(maxOrders = 20): Promise<{ scanned: number; delivered: number }> {
+  const items = await prisma.orderItem.findMany({
+    where: {
+      fulfilledAt: null,
+      variant: { product: { supplierId: { not: null } } },
+      order: { status: { in: ["PAID", "PENDING_FULFILLMENT"] } },
+      createdAt: { lt: new Date(Date.now() - 60_000) }, // give the first attempt a minute
+    },
+    orderBy: { createdAt: "asc" },
+    take: maxOrders,
+    select: { id: true },
+  });
+  let delivered = 0;
+  for (const it of items) {
+    const r = await fulfillFromSupplier(it.id).catch(() => ({ ok: false }));
+    if (r.ok) delivered++;
+  }
+  if (delivered > 0) {
+    await logWallet("supplier.retry", `Recovered ${delivered} undelivered supplier item(s)`, { scanned: items.length });
+  }
+  return { scanned: items.length, delivered };
+}
