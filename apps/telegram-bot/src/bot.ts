@@ -1388,7 +1388,7 @@ export function createBot(): Bot<Ctx> {
           break;
 
         case "prf:view":
-          await render(ctx, views.profileView(user), true);
+          await render(ctx, await views.profileView(user), true);
           break;
         case "set:view":
           await render(ctx, views.settingsView(user), true);

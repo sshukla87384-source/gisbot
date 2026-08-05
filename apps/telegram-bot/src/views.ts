@@ -459,19 +459,43 @@ export async function supportHomeView(user: BotUser): Promise<View> {
   };
 }
 
-export function profileView(user: BotUser): View {
-  const kb = new InlineKeyboard();
+export async function profileView(user: BotUser): Promise<View> {
+  const [wallet, orders, bnpl, ref] = await Promise.all([
+    getWallet(user.id),
+    listOrders(user.id, 1),
+    getBnplStatus(user.id).catch(() => null),
+    getReferralStats(user.id).catch(() => null),
+  ]);
+  const spent = orders.items.reduce((n, o) => n + o.totalPaidMinor, 0);
+  const done = orders.items.filter((o) => o.status === "COMPLETED").length;
+  const kb = new InlineKeyboard()
+    .add(sbtn("📦 My orders", cb("ord", "list", 1), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
+    .add(sbtn("🔑 My keys", cb("lic", "list", 1), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
+    .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
+    .add(sbtn(`💱 ${user.currency}`, cb("cur", "home"), "primary"), sbtn("🌐 Language", cb("lang", "home"), "primary")).row();
   backToMenuRow(kb);
   return {
     text: [
-      "👤 <b>Profile</b>",
+      header(`👤 ${bold("My Account")}`),
       "",
-      `Name: ${escapeHtml([user.firstName, user.lastName].filter(Boolean).join(" ") || "—")}`,
-      `Username: ${user.telegramHandle ? "@" + escapeHtml(user.telegramHandle) : "—"}`,
-      `Currency: ${user.currency}`,
-      `Roles: ${user.roleNames.join(", ") || "CUSTOMER"}`,
-      `Member since: ${user.createdAt.toISOString().slice(0, 10)}`,
-    ].join("\n"),
+      `👋 <b>${escapeHtml([user.firstName, user.lastName].filter(Boolean).join(" ") || "there")}</b>`,
+      `🔗 Username: ${user.telegramHandle ? "@" + escapeHtml(user.telegramHandle) : "<i>not set</i>"}`,
+      `🆔 Your ID: <code>${user.telegramId ?? "—"}</code>`,
+      user.isVip ? `${e("vip")} <b>VIP member</b>` : "",
+      "",
+      HR,
+      `💳 Wallet: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>`,
+      bnpl && bnpl.limitMinor > 0
+        ? `🕒 Pay Later: <b>${fmt(bnpl.availableMinor, bnpl.currency)}</b> available${bnpl.outstandingMinor > 0 ? ` · owed <b>${fmt(bnpl.outstandingMinor, bnpl.currency)}</b>` : ""}`
+        : "",
+      `📦 Orders: <b>${num(orders.items.length)}${orders.pages > 1 ? "+" : ""}</b>${done > 0 ? ` · ✅ ${num(done)} delivered` : ""}`,
+      spent > 0 ? `💰 Total spent: <b>${fmt(spent, wallet.currency)}</b>` : "",
+      ref && ref.invited > 0 ? `🎁 Invited: <b>${num(ref.invited)}</b> · bought <b>${num(ref.purchased)}</b> · earned <b>${fmt(ref.earnedMinor, wallet.currency)}</b>` : "",
+      HR,
+      "",
+      `💱 Currency: <b>${user.currency}</b>   ·   🌐 Language: <b>${user.locale.toUpperCase()}</b>`,
+      `📅 Member since ${user.createdAt.toISOString().slice(0, 10)}`,
+    ].filter((l) => l !== "").join("\n"),
     kb,
   };
 }

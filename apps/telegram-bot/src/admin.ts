@@ -594,7 +594,7 @@ async function finishBroadcast(ctx: Ctx): Promise<void> {
 
 const BTN_LABEL_DEFAULTS: Record<string, string> = {
   shop: "🛍 Shop Now", orders: "📦 My Orders", wallet: "💰 Wallet", support: "🎫 Help & Support",
-  referral: "👥 Referral", currency: "💱 Currency", language: "🌐 Language", developer: "🧑‍💻 Developer API",
+  account: "👤 My Account", referral: "👥 Referral", currency: "💱 Currency", language: "🌐 Language", developer: "🧑‍💻 Developer API",
 };
 
 async function renameButtonsView(ctx: Ctx): Promise<void> {
