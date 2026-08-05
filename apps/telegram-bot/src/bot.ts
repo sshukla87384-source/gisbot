@@ -33,6 +33,8 @@ import {
   getBnplStatus,
   addStock,
   saveReview,
+  generateTotp,
+  looksLikeTotpSecret,
   orderAlreadyRated,
   addReviewComment,
   logError,
@@ -1235,9 +1237,43 @@ export function createBot(): Bot<Ctx> {
         case "lic:list":
           await render(ctx, await views.vaultView(user, intArg(args, 0, 1)), true);
           break;
+        case "otp:get": {
+          await ctx.answerCallbackQuery();
+          try {
+            const rv = await revealDelivery(user.id, args[0] ?? "");
+            const fixed = repairAccountPair(rv.payload.username, rv.payload.password);
+            const secret = (fixed?.twofa ?? (rv.payload as { twofa?: string }).twofa ?? "").trim();
+            const t = secret ? generateTotp(secret) : null;
+            if (!t) {
+              await ctx.reply("⚠️ No valid 2FA secret is stored for this item. Open a 🎫 Support ticket and we'll sort it.");
+              break;
+            }
+            await ctx.reply(
+              [
+                "🔢 <b>Your login code</b>",
+                "",
+                `<code>${t.code}</code>`,
+                "",
+                `⏳ Valid for <b>${t.secondsLeft}s</b>${t.secondsLeft <= 8 ? ` — expiring soon, next code: <code>${t.nextCode}</code>` : ""}`,
+                "",
+                "<i>Tap the code to copy it. Codes change every 30 seconds — tap again for a fresh one.</i>",
+              ].join("\n"),
+              {
+                parse_mode: "HTML",
+                reply_markup: new InlineKeyboard()
+                  .copyText(`📋 Copy ${t.code}`, t.code).row()
+                  .text("🔄 New code", cb("otp", "get", args[0] ?? "")),
+              },
+            );
+          } catch {
+            await ctx.reply("⚠️ Couldn't read that item. Open it from 📦 My orders and try again.");
+          }
+          break;
+        }
         case "lic:view": {
-          const revealed = await revealDelivery(user.id, args[0] ?? "");
-          await sendRevealed(ctx, revealed.productName, revealed.variantName, revealed.payload);
+          const oiId = args[0] ?? "";
+          const revealed = await revealDelivery(user.id, oiId);
+          await sendRevealed(ctx, oiId, revealed.productName, revealed.variantName, revealed.payload);
           break;
         }
         case "ord:reveal": {
@@ -1595,7 +1631,8 @@ export function createBot(): Bot<Ctx> {
 }
 
 async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
-  await sendRevealed(ctx, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide, d.allowPwChange);
+  const oiId = (d as unknown as { orderItemId?: string }).orderItemId ?? "";
+  await sendRevealed(ctx, oiId, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide, d.allowPwChange);
 }
 
 /**
@@ -1638,6 +1675,7 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
 
 async function sendRevealed(
   ctx: Ctx,
+  orderItemId: string,
   productName: string,
   variantName: string,
   payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string },
@@ -1700,6 +1738,8 @@ async function sendRevealed(
   if (rPass) kb.copyText("📋 Copy password", rPass).row();
   if (rTwo) kb.copyText("📋 Copy 2FA secret", rTwo).row();
   if (rName && rPass) kb.copyText("📋 Copy ALL credentials", `${rName}|${rPass}${rTwo ? `|${rTwo}` : ""}`).row();
+  // Generate the OTP in the bot instead of sending them to 2fa.live.
+  if (rTwo && looksLikeTotpSecret(rTwo)) kb.add(sbtn("🔢 Get my login code (OTP)", cb("otp", "get", orderItemId), "success")).row();
   kb.text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
     .text("🏠 Menu", "mnu:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });

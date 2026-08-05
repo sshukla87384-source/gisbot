@@ -174,9 +174,14 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       : `<b>${fmt(cheapest.now, user.currency)}</b>`
     : "—";
   const totalStock = priced.reduce((sum, v) => sum + (v.stock >= UNLIMITED ? 0 : v.stock), 0);
-  const stockStr = priced.some((v) => v.stock >= UNLIMITED) ? "✅ Available" : `<b>${num(totalStock)}</b> in Stock`;
+  const anyStock = priced.some((v) => v.stock >= UNLIMITED || v.stock > 0);
+  const stockStr = priced.some((v) => v.stock >= UNLIMITED)
+    ? "✅ Available"
+    : anyStock
+      ? `<b>${num(totalStock)}</b> in Stock`
+      : "❌ <b>Sold out</b>";
   const lines = [
-    header(p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
+    header(!anyStock ? "🔔 RESTOCKING SOON" : p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
     "",
     `📦 ${bold("Product")}`,
     `${p.iconEmoji ? p.iconEmoji + " " : ""}${translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name))}`,
@@ -186,6 +191,22 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     "",
     `📈 ${bold("Available")}`,
     stockStr,
+    // Out of stock is a waiting message, not a dead end.
+    ...(!anyStock
+      ? ["",
+         "┏━━━━━━━━━━━━━━━━━━",
+         "┃ 🔔 <b>RESTOCKING SOON</b>",
+         "┃",
+         "┃ This one sold out fast! 🔥",
+         "┃ Fresh stock is on the way —",
+         "┃ usually within a few hours.",
+         "┃",
+         "┃ 💡 <i>Price may change slightly",
+         "┃ with the new batch.</i>",
+         "┗━━━━━━━━━━━━━━━━━━",
+         "",
+         "👉 Tap 🛍 <b>All products</b> — plenty in stock right now!"]
+      : []),
     "",
     // A personal price the admin set for THIS customer.
     ...(p.hasCustomPrice
