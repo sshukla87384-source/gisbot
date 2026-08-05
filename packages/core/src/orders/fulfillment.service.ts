@@ -3,6 +3,7 @@ import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
+import { costForVariant } from "../finance.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
@@ -142,12 +143,14 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
 
         try {
           if (type === "LICENSE_KEY") {
-            const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
+            const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
             const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
+                warrantyStartAt: new Date(),
+                costMinor: await costForVariant(item.variantId, cost),
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
@@ -166,6 +169,8 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
+                warrantyStartAt: new Date(),
+                costMinor: await costForVariant(item.variantId, creds.costMinor),
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });

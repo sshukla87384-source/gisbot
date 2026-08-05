@@ -34,6 +34,23 @@ import {
   issueReplacementFromTicket,
   openTicketCount,
   getTicketProof,
+  profitReport,
+  thinMarginProducts,
+  setVariantCost,
+  getMarginFloorBp,
+  setMarginFloorBp,
+  reconcile,
+  qualityReport,
+  getQualityConfig,
+  saveQualityConfig,
+  getRecoveryConfig,
+  saveRecoveryConfig,
+  adminTotpRequired,
+  adminTotpState,
+  beginAdminTotp,
+  confirmAdminTotp,
+  checkAdminTotp,
+  disableAdminTotp,
   findTicketByOrderItem,
   listPendingManualItems,
   manualFulfillItem,
@@ -185,6 +202,7 @@ import {
 } from "@gis/core";
 import { cb } from "@gis/shared";
 import { InlineKeyboard, InputFile } from "grammy";
+import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
@@ -250,6 +268,24 @@ export async function handleAdminPasscode(ctx: Ctx): Promise<void> {
   await ctx.deleteMessage().catch(() => undefined);
 
   if (idAllowed(tgId) && (await verifyAdminPasscode(text, cfg.BOT_ADMIN_PASSCODE))) {
+    // Second factor, if the operator turned it on. The session is NOT created
+    // until the code checks out, so a leaked passcode alone opens nothing.
+    if (await adminTotpRequired()) {
+      ctx.session.awaiting = "admin_totp_code";
+      await redis.del(attemptsKey);
+      await ctx.reply("🔐 Passcode accepted. Now send the <b>6-digit code</b> from your authenticator app:", { parse_mode: "HTML" });
+      return;
+    }
+    await grantAdminSession(ctx, tgId);
+    return;
+  }
+  await ctx.reply("❌ Wrong passcode.");
+}
+
+/** Create the admin session and announce it. Shared by the 1FA and 2FA paths. */
+async function grantAdminSession(ctx: Ctx, tgId: number): Promise<void> {
+  const redis = getRedis();
+  {
     // Notify any admins already logged in that a new sign-in happened.
     const existing = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);
     const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name ?? String(tgId));
@@ -260,11 +296,9 @@ export async function handleAdminPasscode(ctx: Ctx): Promise<void> {
     }
     await redis.set(sessionKey(tgId), "1"); // persistent — stays until logout
     await redis.sadd(BOT_ADMIN_MEMBERS_KEY, String(tgId));
-    await redis.del(attemptsKey);
+    await redis.del(`botadmin:try:${tgId}`);
     await ctx.reply("✅ Admin access granted. You’ll stay logged in until you tap 🚪 Logout.\nYou’ll also get order alerts here.");
     await sendPanel(ctx, false);
-  } else {
-    await ctx.reply("❌ Wrong passcode.");
   }
 }
 
@@ -278,7 +312,7 @@ function panelKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .add(sbtn("🛍 Products", cb("adm", "m_prod"), "primary"), sbtn("👥 Users", cb("adm", "m_users"), "primary")).row()
     .add(sbtn("🧾 Orders", cb("adm", "m_orders"), "primary"), sbtn("📊 Stats", cb("adm", "m_stats"), "primary")).row()
-    .add(sbtn("💳 Payments & APIs", cb("adm", "m_pay"), "primary")).row()
+    .add(sbtn("💰 Money", cb("adm", "m_money"), "success"), sbtn("💳 Payments & APIs", cb("adm", "m_pay"), "primary")).row()
     .add(sbtn("📣 Marketing", cb("adm", "m_mkt"), "primary"), sbtn("🎨 Content & Style", cb("adm", "m_content"), "primary")).row()
     .add(sbtn("🧰 Tools", cb("adm", "m_tools"), "primary"), sbtn("🔐 Security", cb("adm", "m_sec"), "primary")).row()
     .add(sbtn("↻ Refresh", cb("adm", "home"), "success")).row();
@@ -330,6 +364,12 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
       [["💬 Testimonials", cb("adm", "tst"), "primary"]],
     ] },
+    m_money: { title: "💰 <b>Money</b>", subtitle: "Profit, costs and where the cash is", rows: [
+      [["💰 Profit & Margin", cb("adm", "fin"), "success"], ["📒 Reconciliation", cb("adm", "recon"), "primary"]],
+      [["⚠️ Thin margins", cb("adm", "thin"), "danger"], ["🎯 Margin floor", cb("adm", "marginfl"), "primary"]],
+      [["📉 Delivery quality", cb("adm", "qual"), "primary"]],
+      [["🛒 Checkout recovery", cb("adm", "recov"), "primary"]],
+    ] },
     m_tools: { title: "🧰 <b>Tools</b>", subtitle: "Pricing, tracing and health checks", rows: [
       [["🔄 Re-derive INR prices", cb("adm", "tlprice"), "success"], ["📈 Bulk ±%", cb("adm", "tladj"), "primary"]],
       [["🔍 Find order by key", cb("adm", "tlkey"), "primary"]],
@@ -338,6 +378,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
+      [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
       [["🚪 Logout", cb("adm", "logout"), "danger"], ["🚪 Logout All", cb("adm", "logoutall"), "danger"]],
     ] },
@@ -475,6 +516,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.warranty) kb.text(`⏱ Warranty days${p.warrantyDays ? `: ${p.warrantyDays}` : ": unlimited"}`, cb("adm", "pwardays", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
+  kb.text("💰 My cost (for margin)", cb("adm", "pcost", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.add(sbtn(`♾ Same link for everyone: ${p.reusable ? "✅ ON" : "🚫 OFF"}`, cb("adm", "preuse", p.id), p.reusable ? "success" : "primary")).row();
   if (p.reusable) kb.text(`🔢 Quantity: ${p.reusableStock ?? "∞ unlimited"}`, cb("adm", "preuseqty", p.id)).row();
@@ -896,6 +938,179 @@ async function walletHistoryView(ctx: Ctx, userId: string): Promise<void> {
     .add(sbtn("➕ Add", cb("adm", "uadd", userId), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", userId), "danger")).row()
     .text("◀️ Back", cb("adm", "uinfo", userId));
   await show(ctx, lines.join("\n"), kb, true);
+}
+
+const usd = (m: number): string => `$${(m / 100).toFixed(2)}`;
+const pct = (bp: number | null): string => (bp === null ? "—" : `${(bp / 100).toFixed(1)}%`);
+
+async function twoFaView(ctx: Ctx): Promise<void> {
+  const st = await adminTotpState();
+  const kb = new InlineKeyboard();
+  if (st.enabled) kb.add(sbtn("🔓 Turn 2FA off", cb("adm", "twofaoff"), "danger")).row();
+  else kb.add(sbtn(st.pending ? "🔄 Start again" : "🔒 Turn 2FA on", cb("adm", "twofaon"), "success")).row();
+  kb.text("◀️ Back", cb("adm", "m_sec"));
+  await show(
+    ctx,
+    [
+      "🔒 <b>Two-factor login</b>",
+      "",
+      st.enabled
+        ? "✅ <b>ON</b> — signing in needs your passcode <i>and</i> a 6-digit code from your authenticator app."
+        : st.pending
+          ? "⏳ <b>Started but not finished.</b> Tap below to scan a fresh QR and send a code."
+          : "⚪ <b>OFF</b> — your passcode is the only thing protecting the panel.",
+      "",
+      "Right now the passcode lives in one Telegram chat. If that chat or the passcode ever leaks, someone else can change prices, read wallets and take your stock. A code from your phone removes that single point of failure and costs you two seconds per login.",
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
+
+async function profitView(ctx: Ctx, days: number): Promise<void> {
+  const r = await profitReport(days);
+  const kb = new InlineKeyboard();
+  kb.text("7d", cb("adm", "fin", "7")).text("30d", cb("adm", "fin", "30")).text("90d", cb("adm", "fin", "90")).row();
+  kb.add(sbtn("⚠️ Thin margins", cb("adm", "thin"), "danger")).row();
+  kb.text("◀️ Back", cb("adm", "m_money"));
+  const top = r.rows.slice(0, 8).map((p) =>
+    `${p.profitMinor >= 0 ? "🟢" : "🔴"} ${escapeHtml(p.name.slice(0, 22))} · ${p.units}× · ${usd(p.profitMinor)} (${pct(p.marginBp)})`,
+  );
+  await show(
+    ctx,
+    [
+      `💰 <b>Profit & Margin</b> <i>(last ${r.days}d)</i>`,
+      "",
+      `💵 Revenue: <b>${usd(r.revenueMinor)}</b>`,
+      `📦 Cost of goods: <b>${usd(r.costMinor)}</b>`,
+      `📈 Profit: <b>${usd(r.profitMinor)}</b>  ·  Margin: <b>${pct(r.marginBp)}</b>`,
+      `🧾 Units delivered: <b>${r.units}</b>`,
+      ...(r.unpricedUnits > 0
+        ? ["", `⚠️ <b>${r.unpricedUnits} unit(s) have no cost set</b>, so they are left out of the numbers above. Set a cost on those products to see the real margin — open the product and tap 💰 Cost.`]
+        : []),
+      ...(r.lossMakers.length > 0
+        ? ["", "🔴 <b>Sold below cost:</b>", ...r.lossMakers.slice(0, 5).map((l) => `• ${escapeHtml(l.name.slice(0, 26))} — took ${usd(l.revenueMinor)}, cost ${usd(l.costMinor)}`)]
+        : []),
+      ...(top.length > 0 ? ["", "<b>By product</b>", ...top] : ["", "<i>No delivered sales in this window.</i>"]),
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
+
+async function reconView(ctx: Ctx): Promise<void> {
+  const r = await reconcile(24);
+  const kb = new InlineKeyboard().text("↻ Refresh", cb("adm", "recon")).text("◀️ Back", cb("adm", "m_money"));
+  await show(
+    ctx,
+    [
+      "📒 <b>Reconciliation</b> <i>(last 24h)</i>",
+      "",
+      "🏦 <b>Money you are holding</b>",
+      `Wallet balances: <b>${usd(r.walletLiabilityMinorUsd)}</b> across ${r.walletCount} wallet(s)`,
+      "<i>This is customer money you owe them, not profit.</i>",
+      "",
+      "🔁 <b>Movement</b>",
+      `⬇️ Deposits: <b>${usd(r.depositsMinor)}</b>`,
+      `🛍 Spent on orders: <b>${usd(r.purchasesMinor)}</b>`,
+      `↩️ Refunds: <b>${usd(r.refundsMinor)}</b>`,
+      `🎁 Free credit granted: <b>${usd(r.grantsMinor)}</b> <i>(spins, referrals, adjustments)</i>`,
+      "",
+      "⏳ <b>Open items</b>",
+      `Pending top-ups: <b>${r.topupsPendingCount}</b> (${usd(r.topupsPendingMinor)})`,
+      `Expired / cancelled orders: <b>${r.expiredOrders}</b> (${usd(r.expiredValueMinor)})`,
+      ...(r.unfulfilledPaidOrders > 0
+        ? ["", `🚨 <b>${r.unfulfilledPaidOrders} PAID order(s) still undelivered</b> — ${usd(r.unfulfilledPaidValueMinor)}. Deliver these first.`]
+        : ["", "✅ Every paid order has been delivered."]),
+      ...(r.driftWallets > 0
+        ? ["", `🚨 <b>${r.driftWallets} wallet(s) disagree with their ledger</b> (${usd(r.driftMinor)}). The cached balance drifted — tell me and I'll trace it.`]
+        : ["✅ Every wallet matches its ledger."]),
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
+
+async function thinMarginView(ctx: Ctx): Promise<void> {
+  const { floorBp, rows, noCost } = await thinMarginProducts();
+  const kb = new InlineKeyboard();
+  for (const r of rows.slice(0, 10)) kb.text(`${r.underwater ? "🔴" : "🟠"} ${r.name.slice(0, 24)} · ${pct(r.marginBp)}`, cb("adm", "vcost", r.variantId)).row();
+  kb.add(sbtn("🎯 Change floor", cb("adm", "marginfl"), "primary")).row();
+  kb.text("◀️ Back", cb("adm", "m_money"));
+  await show(
+    ctx,
+    [
+      "⚠️ <b>Thin margins</b>",
+      `🎯 Your floor: <b>${pct(floorBp)}</b>`,
+      "",
+      rows.length === 0
+        ? "✅ Nothing is priced below your floor right now."
+        : [
+            `${rows.length} live product(s) earn less than your floor.`,
+            "🔴 = you LOSE money on every sale   🟠 = below floor but still profitable",
+            "",
+            "Tap one to fix its cost, or raise its price in Products.",
+          ].join("\n"),
+      ...(noCost > 0 ? ["", `ℹ️ ${noCost} active variant(s) have no cost set, so they can't be checked at all.`] : []),
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
+
+async function qualityView(ctx: Ctx): Promise<void> {
+  const { cfg, rows } = await qualityReport();
+  const bad = rows.filter((r) => r.bad);
+  const kb = new InlineKeyboard();
+  kb.add(sbtn(cfg.autoPause ? "🔴 Auto-pause: ON" : "⚪ Auto-pause: OFF", cb("adm", "qualtog"), cfg.autoPause ? "danger" : "primary")).row();
+  kb.add(sbtn(`📉 Threshold: ${pct(cfg.thresholdBp)}`, cb("adm", "qualthr"), "primary")).row();
+  for (const r of bad.slice(0, 8)) kb.text(`⚠️ ${r.name.slice(0, 24)} · ${pct(r.rateBp)} · ${r.complaints}/${r.delivered}`, cb("adm", "prod", r.productId)).row();
+  kb.text("◀️ Back", cb("adm", "m_money"));
+  await show(
+    ctx,
+    [
+      "📉 <b>Delivery quality</b>",
+      `<i>Complaints per delivery over the last ${cfg.days} days.</i>`,
+      "",
+      `A product counts as bad at <b>${pct(cfg.thresholdBp)}</b> complaints, once it has at least <b>${cfg.minDeliveries}</b> deliveries.`,
+      "",
+      bad.length === 0
+        ? "✅ Nothing above your threshold. Stock is behaving."
+        : `⚠️ <b>${bad.length} product(s) above threshold</b> — likely a dead batch. Tap one to check its stock.`,
+      "",
+      cfg.autoPause
+        ? "🔴 <b>Auto-pause is ON</b> — bad products are hidden from the shop automatically."
+        : "⚪ <b>Auto-pause is OFF</b> — you'll be warned but nothing is hidden. Safer, but a bad batch keeps selling until you act.",
+      ...(rows.length > 0
+        ? ["", "<b>Worst first</b>", ...rows.slice(0, 6).map((r) => `${r.bad ? "⚠️" : "•"} ${escapeHtml(r.name.slice(0, 24))} — ${r.complaints}/${r.delivered} (${pct(r.rateBp)})`)]
+        : ["", "<i>No deliveries in this window.</i>"]),
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
+
+async function recoveryView(ctx: Ctx): Promise<void> {
+  const cfg = await getRecoveryConfig();
+  const kb = new InlineKeyboard()
+    .add(sbtn(cfg.enabled ? "🟢 Reminders: ON" : "⚪ Reminders: OFF", cb("adm", "recovtog"), cfg.enabled ? "success" : "primary")).row()
+    .add(sbtn(`⏱ Wait: ${cfg.afterMinutes} min`, cb("adm", "recovmin"), "primary")).row()
+    .text("◀️ Back", cb("adm", "m_money"));
+  await show(
+    ctx,
+    [
+      "🛒 <b>Checkout recovery</b>",
+      "",
+      "When someone starts a payment and doesn't finish, we send <b>one</b> reminder with the exact amount and a button back to the order.",
+      "",
+      `⏱ Sent <b>${cfg.afterMinutes} minutes</b> after the order was created.`,
+      `🛡 Skipped if the order has under <b>${cfg.minMinutesLeft} minutes</b> left — reminding someone too late is worse than not at all.`,
+      "",
+      "Only ever one reminder per order. Nagging loses the customer, not just the sale.",
+    ].join("\n"),
+    kb,
+    true,
+  );
 }
 
 async function ticketsListView(ctx: Ctx): Promise<void> {
@@ -1527,6 +1742,80 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_warrantydays";
       await askStep(ctx, "⏱ Send the <b>replacement window in days</b> (e.g. <code>7</code>), or <code>0</code> for no time limit:");
+      return;
+    case "pcost": {
+      // Cost lives on the variant; most products have one, so skip the picker.
+      const vs = await listVariantsBrief(id);
+      if (vs.length === 1) {
+        ctx.session.admVariantId = vs[0]!.id;
+        ctx.session.awaiting = "admin_variant_cost";
+        await askStep(ctx, "💰 Send what <b>you pay</b> per unit in <b>USD</b> (e.g. <code>1.80</code>), or <code>-</code> to clear it:");
+        return;
+      }
+      const kb = new InlineKeyboard();
+      for (const v of vs) kb.text(`${v.name}${v.defaultCostMinor !== null ? ` · $${(v.defaultCostMinor / 100).toFixed(2)}` : " · no cost set"}`, cb("adm", "vcost", v.id)).row();
+      kb.text("◀️ Back", cb("adm", "prod", id));
+      await show(ctx, vs.length ? "💰 Pick a variant to set your cost on:" : "No variants on this product.", kb, true);
+      return;
+    }
+    case "twofa": return twoFaView(ctx);
+    case "twofaon": {
+      const { secret, uri } = await beginAdminTotp();
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      const png = await QRCode.toBuffer(uri, { width: 340, margin: 1 });
+      ctx.session.awaiting = "admin_totp_confirm";
+      await ctx.replyWithPhoto(new InputFile(png, "2fa.png"), {
+        caption: [
+          "🔒 <b>Set up two-factor login</b>",
+          "",
+          "1. Open Google Authenticator (or any TOTP app)",
+          "2. Scan this QR — or add the key by hand:",
+          `<code>${secret}</code>`,
+          "3. Send me the 6-digit code it shows",
+          "",
+          "⚠️ <b>It is not switched on until you send a working code</b>, so you cannot lock yourself out by accident. Save that key somewhere safe — if you lose your phone it is the only way back in.",
+        ].join("\n"),
+        parse_mode: "HTML",
+      });
+      return;
+    }
+    case "twofaoff":
+      ctx.session.awaiting = "admin_totp_disable";
+      await askStep(ctx, "🔓 Send your current <b>6-digit code</b> to switch 2FA off:");
+      return;
+    case "fin": return profitView(ctx, Math.max(1, Number.parseInt(id || "30", 10) || 30));
+    case "recon": return reconView(ctx);
+    case "thin": return thinMarginView(ctx);
+    case "marginfl":
+      ctx.session.awaiting = "admin_margin_floor";
+      await askStep(ctx, `🎯 Send your <b>minimum margin</b> as a percentage (e.g. <code>15</code>). Anything below it gets flagged. Current: <b>${((await getMarginFloorBp()) / 100).toFixed(1)}%</b>`);
+      return;
+    case "qual": return qualityView(ctx);
+    case "qualtog": {
+      const cfg = await getQualityConfig();
+      const next = await saveQualityConfig({ autoPause: !cfg.autoPause });
+      await ctx.answerCallbackQuery({ text: next.autoPause ? "Auto-pause ON" : "Auto-pause OFF" }).catch(() => undefined);
+      return qualityView(ctx);
+    }
+    case "qualthr":
+      ctx.session.awaiting = "admin_qual_threshold";
+      await askStep(ctx, "📉 Send the <b>complaint rate</b> that counts as bad, as a percentage (e.g. <code>25</code>):");
+      return;
+    case "recov": return recoveryView(ctx);
+    case "recovtog": {
+      const cfg = await getRecoveryConfig();
+      const next = await saveRecoveryConfig({ enabled: !cfg.enabled });
+      await ctx.answerCallbackQuery({ text: next.enabled ? "Reminders ON" : "Reminders OFF" }).catch(() => undefined);
+      return recoveryView(ctx);
+    }
+    case "recovmin":
+      ctx.session.awaiting = "admin_recov_minutes";
+      await askStep(ctx, "⏱ Send how many <b>minutes</b> to wait before reminding someone (e.g. <code>20</code>):");
+      return;
+    case "vcost":
+      ctx.session.admVariantId = id;
+      ctx.session.awaiting = "admin_variant_cost";
+      await askStep(ctx, "💰 Send what <b>you pay</b> per unit in <b>USD</b> (e.g. <code>1.80</code>), or <code>-</code> to clear it:");
       return;
     case "tks": return ticketsListView(ctx);
     case "tk": return ticketDetailView(ctx, id);
@@ -2450,6 +2739,24 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   const text = (ctx.message?.text ?? "").trim();
 
   if (awaiting === "admin_passcode") { await handleAdminPasscode(ctx); return true; }
+  if (awaiting === "admin_totp_code") {
+    // No session exists yet, so this must run before the isBotAdmin guard below.
+    const tgId = ctx.from?.id;
+    await ctx.deleteMessage().catch(() => undefined);
+    if (tgId === undefined) return true;
+    const redis = getRedis();
+    const tries = await redis.incr(`botadmin:2fa:${tgId}`);
+    if (tries === 1) await redis.expire(`botadmin:2fa:${tgId}`, ATTEMPT_WINDOW_SEC);
+    if (tries > MAX_ATTEMPTS) { await ctx.reply("⛔ Too many attempts. Send /admin to start again."); return true; }
+    if (!(await checkAdminTotp(text))) {
+      ctx.session.awaiting = "admin_totp_code";
+      await ctx.reply("❌ That code didn't match. Send the current 6-digit code, or /admin to start again.");
+      return true;
+    }
+    await redis.del(`botadmin:2fa:${tgId}`);
+    await grantAdminSession(ctx, tgId);
+    return true;
+  }
   if (!(await isBotAdmin(ctx.from?.id))) { await ctx.reply("Session expired — send /admin"); return true; }
 
   if (awaiting === "admin_txnid") {
@@ -3235,6 +3542,63 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setProductWarrantyDays(pid, Number.isFinite(d) && d > 0 ? d : null);
     await ctx.reply(Number.isFinite(d) && d > 0 ? `⏱ Replacement window set to <b>${d} day(s)</b>.` : "⏱ Warranty has <b>no time limit</b> now.", { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_totp_confirm") {
+    await ctx.deleteMessage().catch(() => undefined);
+    if (!(await confirmAdminTotp(text))) {
+      ctx.session.awaiting = "admin_totp_confirm";
+      await ctx.reply("❌ That code didn't match — 2FA is still OFF. Send the current code from the app, or tap 🔄 Start again.");
+      return true;
+    }
+    await ctx.reply("🔒 <b>Two-factor login is ON.</b>\n\nFrom now on, signing in needs your passcode and a code from your app. Keep that setup key somewhere safe.", { parse_mode: "HTML" });
+    await twoFaView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_totp_disable") {
+    await ctx.deleteMessage().catch(() => undefined);
+    if (!(await disableAdminTotp(text))) {
+      await ctx.reply("❌ Wrong code — 2FA is still ON.");
+      return true;
+    }
+    await ctx.reply("🔓 Two-factor login is OFF. Your passcode is now the only protection on the panel.");
+    await twoFaView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_margin_floor") {
+    const v = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
+    const bp = await setMarginFloorBp(Number.isFinite(v) ? v * 100 : 1_000);
+    await ctx.reply(`🎯 Margin floor set to <b>${(bp / 100).toFixed(1)}%</b>.`, { parse_mode: "HTML" });
+    await thinMarginView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_qual_threshold") {
+    const v = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
+    const cfg = await saveQualityConfig({ thresholdBp: Number.isFinite(v) ? Math.round(v * 100) : 2_500 });
+    await ctx.reply(`📉 Threshold set to <b>${(cfg.thresholdBp / 100).toFixed(1)}%</b>.`, { parse_mode: "HTML" });
+    await qualityView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_recov_minutes") {
+    const v = Number.parseInt(text.replace(/[^0-9]/g, ""), 10);
+    const cfg = await saveRecoveryConfig({ afterMinutes: Number.isFinite(v) && v > 0 ? v : 20 });
+    await ctx.reply(`⏱ Reminders will be sent <b>${cfg.afterMinutes} minutes</b> after checkout starts.`, { parse_mode: "HTML" });
+    await recoveryView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_variant_cost") {
+    const vid = ctx.session.admVariantId ?? "";
+    ctx.session.admVariantId = undefined;
+    if (text.trim() === "-") {
+      await setVariantCost(vid, null);
+      await ctx.reply("💰 Cost cleared.");
+    } else {
+      const v = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(v) || v < 0) { await ctx.reply("Send a number like 1.80, or - to clear."); return true; }
+      await setVariantCost(vid, Math.round(v * 100));
+      await ctx.reply(`💰 Cost set to <b>$${v.toFixed(2)}</b> per unit. Margin is now tracked for this product.`, { parse_mode: "HTML" });
+    }
+    await thinMarginView(ctx);
     return true;
   }
   if (awaiting === "admin_ticket_reply") {

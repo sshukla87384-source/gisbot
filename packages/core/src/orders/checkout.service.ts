@@ -6,6 +6,7 @@ import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 import { assignAccountSlot, assignLicenseKey, priceCart, type PricedLine } from "./assign.js";
+import { costForVariant } from "../finance.service.js";
 
 /**
  * Wallet-funded checkout with automatic fulfillment (PRD §6.1, Security doc §5).
@@ -92,7 +93,12 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
             const payload = { kind: "LICENSE_KEY", key: line.reusableSecret };
             await tx.orderItem.update({
               where: { id: item.id },
-              data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+              data: {
+                fulfilledAt: new Date(),
+                warrantyStartAt: new Date(),
+                costMinor: await costForVariant(line.variantId, null),
+                deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+              },
             });
             deliveries.push({
               orderItemId: item.id,
@@ -105,13 +111,29 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
             if (line.productType === "DIGITAL_ACCOUNT") {
               const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);
               const payload = { kind: "DIGITAL_ACCOUNT", ...creds, expiresAt: creds.expiresAt?.toISOString() };
-              await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
+              await tx.orderItem.update({
+                where: { id: item.id },
+                data: {
+                  fulfilledAt: new Date(),
+                  warrantyStartAt: new Date(),
+                  costMinor: await costForVariant(line.variantId, creds.costMinor),
+                  deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+                },
+              });
               deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "DIGITAL_ACCOUNT", secret: { username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
               delivered = true;
             } else {
-              const { key, expiresAt } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
+              const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
               const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
-              await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
+              await tx.orderItem.update({
+                where: { id: item.id },
+                data: {
+                  fulfilledAt: new Date(),
+                  warrantyStartAt: new Date(),
+                  costMinor: await costForVariant(line.variantId, cost),
+                  deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+                },
+              });
               deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "LICENSE_KEY", secret: { key, expiresAt: expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
               delivered = true;
             }

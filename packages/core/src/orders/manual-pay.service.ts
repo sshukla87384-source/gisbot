@@ -6,6 +6,7 @@ import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
 import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
+import { costForVariant } from "../finance.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
@@ -325,14 +326,30 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         }
         try {
           if (type === "LICENSE_KEY") {
-            const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
+            const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
             const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
-            await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
+            await tx.orderItem.update({
+              where: { id: item.id },
+              data: {
+                fulfilledAt: new Date(),
+                warrantyStartAt: new Date(),
+                costMinor: await costForVariant(item.variantId, cost),
+                deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+              },
+            });
             if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
             const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
-            await tx.orderItem.update({ where: { id: item.id }, data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) } });
+            await tx.orderItem.update({
+              where: { id: item.id },
+              data: {
+                fulfilledAt: new Date(),
+                warrantyStartAt: new Date(),
+                costMinor: await costForVariant(item.variantId, creds.costMinor),
+                deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+              },
+            });
             if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           }
         } catch {
@@ -455,7 +472,12 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   const payload = { kind: "LICENSE_KEY", key: clean };
   await prisma.orderItem.update({
     where: { id: item.id },
-    data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+    data: {
+      fulfilledAt: new Date(),
+      warrantyStartAt: item.warrantyStartAt ?? new Date(),
+      costMinor: await costForVariant(item.variantId, null),
+      deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+    },
   });
 
   // Recompute remaining manual items on the order.
@@ -496,12 +518,14 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
   if (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT") return { ok: false, reason: "NOT_AUTOMATIC" };
 
   try {
+    let replacementCostMinor: number | null = null;
     const payload = await prisma.$transaction(async (tx) => {
       if (type === "LICENSE_KEY") {
         // Detach + permanently retire the faulty key, then assign a DIFFERENT one.
         const bad = await tx.licenseKey.findMany({ where: { orderItemId: item.id }, select: { id: true } });
         await tx.licenseKey.updateMany({ where: { orderItemId: item.id }, data: { orderItemId: null, status: "DISABLED" } });
-        const { key, expiresAt } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, false, bad.map((b) => b.id));
+        const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, false, bad.map((b) => b.id));
+        replacementCostMinor = cost;
         return { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
       }
       // DIGITAL_ACCOUNT: free the old slot(s), then assign a fresh account.
@@ -515,17 +539,23 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
         await tx.digitalAccount.updateMany({ where: { id: a.accountId }, data: { usedSlots: { decrement: 1 }, status: "DISABLED" } });
       }
       const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, false, badAccountIds);
+      replacementCostMinor = creds.costMinor;
       return { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
     });
 
     // Keep the ORIGINAL delivery date as the warranty start — a replacement must
     // not hand out a fresh window. 5-day warranty replaced on day 4 leaves 1 day.
     const warrantyStart = item.warrantyStartAt ?? item.fulfilledAt ?? new Date();
+    // A replacement burns a SECOND unit of stock. Adding its cost to the sale is
+    // what makes the profit report honest — and makes a faulty batch visible as
+    // a margin problem, not just a support problem.
+    const extraCost = await costForVariant(item.variantId, replacementCostMinor);
     await prisma.orderItem.update({
       where: { id: item.id },
       data: {
         fulfilledAt: new Date(),
         warrantyStartAt: warrantyStart,
+        ...(extraCost !== null ? { costMinor: (item.costMinor ?? 0) + extraCost } : {}),
         deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
       },
     });

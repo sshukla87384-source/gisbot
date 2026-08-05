@@ -1,4 +1,7 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
+import { loadConfig } from "@gis/config";
+import { prisma } from "@gis/database";
+import { decryptSecret, encryptSecret } from "@gis/shared";
 
 /**
  * TOTP (RFC 6238) generated locally — HMAC-SHA1, 30s window, 6 digits.
@@ -64,4 +67,110 @@ export function generateTotp(secret: string, digits = 6, atMs = Date.now()): Tot
 export function looksLikeTotpSecret(s: string): boolean {
   const b = base32Decode(s);
   return b !== null && b.length >= 10;
+}
+
+// ─────────────────────── Admin panel second factor ───────────────────────
+//
+// The passcode alone is one secret in one Telegram chat. If that chat or the
+// passcode ever leaks, the whole store is open: prices, stock, wallets, keys.
+// A TOTP code costs the operator two seconds and removes that single point of
+// failure entirely.
+
+const ADMIN_TOTP_SETTING = "admin.totp";
+
+export interface AdminTotpState {
+  enabled: boolean;
+  /** Enrolled but not yet confirmed with a working code. */
+  pending: boolean;
+}
+
+/** Random base32 secret, 32 chars (160 bits) — what authenticator apps expect. */
+export function newTotpSecret(): string {
+  const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bytes = randomBytes(32);
+  let out = "";
+  for (const b of bytes) out += alpha[b % 32];
+  return out;
+}
+
+/** Accepts the previous, current and next window, so a slow clock still works. */
+export function verifyTotp(secret: string, code: string, atMs = Date.now()): boolean {
+  const clean = code.replace(/\D/g, "");
+  if (clean.length < 6) return false;
+  for (const drift of [-1, 0, 1]) {
+    const t = generateTotp(secret, 6, atMs + drift * STEP * 1000);
+    if (t && timingSafeEqualStr(t.code, clean)) return true;
+  }
+  return false;
+}
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Enrol a second factor. Deliberately stored as `pending` until the operator
+ * proves one code works — enabling it unverified is how people lock themselves
+ * out of their own store.
+ */
+export async function beginAdminTotp(): Promise<{ secret: string; uri: string }> {
+  const secret = newTotpSecret();
+  const store = loadConfig().STORE_NAME || "Store";
+  await prisma.setting.upsert({
+    where: { key: ADMIN_TOTP_SETTING },
+    create: { key: ADMIN_TOTP_SETTING, value: { secretEnc: encryptSecret(secret, loadConfig().ENCRYPTION_MASTER_KEY), enabled: false } as never },
+    update: { value: { secretEnc: encryptSecret(secret, loadConfig().ENCRYPTION_MASTER_KEY), enabled: false } as never },
+  });
+  const label = encodeURIComponent(`${store} Admin`);
+  return { secret, uri: `otpauth://totp/${label}?secret=${secret}&issuer=${encodeURIComponent(store)}&digits=6&period=30` };
+}
+
+async function readAdminTotp(): Promise<{ secret: string | null; enabled: boolean }> {
+  const row = await prisma.setting.findUnique({ where: { key: ADMIN_TOTP_SETTING } }).catch(() => null);
+  const v = (row?.value ?? null) as { secretEnc?: string; enabled?: boolean } | null;
+  if (!v?.secretEnc) return { secret: null, enabled: false };
+  try {
+    return { secret: decryptSecret(v.secretEnc, loadConfig().ENCRYPTION_MASTER_KEY), enabled: v.enabled === true };
+  } catch {
+    return { secret: null, enabled: false };
+  }
+}
+
+export async function adminTotpState(): Promise<AdminTotpState> {
+  const { secret, enabled } = await readAdminTotp();
+  return { enabled, pending: secret !== null && !enabled };
+}
+
+/** Turn it on, but only if the code proves the authenticator app is set up. */
+export async function confirmAdminTotp(code: string): Promise<boolean> {
+  const { secret } = await readAdminTotp();
+  if (!secret || !verifyTotp(secret, code)) return false;
+  await prisma.setting.update({
+    where: { key: ADMIN_TOTP_SETTING },
+    data: { value: { secretEnc: encryptSecret(secret, loadConfig().ENCRYPTION_MASTER_KEY), enabled: true } as never },
+  });
+  return true;
+}
+
+/** Login check. Returns true when 2FA is off — callers need no special case. */
+export async function adminTotpRequired(): Promise<boolean> {
+  return (await readAdminTotp()).enabled;
+}
+
+export async function checkAdminTotp(code: string): Promise<boolean> {
+  const { secret, enabled } = await readAdminTotp();
+  if (!enabled || !secret) return true;
+  return verifyTotp(secret, code);
+}
+
+/** Switching it off requires a valid code — otherwise it protects nothing. */
+export async function disableAdminTotp(code: string): Promise<boolean> {
+  const { secret, enabled } = await readAdminTotp();
+  if (!enabled || !secret) return true;
+  if (!verifyTotp(secret, code)) return false;
+  await prisma.setting.delete({ where: { key: ADMIN_TOTP_SETTING } }).catch(() => undefined);
+  return true;
 }

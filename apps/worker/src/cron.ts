@@ -3,6 +3,10 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   logWallet,
   retryPendingSupplierFulfilment,
   runAutoPromo,
+  runRecoverySweep,
+  runQualitySweep,
+  reconcile,
+  profitReport,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -183,6 +187,57 @@ async function reconcileWallets(): Promise<void> {
   }
 }
 
+/** Remind anyone who left a payment half-finished — once each (every 5 min). */
+async function recoverAbandonedCheckouts(): Promise<void> {
+  const { sent } = await runRecoverySweep(30);
+  if (sent > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.recovery", entityType: "Order", after: { reminded: sent } },
+    }).catch(() => undefined);
+  }
+}
+
+/** Catch a faulty batch early: complaint rate per product (every 6 h). */
+async function qualitySweep(): Promise<void> {
+  const { flagged, paused } = await runQualitySweep();
+  if (flagged > 0) {
+    await enqueueAdminAlert(
+      [
+        `⚠️ <b>Delivery quality warning</b>`,
+        "",
+        `${flagged} product(s) are above your complaint threshold${paused > 0 ? ` — ${paused} auto-paused` : ""}.`,
+        "",
+        paused > 0
+          ? "They are hidden from the shop until you check them."
+          : "Nothing was paused — auto-pause is off, so this is just a heads-up.",
+      ].join("\n"),
+      [{ text: "📉 Delivery quality", callbackData: "adm:qual", style: "primary" }],
+    ).catch(() => undefined);
+  }
+}
+
+/** Money summary once a day, so problems surface without being looked for. */
+async function dailyMoneySummary(): Promise<void> {
+  const [r, p] = await Promise.all([reconcile(24), profitReport(1)]);
+  const usd = (m: number): string => `$${(m / 100).toFixed(2)}`;
+  await enqueueAdminAlert(
+    [
+      "📒 <b>Daily money summary</b> <i>(last 24h)</i>",
+      "",
+      `💵 Revenue: <b>${usd(p.revenueMinor)}</b>   ·   Cost: <b>${usd(p.costMinor)}</b>`,
+      `📈 Profit: <b>${usd(p.profitMinor)}</b>${p.marginBp !== null ? `  (${(p.marginBp / 100).toFixed(1)}% margin)` : ""}`,
+      ...(p.unpricedUnits > 0 ? [`⚠️ ${p.unpricedUnits} unit(s) had no cost set — profit above excludes them.`] : []),
+      "",
+      `🏦 Wallet money you hold: <b>${usd(r.walletLiabilityMinorUsd)}</b> across ${r.walletCount} wallet(s)`,
+      `⬇️ Deposits: ${usd(r.depositsMinor)}   ·   🛍 Spent: ${usd(r.purchasesMinor)}   ·   ↩️ Refunds: ${usd(r.refundsMinor)}`,
+      ...(r.unfulfilledPaidOrders > 0 ? [`🚨 <b>${r.unfulfilledPaidOrders} paid order(s) not yet delivered</b> (${usd(r.unfulfilledPaidValueMinor)})`] : []),
+      ...(r.driftWallets > 0 ? [`🚨 <b>${r.driftWallets} wallet(s) disagree with their ledger</b> (${usd(r.driftMinor)}) — check this.`] : []),
+      ...(p.lossMakers.length > 0 ? ["", `📉 <b>Sold below cost:</b> ${p.lossMakers.slice(0, 3).map((l) => l.name).join(", ")}`] : []),
+    ].join("\n"),
+    [{ text: "💰 Profit & margin", callbackData: "adm:fin", style: "primary" }, { text: "📒 Reconciliation", callbackData: "adm:recon", style: "primary" }],
+  ).catch(() => undefined);
+}
+
 /** Fire scheduled / recurring broadcasts whose time has come (every 60 s). */
 async function runScheduledBroadcasts(): Promise<void> {
   await dispatchDueBroadcasts();
@@ -202,5 +257,8 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(3600, "lowstock", 3590, lowStockAlerts),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     every(86_400, "reconcile", 86_390, reconcileWallets),
+    every(300, "recovery", 290, recoverAbandonedCheckouts),
+    every(21_600, "quality", 21_590, qualitySweep),
+    every(86_400, "moneysummary", 86_390, dailyMoneySummary),
   ];
 }

@@ -106,12 +106,12 @@ export async function assignLicenseKey(
   masterKey: string,
   preferReserved = false,
   excludeIds: string[] = [],
-): Promise<{ key: string; expiresAt: Date | null }> {
+): Promise<{ key: string; expiresAt: Date | null; costMinor: number | null }> {
   const exclude = excludeIds.length > 0 ? excludeIds : ["-"];
   const statuses = preferReserved ? ["RESERVED", "AVAILABLE"] : ["AVAILABLE"];
   for (const status of statuses) {
-    const rows = await tx.$queryRaw<Array<{ id: string; keyEncrypted: string; expiresAt: Date | null }>>`
-      SELECT "id", "keyEncrypted", "expiresAt" FROM "LicenseKey"
+    const rows = await tx.$queryRaw<Array<{ id: string; keyEncrypted: string; expiresAt: Date | null; purchaseCostMinor: number | null }>>`
+      SELECT "id", "keyEncrypted", "expiresAt", "purchaseCostMinor" FROM "LicenseKey"
       WHERE "variantId" = ${variantId} AND "status" = ${status}::"InventoryStatus" AND "deletedAt" IS NULL
         AND NOT ("id" = ANY(${exclude}::text[]))
       ORDER BY "createdAt" ASC
@@ -123,7 +123,11 @@ export async function assignLicenseKey(
       where: { id: row.id },
       data: { status: "SOLD", soldAt: new Date(), orderItemId, reservedUntil: null },
     });
-    return { key: decryptSecret(row.keyEncrypted, masterKey), expiresAt: row.expiresAt };
+    return {
+      key: decryptSecret(row.keyEncrypted, masterKey),
+      expiresAt: row.expiresAt,
+      costMinor: row.purchaseCostMinor ?? null,
+    };
   }
   throw new CoreError("OUT_OF_STOCK");
 }
@@ -136,7 +140,7 @@ export async function assignAccountSlot(
   masterKey: string,
   preferReserved = false,
   excludeIds: string[] = [],
-): Promise<{ username: string; password: string; twofa?: string; expiresAt: Date | null }> {
+): Promise<{ username: string; password: string; twofa?: string; expiresAt: Date | null; costMinor: number | null }> {
   const exclude = excludeIds.length > 0 ? excludeIds : ["-"];
   const statuses = preferReserved ? ["RESERVED", "AVAILABLE"] : ["AVAILABLE"];
   for (const status of statuses) {
@@ -149,9 +153,10 @@ export async function assignAccountSlot(
         expiresAt: Date | null;
         maxSlots: number;
         usedSlots: number;
+        purchaseCostMinor: number | null;
       }>
     >`
-      SELECT "id", "usernameEncrypted", "passwordEncrypted", "twofaEncrypted", "expiresAt", "maxSlots", "usedSlots"
+      SELECT "id", "usernameEncrypted", "passwordEncrypted", "twofaEncrypted", "expiresAt", "maxSlots", "usedSlots", "purchaseCostMinor"
       FROM "DigitalAccount"
       WHERE "variantId" = ${variantId} AND "status" = ${status}::"InventoryStatus" AND "deletedAt" IS NULL
         AND "usedSlots" < "maxSlots"
@@ -178,6 +183,7 @@ export async function assignAccountSlot(
       password: decryptSecret(row.passwordEncrypted, masterKey),
       ...(row.twofaEncrypted ? { twofa: decryptSecret(row.twofaEncrypted, masterKey) } : {}),
       expiresAt: row.expiresAt,
+      costMinor: row.purchaseCostMinor ?? null,
     };
   }
   throw new CoreError("OUT_OF_STOCK");

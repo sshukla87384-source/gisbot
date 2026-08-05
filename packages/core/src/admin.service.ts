@@ -295,12 +295,12 @@ export async function clearFlashSale(productId: string): Promise<void> {
   });
 }
 
-export interface VariantBrief { id: string; name: string; sku: string }
+export interface VariantBrief { id: string; name: string; sku: string; defaultCostMinor: number | null }
 export async function listVariantsBrief(productId: string): Promise<VariantBrief[]> {
   const rows = await prisma.productVariant.findMany({
     where: { productId, deletedAt: null }, orderBy: { sortOrder: "asc" },
   });
-  return rows.map((v) => ({ id: v.id, name: v.name, sku: v.sku }));
+  return rows.map((v) => ({ id: v.id, name: v.name, sku: v.sku, defaultCostMinor: v.defaultCostMinor ?? null }));
 }
 
 /** Bulk-add license keys to a variant (one per line). Returns counts. */
