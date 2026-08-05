@@ -20,6 +20,9 @@ import {
   productRating,
   publishedTestimonials,
   isWatching,
+  listWatches,
+  todaysDeals,
+  searchMyKeys,
   tierOf,
   getTiers,
   getSpinConfig,
@@ -536,6 +539,7 @@ export async function profileView(user: BotUser): Promise<View> {
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
     .add(sbtn("🔍 Search products", cb("shp", "find"), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
     .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
+    .add(sbtn("🔔 My Watchlist", cb("wch", "list"), "primary"), sbtn("🔑 Find my keys", cb("lic", "find"), "primary")).row()
     .add(sbtn("🏆 My Tier", cb("prf", "tier"), "success"), sbtn("🎡 Spin & Win", cb("spn", "home"), "success")).row()
     .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
     .add(sbtn(`💱 ${user.currency}`, cb("cur", "home"), "primary"), sbtn("🌐 Language", cb("lang", "home"), "primary")).row();
@@ -701,6 +705,7 @@ export async function recentOrdersView(user: BotUser): Promise<View> {
   for (const o of items) {
     kb.text(`${icon(o.status)} ${o.orderNumber} · ${fmt(o.totalPaidMinor, o.currency)}`, cb("ord", "view", o.id)).row();
   }
+  if (items[0]) kb.add(sbtn(`⚡ Buy again — ${items[0].orderNumber}`, cb("ord", "again", items[0].id), "success")).row();
   if (res.pages > 1) kb.add(sbtn("🗂 All orders", cb("ord", "list", 1), "primary")).row();
   kb.add(sbtn("🔄 Request a replacement", cb("rep", "home"), "success")).row();
   navRow(kb, cb("prf", "view"));
@@ -802,6 +807,7 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
     for (const g of groups.values()) kb.text(`🔑 View ${g.name.slice(0, 26)}${g.count > 1 ? ` (×${g.count})` : ""}`, cb("lic", "view", g.firstId)).row();
     if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
   }
+  kb.add(sbtn("⚡ Buy this again", cb("ord", "again", orderId), "success")).row();
   kb.text("🔄 Request a replacement", cb("rep", "home")).row();
   kb.text("◀️ Orders", cb("ord", "list", 1));
   backToMenuRow(kb);
@@ -931,6 +937,82 @@ export async function spinView(user: BotUser): Promise<View> {
       active.claimable ? "\n🎉 <b>Complete — claim your reward!</b>" : `⏳ <b>${fmt(active.remainingMinor, active.currency)}</b> to go`,
       `📅 Expires ${active.expiresAt.toISOString().slice(0, 10)}`,
     ].join("\n"),
+    kb,
+  };
+}
+
+/** 🔔 My watchlist — what they asked to be told about. */
+export async function watchlistView(user: BotUser): Promise<View> {
+  const rows = await listWatches(user.id);
+  const kb = new InlineKeyboard();
+  for (const w of rows) {
+    kb.text(`${w.type === "RESTOCK" ? "🔔" : "📉"} ${w.name.slice(0, 22)}`, cb("shp", "prod", w.productId)).row();
+  }
+  if (rows.length > 0) kb.add(sbtn("🧹 Clear all", cb("wch", "clear"), "danger")).row();
+  navRow(kb, cb("prf", "view"));
+  return {
+    text: rows.length
+      ? [
+          header(`🔔 ${bold("My Watchlist")}`),
+          "",
+          "We'll message you the moment any of these happen:",
+          "",
+          ...rows.map((w) =>
+            w.type === "RESTOCK"
+              ? `🔔 <b>${escapeHtml(w.name)}</b> — when back in stock`
+              : `📉 <b>${escapeHtml(w.name)}</b> — if it drops below ${w.basePriceMinor !== null ? fmt(w.basePriceMinor, (w.currency ?? user.currency) as Currency) : "the price you saw"}`,
+          ),
+          "",
+          "<i>Tap any item to open it. You're told once, then it comes off the list.</i>",
+        ].join("\n")
+      : `${header(`🔔 ${bold("My Watchlist")}`)}\n\nNothing yet.\n\nOn any product, tap <b>📉 Tell me if the price drops</b> — or <b>🔔 Notify me</b> when something is sold out — and it appears here.`,
+    kb,
+  };
+}
+
+/** 🎯 Today's deals — sale, restocked and new in one place. */
+export async function dealsView(user: BotUser): Promise<View> {
+  const items = await todaysDeals(user.currency as Currency, 12);
+  const kb = new InlineKeyboard();
+  for (const d of items) {
+    const tag = d.tag === "SALE" ? "🔥" : d.tag === "NEW" ? "🆕" : "🔔";
+    const price = d.fromPriceMinor === null ? "—" : fmt(d.fromPriceMinor, user.currency);
+    kb.add(sbtn(`${tag} ${d.iconEmoji ? `${d.iconEmoji} ` : ""}${d.name.slice(0, 22)} — ${price}`, cb("shp", "prod", d.id), d.tag === "SALE" ? "danger" : "success")).row();
+  }
+  kb.add(sbtn("🛍 All products", cb("shp", "home", 1), "primary")).row();
+  navRow(kb, cb("mnu", "home"));
+  return {
+    text: items.length
+      ? [
+          header(`🎯 ${bold("Today's Deals")}`),
+          "",
+          "🔥 on sale   ·   🔔 just restocked   ·   🆕 new arrival",
+          "",
+          ...items.map((d) => {
+            const now = d.fromPriceMinor === null ? "—" : fmt(d.fromPriceMinor, user.currency);
+            return d.wasMinor !== null
+              ? `🔥 <b>${escapeHtml(d.name)}</b> — <s>${fmt(d.wasMinor, user.currency)}</s> <b>${now}</b>`
+              : `${d.tag === "NEW" ? "🆕" : "🔔"} <b>${escapeHtml(d.name)}</b> — ${now}`;
+          }),
+          "",
+          "<i>Deals move fast — grab them while they're here.</i>",
+        ].join("\n")
+      : `${header(`🎯 ${bold("Today's Deals")}`)}\n\nNo special deals right now — but the shop is full of good prices. 🛍`,
+    kb,
+  };
+}
+
+/** 🔑 Search my keys. */
+export async function myKeysSearchView(user: BotUser, query: string): Promise<View> {
+  const rows = await searchMyKeys(user.id, query, 12);
+  const kb = new InlineKeyboard();
+  for (const r of rows) kb.text(`🔑 ${r.productName.slice(0, 24)} · ${r.orderNumber}`, cb("lic", "view", r.orderItemId)).row();
+  kb.add(sbtn("🔍 Search again", cb("lic", "find"), "primary")).row();
+  navRow(kb, cb("prf", "view"));
+  return {
+    text: rows.length
+      ? [header(`🔑 ${bold("Your keys")}`), "", `Found <b>${rows.length}</b> matching “${escapeHtml(query)}”.`, "", "Tap one to see or re-copy it."].join("\n")
+      : `${header(`🔑 ${bold("Your keys")}`)}\n\nNothing matched “${escapeHtml(query)}”.\n\nTry part of the product name, e.g. <code>netflix</code>.`,
     kb,
   };
 }

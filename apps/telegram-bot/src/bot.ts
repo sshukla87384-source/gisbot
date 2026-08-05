@@ -29,6 +29,9 @@ import {
   convertMinor,
   getCartView,
   watchProduct,
+  listWatches,
+  reorderLines,
+  searchMyKeys,
   unwatchProduct,
   getProductView,
   spin,
@@ -411,6 +414,10 @@ export function createBot(): Bot<Ctx> {
         `💖 <b>Thank you, ${escapeHtml(greetName(ctx.user))}!</b>\n\nYour words have been sent straight to our team. We truly appreciate you taking the time. 🙏✨`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home") },
       );
+    }
+    if (awaiting === "keys_search") {
+      const q = ctx.message.text.trim().slice(0, 40);
+      return render(ctx, await views.myKeysSearchView(ctx.user, q), false);
     }
     if (awaiting === "replace_proof") {
       // They typed instead of sending a photo — keep the claim alive.
@@ -1506,6 +1513,40 @@ export function createBot(): Bot<Ctx> {
           await ctx.reply("✍️ Send your comment — we read every one.");
           break;
 
+        case "dls:home":
+          await render(ctx, await views.dealsView(user), true);
+          break;
+        case "wch:list":
+          await render(ctx, await views.watchlistView(user), true);
+          break;
+        case "wch:clear": {
+          const ws = await listWatches(user.id);
+          for (const w of ws) await unwatchProduct(user.id, w.productId, w.type);
+          await ctx.answerCallbackQuery({ text: "Watchlist cleared" });
+          await render(ctx, await views.watchlistView(user), true);
+          break;
+        }
+        case "lic:find":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "keys_search";
+          await ctx.reply("🔑 <b>Find your keys</b>\n\nSend part of the product name (e.g. <code>netflix</code>):", { parse_mode: "HTML" });
+          break;
+        case "ord:again": {
+          await ctx.answerCallbackQuery({ text: "Adding to cart…" });
+          const lines = await reorderLines(user.id, args[0] ?? "");
+          if (lines.length === 0) {
+            await ctx.reply("⚠️ None of those items are available any more. Browse 🛍 Shop for what's in stock.");
+            break;
+          }
+          await clearCart(user.id);
+          for (const l of lines) await addToCart(user.id, l.variantId, l.quantity).catch(() => undefined);
+          await ctx.reply(
+            [`⚡ <b>Added to your cart</b>`, "", ...lines.map((l) => `📦 ${escapeHtml(l.productName)}${l.quantity > 1 ? ` ×${l.quantity}` : ""}`), "", "Ready when you are 👇"].join("\n"),
+            { parse_mode: "HTML" },
+          );
+          await render(ctx, await views.checkoutSummaryView(user), false);
+          break;
+        }
         case "wch:onr": case "wch:onp": {
           const kind = action === "wch:onr" ? "RESTOCK" : "PRICE_DROP";
           const pid = args[0] ?? "";

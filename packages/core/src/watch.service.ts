@@ -127,3 +127,22 @@ export async function notifyPriceDrop(productId: string, newMinor: number, curre
   if (hit.length > 0) await prisma.productWatch.deleteMany({ where: { id: { in: hit } } });
   return sent;
 }
+
+export interface WatchRow { productId: string; name: string; type: WatchKind; basePriceMinor: number | null; currency: string | null; at: Date }
+
+/** Everything this customer is watching, so they can review and manage it. */
+export async function listWatches(userId: string): Promise<WatchRow[]> {
+  const rows = await prisma.productWatch.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 30 });
+  if (rows.length === 0) return [];
+  const names = new Map(
+    (await prisma.product.findMany({ where: { id: { in: rows.map((r) => r.productId) } }, select: { id: true, name: true } })).map((p) => [p.id, p.name]),
+  );
+  return rows.map((r) => ({
+    productId: r.productId,
+    name: names.get(r.productId) ?? "(removed)",
+    type: r.type as WatchKind,
+    basePriceMinor: r.basePriceMinor,
+    currency: r.currency,
+    at: r.createdAt,
+  }));
+}

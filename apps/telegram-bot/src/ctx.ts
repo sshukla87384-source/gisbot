@@ -67,6 +67,7 @@ export interface SessionData {
     | "sale_timer"
     | "sale_url"
     | "review_comment"
+    | "keys_search"
     | "admin_rev_reply"
     | "admin_tst_search"
     | "admin_tst_name"

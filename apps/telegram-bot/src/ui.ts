@@ -36,6 +36,7 @@ export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: st
     .row()
     .add(sbtn(L("orders", t(loc, "b_orders")), cb("ord", "list", 1), "primary", I("orders")), sbtn(L("wallet", t(loc, "b_wallet")), cb("wal", "view"), "primary", I("wallet")))
     .row()
+    .add(sbtn("🎯 Today’s Deals", cb("dls", "home"), "danger")).row()
     .add(sbtn(L("account", "👤 My Account"), cb("prf", "view"), "primary", I("account")), sbtn(L("support", t(loc, "b_helpsupport")), cb("sup", "home"), "primary", I("support")))
     .row()
     .add(sbtn(L("referral", t(loc, "b_referral")), cb("ref", "view"), "primary", I("referral")))
