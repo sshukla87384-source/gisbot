@@ -1,5 +1,6 @@
 import { prisma } from "@gis/database";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
+import { noteOnTicket, openTicket, setTicketStatus } from "../support/ticket.service.js";
 import { adminReplaceOrderItem } from "./manual-pay.service.js";
 
 export interface ReplaceableItem {
@@ -9,6 +10,52 @@ export interface ReplaceableItem {
   warranty: boolean;
   eligible: boolean;
   reason: string | null;
+  /**
+   * "claim"  → in warranty: a replacement claim our team approves.
+   * "ticket" → out of warranty / already replaced: a support ticket a human
+   *            answers. No automatic replacement is offered, but support CAN
+   *            issue one from the ticket if they decide to.
+   * "blocked" → already in progress; nothing to do but wait.
+   */
+  route: "claim" | "ticket" | "blocked";
+  /** Days of cover left, counted from the FIRST delivery. Null when untimed. */
+  daysLeft: number | null;
+}
+
+interface EligibilityInput {
+  warrantyStartAt: Date | null;
+  fulfilledAt: Date | null;
+  variant: { product: { warranty: boolean; warrantyDays: number | null } };
+  replacements: Array<{ status: string }>;
+}
+
+/**
+ * One place decides eligibility, so the list and the detail can never disagree.
+ * The warranty window is measured from `warrantyStartAt` — the FIRST delivery —
+ * so a replacement continues the original cover instead of restarting it.
+ */
+function evaluate(r: EligibilityInput): Pick<ReplaceableItem, "eligible" | "reason" | "route" | "daysLeft"> {
+  const p = r.variant.product;
+  const start = r.warrantyStartAt ?? r.fulfilledAt;
+  let daysLeft: number | null = null;
+  if (p.warranty && p.warrantyDays && start) {
+    const ageDays = (Date.now() - start.getTime()) / 86_400_000;
+    daysLeft = Math.max(0, Math.ceil(p.warrantyDays - ageDays));
+  }
+
+  if (r.replacements.some((x) => x.status === "PENDING")) {
+    return { eligible: false, reason: "A request is already under review", route: "blocked", daysLeft };
+  }
+  if (!p.warranty) {
+    return { eligible: false, reason: "Sold as-is — no warranty", route: "ticket", daysLeft: null };
+  }
+  if (r.replacements.some((x) => x.status === "APPROVED")) {
+    return { eligible: false, reason: "Already replaced once", route: "ticket", daysLeft };
+  }
+  if (p.warrantyDays && start && daysLeft !== null && daysLeft <= 0) {
+    return { eligible: false, reason: `Warranty expired (${p.warrantyDays}d)`, route: "ticket", daysLeft: 0 };
+  }
+  return { eligible: true, reason: null, route: "claim", daysLeft };
 }
 
 /**
@@ -29,18 +76,13 @@ export async function listReplaceableItems(userId: string, limit = 20): Promise<
   return rows.map((r) => {
     const p = r.variant.product;
     const vn = r.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${r.variantNameSnap}`;
-    let eligible = true;
-    let reason: string | null = null;
-    if (!p.warranty) { eligible = false; reason = "No warranty on this product"; }
-    else if (r.replacements.some((x) => x.status === "PENDING")) { eligible = false; reason = "A request is already under review"; }
-    else if (r.replacements.some((x) => x.status === "APPROVED")) { eligible = false; reason = "Already replaced once"; }
-    else if (p.warrantyDays && (r.warrantyStartAt ?? r.fulfilledAt)) {
-      // Counts from the FIRST delivery, so a replacement does not extend cover.
-      const start = (r.warrantyStartAt ?? r.fulfilledAt) as Date;
-      const ageDays = (Date.now() - start.getTime()) / 86_400_000;
-      if (ageDays > p.warrantyDays) { eligible = false; reason = `Warranty expired (${p.warrantyDays}d)`; }
-    }
-    return { orderItemId: r.id, label: `${r.productNameSnap}${vn}`, orderNumber: r.order.orderNumber, warranty: p.warranty, eligible, reason };
+    return {
+      orderItemId: r.id,
+      label: `${r.productNameSnap}${vn}`,
+      orderNumber: r.order.orderNumber,
+      warranty: p.warranty,
+      ...evaluate(r),
+    };
   });
 }
 
@@ -56,17 +98,13 @@ export async function getReplaceableItem(userId: string, orderItemId: string): P
   if (!r) return null;
   const p = r.variant.product;
   const vn = r.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${r.variantNameSnap}`;
-  let eligible = true;
-  let reason: string | null = null;
-  if (!p.warranty) { eligible = false; reason = "No warranty on this product"; }
-  else if (r.replacements.some((x) => x.status === "PENDING")) { eligible = false; reason = "A request is already under review"; }
-  else if (r.replacements.some((x) => x.status === "APPROVED")) { eligible = false; reason = "Already replaced once"; }
-  else if (p.warrantyDays && (r.warrantyStartAt ?? r.fulfilledAt)) {
-    const start = (r.warrantyStartAt ?? r.fulfilledAt) as Date;
-    const ageDays = (Date.now() - start.getTime()) / 86_400_000;
-    if (ageDays > p.warrantyDays) { eligible = false; reason = `Warranty expired (${p.warrantyDays}d)`; }
-  }
-  return { orderItemId: r.id, label: `${r.productNameSnap}${vn}`, orderNumber: r.order.orderNumber, warranty: p.warranty, eligible, reason };
+  return {
+    orderItemId: r.id,
+    label: `${r.productNameSnap}${vn}`,
+    orderNumber: r.order.orderNumber,
+    warranty: p.warranty,
+    ...evaluate(r),
+  };
 }
 
 /** Buyer submits a claim (reason + screenshot); admins get it for review. */
@@ -78,7 +116,8 @@ export async function createReplacementRequest(opts: {
 }): Promise<{ ok: true; id: string } | { ok: false; reason: string }> {
   const item = await getReplaceableItem(opts.userId, opts.orderItemId);
   if (!item) return { ok: false, reason: "Item not found." };
-  if (!item.eligible) return { ok: false, reason: item.reason ?? "Not eligible for replacement." };
+  // Out-of-warranty goes through support, never through the auto-claim path.
+  if (item.route !== "claim") return { ok: false, reason: item.reason ?? "Not eligible for replacement." };
 
   const row = await prisma.replacementRequest.create({
     data: { orderItemId: opts.orderItemId, userId: opts.userId, reason: opts.reason.slice(0, 1000), proofFileId: opts.proofFileId ?? null },
@@ -104,6 +143,51 @@ export async function createReplacementRequest(opts: {
     ],
   );
   return { ok: true, id: row.id };
+}
+
+/**
+ * Out-of-warranty problem → a support ticket, not an automatic replacement.
+ * A human reads it, replies, and decides. Support can still issue a replacement
+ * from inside the ticket, which is the point: the decision is theirs, not the bot's.
+ */
+export async function createReplacementTicket(opts: {
+  userId: string;
+  orderItemId: string;
+  reason: string;
+  proofFileId?: string;
+}): Promise<{ ok: true; ticketNumber: string } | { ok: false; reason: string }> {
+  const item = await getReplaceableItem(opts.userId, opts.orderItemId);
+  if (!item) return { ok: false, reason: "Item not found." };
+  if (item.route === "blocked") return { ok: false, reason: item.reason ?? "Already under review." };
+  if (item.route === "claim") return { ok: false, reason: "This item is in warranty — use the replacement claim." };
+
+  const orderItem = await prisma.orderItem.findUnique({ where: { id: opts.orderItemId }, select: { orderId: true } });
+  const t = await openTicket({
+    userId: opts.userId,
+    category: "ORDER_ISSUE",
+    subject: `${item.label} — ${item.reason ?? "out of warranty"}`,
+    body: opts.reason,
+    orderId: orderItem?.orderId ?? null,
+    orderItemId: opts.orderItemId,
+    proofFileId: opts.proofFileId ?? null,
+    alertLines: [`📦 ${item.label}`, `🧾 ${item.orderNumber}`, `⚠️ ${item.reason ?? "Out of warranty"} — your call.`],
+    extraButtons: [{ text: "🔄 Issue replacement", callbackData: `adm:tkrep:${opts.orderItemId}`, style: "success" as const }],
+  });
+  return { ok: true, ticketNumber: t.ticketNumber };
+}
+
+/**
+ * Support chooses to replace an item attached to a ticket — a goodwill
+ * replacement outside the warranty. Same delivery path as an approved claim.
+ */
+export async function issueReplacementFromTicket(ticketId: string): Promise<{ ok: boolean; reason?: string }> {
+  const t = await prisma.supportTicket.findUnique({ where: { id: ticketId }, select: { orderItemId: true, ticketNumber: true } });
+  if (!t?.orderItemId) return { ok: false, reason: "This ticket is not linked to a delivered item." };
+  const res = await adminReplaceOrderItem(t.orderItemId);
+  if (!res.ok) return { ok: false, reason: res.reason };
+  await noteOnTicket(ticketId, "🔄 Replacement issued by support (goodwill — outside warranty).");
+  await setTicketStatus(ticketId, "RESOLVED", false);
+  return { ok: true };
 }
 
 export interface ReplacementRow {

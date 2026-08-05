@@ -50,6 +50,8 @@ import {
   grantAllScopesToOwner,
   getInrPerUsdt,
   createReplacementRequest,
+  createReplacementTicket,
+  customerReplyTicket,
   getReplaceableItem,
   getProductIdBySlug,
   getRedis,
@@ -98,6 +100,46 @@ import type { View } from "./views.js";
 
 const SPAM_WINDOW_SEC = 10;
 const SPAM_MAX_ACTIONS = 20;
+
+/**
+ * Both endings of the 2-step claim form (photo sent, or "submit without one").
+ * In warranty → a replacement claim. Out of warranty → a support ticket, where
+ * a human decides; the bot never promises a replacement it cannot authorise.
+ */
+async function submitReplaceOrTicket(ctx: Ctx, proofFileId: string | undefined): Promise<void> {
+  ctx.session.awaiting = null;
+  const orderItemId = ctx.session.replaceItemId ?? "";
+  const reason = ctx.session.replaceReason ?? "(no reason given)";
+  const viaTicket = ctx.session.replaceViaTicket === true;
+  ctx.session.replaceItemId = undefined;
+  ctx.session.replaceReason = undefined;
+  ctx.session.replaceViaTicket = undefined;
+
+  if (viaTicket) {
+    const r = await createReplacementTicket({ userId: ctx.user.id, orderItemId, reason, proofFileId });
+    await ctx.reply(
+      r.ok
+        ? [
+            `🎫 <b>Ticket ${r.ticketNumber} raised</b>`,
+            "",
+            "Our support team has your message and will reply right here.",
+            "",
+            "<i>This item is outside its warranty, so we can't promise a replacement — but a real person will look at it and do what they can. 🙏</i>",
+          ].join("\n")
+        : `⚠️ ${r.reason}`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🎫 My tickets", "sup:home").text("🏠 Menu", "mnu:home") },
+    );
+    return;
+  }
+
+  const r = await createReplacementRequest({ userId: ctx.user.id, orderItemId, reason, proofFileId });
+  await ctx.reply(
+    r.ok
+      ? `✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing it${proofFileId ? " and your screenshot" : ""} now — your replacement arrives here as soon as it is approved. Thank you for your patience. 🙏`
+      : `⚠️ ${r.reason}`,
+    { parse_mode: "HTML" },
+  );
+}
 
 export function createBot(): Bot<Ctx> {
   const config = loadConfig();
@@ -369,25 +411,19 @@ export function createBot(): Bot<Ctx> {
   });
 
   bot.on("message:photo", async (ctx) => {
-    // Customer submitting a replacement screenshot.
+    // Customer submitting a replacement / support screenshot.
     if (ctx.session.awaiting === "replace_proof") {
+      const photos = ctx.message.photo;
+      await submitReplaceOrTicket(ctx, photos[photos.length - 1]?.file_id);
+      return;
+    }
+    // Customer attaching a screenshot to an open ticket reply.
+    if (ctx.session.awaiting === "ticket_reply" && ctx.session.ticketId) {
       ctx.session.awaiting = null;
       const photos = ctx.message.photo;
-      const proof = photos[photos.length - 1]?.file_id;
-      const r = await createReplacementRequest({
-        userId: ctx.user.id,
-        orderItemId: ctx.session.replaceItemId ?? "",
-        reason: ctx.session.replaceReason ?? "(no reason given)",
-        proofFileId: proof,
-      });
-      ctx.session.replaceItemId = undefined;
-      ctx.session.replaceReason = undefined;
-      await ctx.reply(
-        r.ok
-          ? "✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing your screenshot now. You will get the replacement here as soon as it is approved. Thank you for your patience. 🙏"
-          : `⚠️ ${r.reason}`,
-        { parse_mode: "HTML" },
-      );
+      const r = await customerReplyTicket(ctx.user.id, ctx.session.ticketId, ctx.message.caption?.slice(0, 1000) || "(screenshot)", photos[photos.length - 1]?.file_id);
+      ctx.session.ticketId = undefined;
+      await ctx.reply(r.ok ? `📨 Sent to support on ticket <b>${r.ticketNumber}</b>. We'll reply here.` : "⚠️ That ticket is no longer open.", { parse_mode: "HTML" });
       return;
     }
     if (ctx.session.awaiting !== "admin_p_image") return;
@@ -446,9 +482,22 @@ export function createBot(): Bot<Ctx> {
     if (awaiting === "replace_reason") {
       ctx.session.replaceReason = ctx.message.text.trim().slice(0, 1000);
       ctx.session.awaiting = "replace_proof";
+      const viaTicket = ctx.session.replaceViaTicket === true;
       return ctx.reply(
-        "📷 <b>Step 2 of 2 — send a screenshot</b>\n\nPlease send a photo showing the problem (error message, login screen, etc.). This helps our team approve your replacement fast.\n\n<i>No screenshot? Tap Submit without one.</i>",
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📨 Submit without screenshot", "rep:nopic").text("✖️ Cancel", "rep:home") },
+        viaTicket
+          ? "📷 <b>Step 2 of 2 — send a screenshot</b>\n\nPlease send a photo showing the problem. It helps our support team understand it quickly and decide what they can do for you.\n\n<i>No screenshot? Tap Send without one.</i>"
+          : "📷 <b>Step 2 of 2 — send a screenshot</b>\n\nPlease send a photo showing the problem (error message, login screen, etc.). This helps our team approve your replacement fast.\n\n<i>No screenshot? Tap Submit without one.</i>",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(viaTicket ? "📨 Send without screenshot" : "📨 Submit without screenshot", "rep:nopic").text("✖️ Cancel", "rep:home") },
+      );
+    }
+    if (awaiting === "ticket_reply") {
+      const id = ctx.session.ticketId ?? "";
+      ctx.session.ticketId = undefined;
+      if (!id) return;
+      const r = await customerReplyTicket(ctx.user.id, id, ctx.message.text.trim().slice(0, 2000));
+      return ctx.reply(
+        r.ok ? `📨 Sent to support on ticket <b>${r.ticketNumber}</b>. We'll reply right here. 🙏` : "⚠️ That ticket is no longer open. Tap 🎫 Support to open a new one.",
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📂 View ticket", `tkt:open:${id}`).text("🏠 Menu", "mnu:home") },
       );
     }
     if (awaiting === "wallet_inr_amount") {
@@ -1441,21 +1490,8 @@ export function createBot(): Bot<Ctx> {
         }
 
         case "rep:nopic": {
-          ctx.session.awaiting = null;
-          const r = await createReplacementRequest({
-            userId: user.id,
-            orderItemId: ctx.session.replaceItemId ?? "",
-            reason: ctx.session.replaceReason ?? "(no reason given)",
-          });
-          ctx.session.replaceItemId = undefined;
-          ctx.session.replaceReason = undefined;
           await ctx.answerCallbackQuery();
-          await ctx.reply(
-            r.ok
-              ? "✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing it now — you will get your replacement here once approved. 🙏"
-              : `⚠️ ${r.reason}`,
-            { parse_mode: "HTML" },
-          );
+          await submitReplaceOrTicket(ctx, undefined);
           break;
         }
         case "rev:new": {
@@ -1610,11 +1646,44 @@ export function createBot(): Bot<Ctx> {
         case "rep:pick": {
           const it = await getReplaceableItem(user.id, args[0] ?? "");
           if (!it) { await ctx.answerCallbackQuery({ text: "Item not found" }); break; }
-          if (!it.eligible) { await ctx.answerCallbackQuery({ text: it.reason ?? "Not eligible", show_alert: true }); break; }
+          await ctx.answerCallbackQuery();
+          // Out of warranty: no replacement button at all — only the option to
+          // raise a ticket, which a human answers.
+          if (it.route === "ticket") { await render(ctx, views.replaceTicketOfferView(it), true); break; }
+          if (it.route === "blocked") { await render(ctx, views.replaceBlockedView(it), true); break; }
           ctx.session.replaceItemId = it.orderItemId;
           ctx.session.replaceReason = undefined;
+          ctx.session.replaceViaTicket = false;
           ctx.session.awaiting = "replace_reason";
-          await render(ctx, views.replaceAskReasonView(it.label), true);
+          await render(ctx, views.replaceAskReasonView(it.label, false), true);
+          break;
+        }
+        case "rep:tkt": {
+          const it = await getReplaceableItem(user.id, args[0] ?? "");
+          if (!it) { await ctx.answerCallbackQuery({ text: "Item not found" }); break; }
+          if (it.route !== "ticket") { await ctx.answerCallbackQuery({ text: "Use the replacement claim for this item", show_alert: true }); break; }
+          ctx.session.replaceItemId = it.orderItemId;
+          ctx.session.replaceReason = undefined;
+          ctx.session.replaceViaTicket = true;
+          ctx.session.awaiting = "replace_reason";
+          await ctx.answerCallbackQuery();
+          await render(ctx, views.replaceAskReasonView(it.label, true), true);
+          break;
+        }
+
+        case "tkt:open": {
+          await ctx.answerCallbackQuery();
+          await render(ctx, await views.ticketThreadView(user, args[0] ?? ""), true);
+          break;
+        }
+        case "tkt:re": {
+          const id = args[0] ?? "";
+          ctx.session.ticketId = id;
+          ctx.session.awaiting = "ticket_reply";
+          await ctx.answerCallbackQuery();
+          await ctx.reply("💬 Type your reply to support (you can attach a screenshot instead):", {
+            reply_markup: new InlineKeyboard().text("✖️ Cancel", `tkt:open:${id}`),
+          });
           break;
         }
 

@@ -15,6 +15,8 @@ import {
   listProducts,
   listApiKeysByOwner,
   listTickets,
+  getMyTicket,
+  type ReplaceableItem,
   listVault,
   listReplaceableItems,
   productRating,
@@ -519,7 +521,8 @@ export async function supportHomeView(user: BotUser): Promise<View> {
   const tickets = await listTickets(user.id, 1);
   const kb = new InlineKeyboard().add(sbtn("💬 Chat with Support", cb("sup", "chat"), "success")).row().text("🆕 New Ticket", cb("sup", "new")).row();
   for (const t of tickets.items.slice(0, 5)) {
-    kb.text(`#${t.ticketNumber} · ${t.status} · ${t.subject.slice(0, 20)}`, cb("mnu", "noop")).row();
+    const dot = t.status === "WAITING_CUSTOMER" ? "💬" : t.status === "RESOLVED" ? "✅" : t.status === "CLOSED" ? "🔒" : "⌛";
+    kb.text(`${dot} ${t.ticketNumber} · ${t.subject.slice(0, 22)}`, cb("tkt", "open", t.id)).row();
   }
   backToMenuRow(kb);
   return {
@@ -531,7 +534,9 @@ export async function supportHomeView(user: BotUser): Promise<View> {
       "• Pay with UPI, Binance (USDT) or your wallet.",
       "",
       "💬 Tap <b>Chat with Support</b> to message our team live — we reply right here.",
-      "Or open a 🆕 Ticket for a tracked request.",
+      "Or open a 🆕 Ticket for a tracked request — tap any ticket below to read the replies.",
+      "",
+      "💬 = support replied   ⌛ = with our team   ✅ = resolved   🔒 = closed",
     ].join("\n"),
     kb,
   };
@@ -864,7 +869,7 @@ export async function replaceListView(user: BotUser): Promise<View> {
   const items = await listReplaceableItems(user.id, 20);
   const kb = new InlineKeyboard();
   for (const i of items) {
-    const tag = i.eligible ? "🔄" : (i.warranty ? "⏳" : "🚫");
+    const tag = i.route === "claim" ? "🔄" : i.route === "blocked" ? "⌛" : (i.warranty ? "⏳" : "🚫");
     kb.text(`${tag} ${i.label.slice(0, 28)} · ${i.orderNumber}`, cb("rep", "pick", i.orderItemId)).row();
   }
   backToMenuRow(kb);
@@ -875,24 +880,98 @@ export async function replaceListView(user: BotUser): Promise<View> {
           "",
           "Tap the item you are having trouble with.",
           "",
-          "🔄 = covered by warranty   ⏳ = warranty expired   🚫 = no warranty",
+          "🔄 = covered by warranty   ⏳ = warranty expired   🚫 = sold as-is   ⌛ = under review",
           "",
-          "<i>You will be asked for a short reason and a screenshot showing the problem. Our team reviews every claim.</i>",
+          "<i>Covered items get a replacement claim our team reviews. For ⏳ and 🚫 items you can raise a support ticket instead, and a real person will help.</i>",
         ].join("\n")
       : `${header(`🔄 ${bold("Request a Replacement")}`)}\n\nYou have no delivered items yet.`,
     kb,
   };
 }
 
-export function replaceAskReasonView(label: string): View {
+export function replaceAskReasonView(label: string, viaTicket = false): View {
   const kb = new InlineKeyboard().text("✖️ Cancel", cb("rep", "home"));
   return {
     text: [
-      header(`🔄 ${bold("Replacement claim")}`),
+      header(viaTicket ? `🎫 ${bold("Raise a support ticket")}` : `🔄 ${bold("Replacement claim")}`),
       "",
       `📦 <b>${escapeHtml(label)}</b>`,
       "",
       "Step 1 of 2 — describe the problem in one message (e.g. <i>password not working</i>, <i>key already used</i>).",
+      ...(viaTicket ? ["", "<i>Support reads every ticket and replies here.</i>"] : []),
+    ].join("\n"),
+    kb,
+  };
+}
+
+/**
+ * Tapped an item with no warranty (or an expired one). There is deliberately NO
+ * replacement button here — only the honest option: raise a ticket and let
+ * support decide. Promising a replacement we may not give would be worse.
+ */
+export function replaceTicketOfferView(item: ReplaceableItem): View {
+  const kb = new InlineKeyboard()
+    .add(sbtn("🎫 Raise a support ticket", cb("rep", "tkt", item.orderItemId), "success")).row()
+    .text("◀️ Back", cb("rep", "home"));
+  const asIs = !item.warranty;
+  return {
+    text: [
+      header(`🚫 ${bold("No replacement on this item")}`),
+      "",
+      `📦 <b>${escapeHtml(item.label)}</b>`,
+      `🧾 ${escapeHtml(item.orderNumber)}`,
+      "",
+      asIs
+        ? "This product was sold <b>as-is</b>, with no warranty, so an automatic replacement isn't available for it."
+        : `The warranty on this item has <b>expired</b>${item.reason?.includes("Already") ? "" : ""}, so an automatic replacement isn't available.`,
+      ...(item.reason?.startsWith("Already replaced") ? ["", "It has already been replaced once under warranty."] : []),
+      "",
+      "🎫 <b>You can still raise a support ticket.</b>",
+      "Tell us what went wrong and our support team will reply right here. They can help, and they can choose to issue a replacement as a goodwill gesture — that decision is made by a person, not automatically.",
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** A claim is already in the queue — nothing to do but wait. */
+export function replaceBlockedView(item: ReplaceableItem): View {
+  const kb = new InlineKeyboard().text("◀️ Back", cb("rep", "home"));
+  return {
+    text: [
+      header(`⌛ ${bold("Already under review")}`),
+      "",
+      `📦 <b>${escapeHtml(item.label)}</b>`,
+      `🧾 ${escapeHtml(item.orderNumber)}`,
+      "",
+      "Our team is looking at your request right now. You will get a message here as soon as there is news — no need to submit it again. 🙏",
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** The customer's own ticket thread, so support replies live somewhere findable. */
+export async function ticketThreadView(user: BotUser, ticketId: string): Promise<View> {
+  const t = await getMyTicket(user.id, ticketId);
+  const kb = new InlineKeyboard();
+  if (!t) {
+    kb.text("◀️ Support", cb("sup", "home"));
+    return { text: "🎫 Ticket not found.", kb };
+  }
+  const open = t.status !== "CLOSED" && t.status !== "RESOLVED";
+  if (open) kb.add(sbtn("↩️ Reply", cb("tkt", "re", t.id), "success")).row();
+  kb.text("◀️ Support", cb("sup", "home")).row();
+  backToMenuRow(kb);
+  const label: Record<string, string> = { CUSTOMER: "🧑 You", ADMIN: "🎧 Support", SYSTEM: "⚙️" };
+  return {
+    text: [
+      header(`🎫 ${bold(`Ticket ${t.ticketNumber}`)}`),
+      `📌 Status: <b>${t.status.replace(/_/g, " ")}</b>`,
+      ...(t.itemLabel ? [`📦 ${escapeHtml(t.itemLabel)}${t.orderNumber ? ` · ${escapeHtml(t.orderNumber)}` : ""}`] : []),
+      "",
+      ...t.messages.slice(-12).map((m) =>
+        `${label[m.authorType] ?? ""} <i>${m.createdAt.toISOString().slice(5, 16).replace("T", " ")}</i>\n${escapeHtml(m.body).slice(0, 500)}${m.proofFileId ? "\n📷 <i>screenshot attached</i>" : ""}\n`,
+      ),
+      open ? "<i>Tap ↩️ Reply to add to this ticket.</i>" : "<i>This ticket is closed. Open a new one any time.</i>",
     ].join("\n"),
     kb,
   };

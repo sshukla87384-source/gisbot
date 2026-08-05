@@ -27,6 +27,14 @@ import {
   getReplacementRequest,
   approveReplacement,
   rejectReplacement,
+  adminListTickets,
+  adminGetTicket,
+  adminReplyTicket,
+  setTicketStatus,
+  issueReplacementFromTicket,
+  openTicketCount,
+  getTicketProof,
+  findTicketByOrderItem,
   listPendingManualItems,
   manualFulfillItem,
   type PriceChannel,
@@ -294,6 +302,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_orders: { title: "🧾 <b>Orders</b>", subtitle: "Review and fulfil orders", rows: [
       [["🧾 Pending", cb("adm", "orders"), "primary"], ["🗂 Recent", cb("adm", "recent"), "primary"]],
       [["🔄 Replacement Requests", cb("adm", "reps"), "success"]],
+      [["🎫 Support Tickets", cb("adm", "tks"), "success"]],
     ] },
     m_stats: { title: "📊 <b>Stats</b>", subtitle: "Your store at a glance", rows: [
       [["📊 Dashboard", cb("adm", "stats"), "primary"], ["📈 Sales", cb("adm", "sales"), "primary"]],
@@ -889,6 +898,59 @@ async function walletHistoryView(ctx: Ctx, userId: string): Promise<void> {
   await show(ctx, lines.join("\n"), kb, true);
 }
 
+async function ticketsListView(ctx: Ctx): Promise<void> {
+  const [rows, open] = await Promise.all([adminListTickets({ limit: 15 }), openTicketCount()]);
+  const kb = new InlineKeyboard();
+  for (const t of rows) {
+    const dot = t.waitingOnUs ? "🔴" : "🟡";
+    kb.text(`${dot} ${t.ticketNumber} · ${t.who.slice(0, 12)} · ${t.subject.slice(0, 20)}${t.hasItem ? " 📦" : ""}`, cb("adm", "tk", t.id)).row();
+  }
+  kb.text("◀️ Back", cb("adm", "m_orders"));
+  await show(
+    ctx,
+    rows.length === 0
+      ? "🎫 <b>Support Tickets</b>\n\n✅ Nothing waiting. Good work."
+      : [
+          "🎫 <b>Support Tickets</b>",
+          `📬 Open: <b>${open}</b>`,
+          "",
+          "🔴 = waiting on us   🟡 = waiting on the customer   📦 = about a delivered item",
+        ].join("\n"),
+    kb,
+    true,
+  );
+}
+
+async function ticketDetailView(ctx: Ctx, ticketId: string): Promise<void> {
+  const t = await adminGetTicket(ticketId);
+  if (!t) { await show(ctx, "🎫 Ticket not found.", new InlineKeyboard().text("◀️ Back", cb("adm", "tks")), true); return; }
+  const kb = new InlineKeyboard();
+  kb.add(sbtn("💬 Reply", cb("adm", "tkre", t.id), "success")).row();
+  // Only offered when the ticket is tied to a delivered item — this is how support
+  // grants an out-of-warranty replacement, by choice rather than automatically.
+  if (t.orderItemId) kb.add(sbtn("🔄 Issue replacement", cb("adm", "tkrepl", t.id), "success")).row();
+  const pic = [...t.messages].reverse().find((m) => m.proofFileId);
+  if (pic) kb.add(sbtn("📷 View screenshot", cb("adm", "tkpic", pic.id), "primary")).row();
+  if (t.status !== "RESOLVED") kb.add(sbtn("✅ Resolve", cb("adm", "tkres", t.id), "primary"));
+  if (t.status !== "CLOSED") kb.add(sbtn("🔒 Close", cb("adm", "tkcls", t.id), "danger"));
+  kb.row().text("◀️ Back", cb("adm", "tks"));
+  const label: Record<string, string> = { CUSTOMER: "🧑 Customer", ADMIN: "🎧 You", SYSTEM: "⚙️" };
+  await show(
+    ctx,
+    [
+      `🎫 <b>${t.ticketNumber}</b> · ${t.status.replace(/_/g, " ")}`,
+      `👤 ${escapeHtml(t.who)}  🆔 <code>${escapeHtml(t.telegramId)}</code>`,
+      ...(t.itemLabel ? [`📦 ${escapeHtml(t.itemLabel)}${t.orderNumber ? ` · ${escapeHtml(t.orderNumber)}` : ""}`] : []),
+      "",
+      ...t.messages.slice(-10).map((m) =>
+        `${label[m.authorType] ?? ""} <i>${m.createdAt.toISOString().slice(5, 16).replace("T", " ")}</i>\n${escapeHtml(m.body).slice(0, 500)}${m.proofFileId ? "\n📷 <i>screenshot</i>" : ""}\n`,
+      ),
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
+
 async function replacementsListView(ctx: Ctx): Promise<void> {
   const rows = await listReplacementRequests("PENDING", 15);
   const kb = new InlineKeyboard();
@@ -1466,6 +1528,47 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_p_warrantydays";
       await askStep(ctx, "⏱ Send the <b>replacement window in days</b> (e.g. <code>7</code>), or <code>0</code> for no time limit:");
       return;
+    case "tks": return ticketsListView(ctx);
+    case "tk": return ticketDetailView(ctx, id);
+    case "tkpic": {
+      const proof = await getTicketProof(id);
+      if (!proof) { await ctx.reply("No screenshot on that message."); return; }
+      await ctx.replyWithPhoto(proof, { caption: "📷 Customer screenshot" });
+      return;
+    }
+    case "tkre":
+      ctx.session.ticketId = id;
+      ctx.session.awaiting = "admin_ticket_reply";
+      await askStep(ctx, "💬 Send your <b>reply</b> — the customer gets it as a message in the bot:");
+      return;
+    case "tkres": {
+      const r = await setTicketStatus(id, "RESOLVED");
+      await ctx.answerCallbackQuery({ text: r.ok ? "Marked resolved" : "Not found" }).catch(() => undefined);
+      return ticketDetailView(ctx, id);
+    }
+    case "tkcls": {
+      const r = await setTicketStatus(id, "CLOSED");
+      await ctx.answerCallbackQuery({ text: r.ok ? "Closed" : "Not found" }).catch(() => undefined);
+      return ticketDetailView(ctx, id);
+    }
+    case "tkrepl": {
+      // Goodwill replacement from inside a ticket — a human decision, out of warranty.
+      const res = await issueReplacementFromTicket(id);
+      await ctx.reply(
+        res.ok
+          ? "✅ Replacement issued — a different unit was delivered to the customer and the ticket is marked resolved."
+          : `❌ ${res.reason === "NO_STOCK" ? "No spare stock left to replace with. Add stock, then try again." : res.reason === "NOT_AUTOMATIC" ? "This product is not auto-deliverable — deliver manually from the order." : res.reason ?? "Could not replace."}`,
+      );
+      return ticketDetailView(ctx, id);
+    }
+    case "tkrep": {
+      // Shortcut straight off the alert: `id` is the ORDER ITEM, not the ticket.
+      const tid = await findTicketByOrderItem(id);
+      if (!tid) { await ctx.reply("Ticket not found for that item."); return; }
+      const res = await issueReplacementFromTicket(tid);
+      await ctx.reply(res.ok ? "✅ Replacement issued and the ticket marked resolved." : `❌ ${res.reason ?? "Could not replace."}`);
+      return ticketDetailView(ctx, tid);
+    }
     case "reps": return replacementsListView(ctx);
     case "rrview": return replacementDetailView(ctx, id);
     case "rrpic": {
@@ -3132,6 +3235,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setProductWarrantyDays(pid, Number.isFinite(d) && d > 0 ? d : null);
     await ctx.reply(Number.isFinite(d) && d > 0 ? `⏱ Replacement window set to <b>${d} day(s)</b>.` : "⏱ Warranty has <b>no time limit</b> now.", { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_ticket_reply") {
+    const tid = ctx.session.ticketId ?? "";
+    ctx.session.ticketId = undefined;
+    const r = await adminReplyTicket(tid, text);
+    await ctx.reply(r.ok ? `📨 Sent to the customer on ticket <b>${r.ticketNumber}</b>.` : "Could not find that ticket.", { parse_mode: "HTML" });
+    if (r.ok) await ticketDetailView(ctx, tid);
     return true;
   }
   if (awaiting === "admin_reject_note") {

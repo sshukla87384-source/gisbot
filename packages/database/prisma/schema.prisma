@@ -1019,6 +1019,9 @@ model SupportTicket {
   status       TicketStatus   @default(OPEN)
   subject      String
   orderId      String?
+  /// Set when the ticket is about ONE delivered item, so support can issue a
+  /// replacement straight from the ticket.
+  orderItemId  String?
   assigneeId   String?
   assignee     User?          @relation("TicketAssignee", fields: [assigneeId], references: [id])
   firstResponseAt DateTime?
@@ -1042,6 +1045,8 @@ model TicketMessage {
   author    User?         @relation(fields: [authorId], references: [id])
   authorType MessageAuthor
   body      String
+  /// Telegram file_id of a screenshot the customer attached.
+  proofFileId String?
   mediaId   String?
   media     Media?        @relation(fields: [mediaId], references: [id])
   createdAt DateTime      @default(now())

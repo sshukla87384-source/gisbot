@@ -6,6 +6,8 @@ export interface SessionData {
   awaiting?:
     | "search"
     | "ticket"
+    | "ticket_reply"
+    | "admin_ticket_reply"
     | "devtopup"
     | "admin_passcode"
     | "admin_broadcast"
@@ -145,6 +147,10 @@ export interface SessionData {
   replaceItemId?: string;
   /** Reason text captured before the screenshot step. */
   replaceReason?: string;
+  /** True when the replacement form is raising a support ticket instead of a claim. */
+  replaceViaTicket?: boolean;
+  /** Ticket the customer is replying to, or the admin is answering. */
+  ticketId?: string;
   /** Replacement request the admin is rejecting (awaiting a note). */
   admReplaceId?: string;
   /** Customer Binance order awaiting a transaction ID. */
