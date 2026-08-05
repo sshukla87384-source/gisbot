@@ -3,6 +3,7 @@ export * from "./queues.js";
 export * from "./users/user.service.js";
 export * from "./logs.service.js";
 export * from "./followup.service.js";
+export * from "./testimonial.service.js";
 export * from "./fx.js";
 export * from "./translate.service.js";
 export * from "./catalog/catalog.service.js";

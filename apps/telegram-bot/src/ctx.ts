@@ -68,6 +68,15 @@ export interface SessionData {
     | "sale_url"
     | "review_comment"
     | "admin_rev_reply"
+    | "admin_tst_search"
+    | "admin_tst_name"
+    | "admin_tst_body"
+    | "admin_tst_rating"
+    | "admin_tst_product"
+    | "admin_tst_source"
+    | "admin_tst_order"
+    | "admin_tst_editbody"
+    | "admin_tst_import"
     | "replace_reason"
     | "replace_proof"
     | "admin_reject_note"
@@ -106,6 +115,10 @@ export interface SessionData {
   /** Admin review-list filter. */
   revFilter?: "pending" | "approved" | "rejected" | "all";
   revTarget?: string;
+  tstFilter?: "DRAFT" | "PENDING" | "PUBLISHED" | "ARCHIVED" | "ALL";
+  tstSearch?: string;
+  tstTarget?: string;
+  tstDraft?: { customerName?: string; body?: string; rating?: number; productName?: string | null };
   /** Review awaiting an optional written comment. */
   reviewId?: string;
   /** Order item the customer is raising a replacement claim on. */

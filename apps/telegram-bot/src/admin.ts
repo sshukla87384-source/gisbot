@@ -121,6 +121,18 @@ import {
   setVerifiedPurchase,
   moderationLog,
   REJECT_REASONS,
+  listTestimonials,
+  testimonialStats,
+  getTestimonial,
+  createTestimonial,
+  updateTestimonial,
+  setTestimonialStatus,
+  toggleTestimonialFlag,
+  setTestimonialOrder,
+  deleteTestimonial,
+  testimonialLog,
+  exportTestimonials,
+  importTestimonials,
   readLogs,
   clearLogs,
   logCounts,
@@ -136,7 +148,7 @@ import {
   announceCatalogue,
 } from "@gis/core";
 import { cb } from "@gis/shared";
-import { InlineKeyboard } from "grammy";
+import { InlineKeyboard, InputFile } from "grammy";
 import type { Ctx } from "./ctx.js";
 import { escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
@@ -276,6 +288,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
+      [["💬 Testimonials", cb("adm", "tst"), "primary"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
@@ -1276,6 +1289,130 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.admReplaceId = id;
       ctx.session.awaiting = "admin_reject_note";
       await askStep(ctx, "❌ Send a short <b>reason</b> the customer will see, or <code>-</code> to decline without a note:");
+      return;
+    case "tst": {
+      const page = Math.max(1, Number.parseInt(id || "1", 10) || 1);
+      const st = (ctx.session.tstFilter ?? "ALL") as "DRAFT" | "PENDING" | "PUBLISHED" | "ARCHIVED" | "ALL";
+      const [list, stats] = await Promise.all([
+        listTestimonials({ page, pageSize: 6, status: st, search: ctx.session.tstSearch }),
+        testimonialStats(),
+      ]);
+      const kb = new InlineKeyboard();
+      kb.add(sbtn("➕ Add testimonial", cb("adm", "tstadd"), "success")).row();
+      for (const t of list.rows) {
+        const tag = t.status === "PUBLISHED" ? "🟢" : t.status === "PENDING" ? "🕐" : t.status === "ARCHIVED" ? "📦" : "✏️";
+        kb.text(`${tag}${t.pinned ? "📌" : ""}${t.spamScore >= 40 ? "⚠️" : ""} ${"⭐".repeat(t.rating)} ${t.customerName.slice(0, 16)}`, cb("adm", "tstv", t.id)).row();
+      }
+      if (list.pages > 1) {
+        const nav: Array<ReturnType<typeof sbtn>> = [];
+        if (list.page > 1) nav.push(sbtn("◀️ Prev", cb("adm", "tst", String(list.page - 1)), "primary"));
+        if (list.page < list.pages) nav.push(sbtn("Next ▶️", cb("adm", "tst", String(list.page + 1)), "primary"));
+        if (nav.length) kb.add(...nav).row();
+      }
+      kb.add(sbtn(`🔎 ${st}`, cb("adm", "tstfilt"), "primary"), sbtn(ctx.session.tstSearch ? `🔍 "${ctx.session.tstSearch.slice(0, 8)}" ✖️` : "🔍 Search", cb("adm", ctx.session.tstSearch ? "tstclr" : "tstsrch"), "primary")).row();
+      kb.add(sbtn("📤 Export", cb("adm", "tstexp"), "primary"), sbtn("📥 Import", cb("adm", "tstimp"), "primary")).row();
+      kb.text("◀️ Back", cb("adm", "m_content"));
+      await show(ctx, [
+        "💬 <b>Testimonials</b>",
+        `🟢 ${stats.published} published · 🕐 ${stats.pending} pending · ✏️ ${stats.draft} draft · 📦 ${stats.archived} archived`,
+        stats.published > 0 ? `Shown rating on cards: <b>${stats.avgShown.toFixed(1)}</b>★` : "",
+        stats.flagged > 0 ? `⚠️ <b>${stats.flagged}</b> flagged as possible spam` : "",
+        "",
+        `Showing <b>${st}</b>${ctx.session.tstSearch ? ` · matching “${escapeHtml(ctx.session.tstSearch)}”` : ""} · page ${list.page}/${list.pages} · ${list.total} total`,
+        "",
+        ...list.rows.flatMap((t) => [
+          `${t.status === "PUBLISHED" ? "🟢" : t.status === "PENDING" ? "🕐" : t.status === "ARCHIVED" ? "📦" : "✏️"} ${"⭐".repeat(t.rating)} <b>${escapeHtml(t.customerName)}</b>${t.company ? ` · ${escapeHtml(t.company)}` : ""}${t.pinned ? " 📌" : ""}${t.featured ? " ⭐" : ""}`,
+          `   <i>${escapeHtml(t.body).slice(0, 140)}</i>`,
+          `   📄 source: ${escapeHtml(t.source).slice(0, 60)}${t.spamScore >= 40 ? ` · ⚠️ spam score ${t.spamScore}` : ""}`,
+        ]),
+        "",
+        "<i>ℹ️ Testimonials are marketing content. They never change your ⭐ star average, which comes only from approved customer reviews on real orders.</i>",
+      ].filter((l) => l !== "").join("\n").slice(0, 3900), kb, true);
+      return;
+    }
+    case "tstfilt": {
+      const order = ["ALL", "PUBLISHED", "PENDING", "DRAFT", "ARCHIVED"] as const;
+      const cur = (ctx.session.tstFilter ?? "ALL") as (typeof order)[number];
+      ctx.session.tstFilter = order[(order.indexOf(cur) + 1) % order.length];
+      return handleAdminCallback(ctx, "tst", ["1"]);
+    }
+    case "tstsrch":
+      ctx.session.awaiting = "admin_tst_search";
+      await askStep(ctx, "🔍 Send a name, product or phrase to search testimonials:");
+      return;
+    case "tstclr":
+      ctx.session.tstSearch = undefined;
+      return handleAdminCallback(ctx, "tst", ["1"]);
+    case "tstadd":
+      ctx.session.tstDraft = {};
+      ctx.session.awaiting = "admin_tst_name";
+      await askStep(ctx, [
+        "💬 <b>New testimonial</b> · Step 1/5",
+        "",
+        "Send the <b>customer's name</b> (as you have permission to show it):",
+      ].join("\n"));
+      return;
+    case "tstv": {
+      const t = await getTestimonial(id);
+      if (!t) { await ctx.reply("That testimonial is gone."); return handleAdminCallback(ctx, "tst", ["1"]); }
+      const lg = await testimonialLog(id, 5);
+      const kb = new InlineKeyboard();
+      kb.add(
+        sbtn(t.status === "PUBLISHED" ? "📦 Unpublish" : "🟢 Publish", cb("adm", t.status === "PUBLISHED" ? "tstdraft" : "tstpub", id), t.status === "PUBLISHED" ? "primary" : "success"),
+        sbtn("📦 Archive", cb("adm", "tstarch", id), "primary"),
+      ).row();
+      kb.add(
+        sbtn(t.pinned ? "📌 Unpin" : "📌 Pin", cb("adm", "tstpin", id), "primary"),
+        sbtn(t.featured ? "⭐ Unfeature" : "⭐ Feature", cb("adm", "tstfeat", id), "primary"),
+      ).row();
+      kb.add(sbtn("✏️ Edit text", cb("adm", "tstedit", id), "primary"), sbtn("🔢 Order", cb("adm", "tstord", id), "primary")).row();
+      kb.add(sbtn("🗑 Delete", cb("adm", "tstdel", id), "danger")).row();
+      kb.text("◀️ Back", cb("adm", "tst", "1"));
+      await show(ctx, [
+        `💬 <b>Testimonial</b> — ${"⭐".repeat(t.rating)}`,
+        `📌 Status: <b>${t.status}</b>${t.pinned ? " · 📌 pinned" : ""}${t.featured ? " · ⭐ featured" : ""}`,
+        `👤 <b>${escapeHtml(t.customerName)}</b>${t.company ? ` · ${escapeHtml(t.company)}` : ""}`,
+        t.productName ? `📦 ${escapeHtml(t.productName)}` : "",
+        `🌐 ${t.locale} · 🔢 order ${t.sortOrder}`,
+        "",
+        `💬 <i>${escapeHtml(t.body)}</i>`,
+        "",
+        `📄 <b>Source:</b> ${escapeHtml(t.source)}`,
+        t.verified ? "✅ Linked to a real order — shows as a verified purchase" : "ℹ️ Not order-linked — shows as “shared with permission”",
+        t.spamScore >= 40 ? `⚠️ Spam score <b>${t.spamScore}</b>/100 — check before publishing` : "",
+        lg.length ? `\n🧾 <b>History</b>\n${lg.map((l) => `• ${l.action}${l.detail ? ` — ${escapeHtml(l.detail)}` : ""} · ${l.at.toISOString().slice(5, 16).replace("T", " ")}`).join("\n")}` : "",
+      ].filter((l) => l !== "").join("\n"), kb, true);
+      return;
+    }
+    case "tstpub": { await setTestimonialStatus(id, "PUBLISHED", "bot-admin"); await ctx.reply("🟢 Published — customers can see it now."); return handleAdminCallback(ctx, "tstv", [id]); }
+    case "tstdraft": { await setTestimonialStatus(id, "DRAFT", "bot-admin"); await ctx.reply("✏️ Unpublished — back to draft."); return handleAdminCallback(ctx, "tstv", [id]); }
+    case "tstarch": { await setTestimonialStatus(id, "ARCHIVED", "bot-admin"); await ctx.reply("📦 Archived."); return handleAdminCallback(ctx, "tst", ["1"]); }
+    case "tstpin": { const v = await toggleTestimonialFlag(id, "pinned", "bot-admin"); await ctx.answerCallbackQuery({ text: v ? "Pinned" : "Unpinned" }).catch(() => undefined); return handleAdminCallback(ctx, "tstv", [id]); }
+    case "tstfeat": { const v = await toggleTestimonialFlag(id, "featured", "bot-admin"); await ctx.answerCallbackQuery({ text: v ? "Featured" : "Unfeatured" }).catch(() => undefined); return handleAdminCallback(ctx, "tstv", [id]); }
+    case "tstord":
+      ctx.session.tstTarget = id; ctx.session.awaiting = "admin_tst_order";
+      await askStep(ctx, "🔢 Send a display order number (lower shows first, e.g. <code>1</code>):");
+      return;
+    case "tstedit":
+      ctx.session.tstTarget = id; ctx.session.awaiting = "admin_tst_editbody";
+      await askStep(ctx, "✏️ Send the corrected testimonial text:");
+      return;
+    case "tstdel": {
+      const kb = new InlineKeyboard()
+        .add(sbtn("🗑 Yes, delete", cb("adm", "tstdeldo", id), "danger")).row()
+        .text("◀️ Cancel", cb("adm", "tstv", id));
+      await show(ctx, "🗑 <b>Delete this testimonial?</b>\n\nThis cannot be undone. Archive it instead if you might want it later.", kb, true);
+      return;
+    }
+    case "tstdeldo": { await deleteTestimonial(id, "bot-admin"); await ctx.reply("🗑 Deleted."); return handleAdminCallback(ctx, "tst", ["1"]); }
+    case "tstexp": {
+      const json = await exportTestimonials();
+      await ctx.replyWithDocument(new InputFile(Buffer.from(json, "utf8"), "testimonials.json"), { caption: "📤 All testimonials. Re-import this file to restore them." });
+      return;
+    }
+    case "tstimp":
+      ctx.session.awaiting = "admin_tst_import";
+      await askStep(ctx, "📥 Send the <b>testimonials.json</b> file (or paste the JSON).\n\n<i>Imported entries land as PENDING, and rows without a source are skipped.</i>");
       return;
     case "revs": {
       const page = Math.max(1, Number.parseInt(id || "1", 10) || 1);
@@ -2327,6 +2464,90 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const ok = await replyToReview(rid, text.trim());
     await ctx.reply(ok ? "💬 Reply saved — it shows under that review." : "Couldn't save that reply.");
     await handleAdminCallback(ctx, "revs", ["1"]);
+    return true;
+  }
+  if (awaiting === "admin_tst_search") {
+    ctx.session.tstSearch = text.trim().slice(0, 60);
+    await handleAdminCallback(ctx, "tst", ["1"]);
+    return true;
+  }
+  if (awaiting === "admin_tst_name") {
+    ctx.session.tstDraft = { ...(ctx.session.tstDraft ?? {}), customerName: text.trim().slice(0, 120) };
+    ctx.session.awaiting = "admin_tst_body";
+    await askStep(ctx, "💬 <b>Step 2/5</b> — send the testimonial <b>text</b> exactly as the customer wrote it:");
+    return true;
+  }
+  if (awaiting === "admin_tst_body") {
+    ctx.session.tstDraft = { ...(ctx.session.tstDraft ?? {}), body: text.trim().slice(0, 2000) };
+    ctx.session.awaiting = "admin_tst_rating";
+    await askStep(ctx, "⭐ <b>Step 3/5</b> — send the rating they gave, <code>1</code>–<code>5</code>:");
+    return true;
+  }
+  if (awaiting === "admin_tst_rating") {
+    const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    ctx.session.tstDraft = { ...(ctx.session.tstDraft ?? {}), rating: Number.isFinite(n) ? Math.min(5, Math.max(1, n)) : 5 };
+    ctx.session.awaiting = "admin_tst_product";
+    await askStep(ctx, "📦 <b>Step 4/5</b> — which <b>product</b> is it about? Send the name, or <code>-</code> to skip:");
+    return true;
+  }
+  if (awaiting === "admin_tst_product") {
+    ctx.session.tstDraft = { ...(ctx.session.tstDraft ?? {}), productName: text.trim() === "-" ? null : text.trim().slice(0, 200) };
+    ctx.session.awaiting = "admin_tst_source";
+    await askStep(ctx, [
+      "📄 <b>Step 5/5</b> — where did this feedback come from?",
+      "",
+      "e.g. <code>Telegram DM 04 Aug</code>, <code>email from asif@…</code>, <code>screenshot in group</code>",
+      "",
+      "<i>Required, so every published quote is traceable to real feedback you received.</i>",
+    ].join("\n"));
+    return true;
+  }
+  if (awaiting === "admin_tst_source") {
+    const d = ctx.session.tstDraft ?? {};
+    ctx.session.tstDraft = undefined;
+    if (!d.customerName || !d.body) { await ctx.reply("Draft incomplete — start again from 💬 Testimonials."); return true; }
+    try {
+      const r = await createTestimonial(
+        { customerName: d.customerName, body: d.body, rating: d.rating ?? 5, productName: d.productName ?? null, source: text.trim(), status: "DRAFT" },
+        "bot-admin",
+      );
+      await ctx.reply(
+        [
+          "✅ <b>Saved as draft.</b>",
+          r.spamScore >= 40 ? `⚠️ Spam score <b>${r.spamScore}</b>/100 — worth a second look.` : "",
+          "",
+          "Open it to publish, pin or feature it.",
+        ].filter(Boolean).join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💬 Open it", cb("adm", "tstv", r.id)).row().text("💬 All testimonials", cb("adm", "tst", "1")) },
+      );
+    } catch (e) {
+      await ctx.reply(String(e).includes("SOURCE") ? "⚠️ A source is required." : "⚠️ Couldn't save that.");
+    }
+    return true;
+  }
+  if (awaiting === "admin_tst_order") {
+    const tid = ctx.session.tstTarget ?? ""; ctx.session.tstTarget = undefined;
+    const n = Number.parseInt(text.trim().replace(/[^0-9-]/g, ""), 10);
+    await setTestimonialOrder(tid, Number.isFinite(n) ? n : 0, "bot-admin");
+    await ctx.reply(`🔢 Order set to <b>${Number.isFinite(n) ? n : 0}</b>.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "tstv", [tid]);
+    return true;
+  }
+  if (awaiting === "admin_tst_editbody") {
+    const tid = ctx.session.tstTarget ?? ""; ctx.session.tstTarget = undefined;
+    await updateTestimonial(tid, { body: text.trim() }, "bot-admin");
+    await ctx.reply("✏️ Text updated.");
+    await handleAdminCallback(ctx, "tstv", [tid]);
+    return true;
+  }
+  if (awaiting === "admin_tst_import") {
+    try {
+      const r = await importTestimonials(text, "bot-admin");
+      await ctx.reply(`📥 Imported <b>${r.added}</b>${r.skipped ? `, skipped <b>${r.skipped}</b> (missing name/text/source)` : ""}. They are PENDING until you publish them.`, { parse_mode: "HTML" });
+    } catch {
+      await ctx.reply("⚠️ That is not valid JSON. Export a file first to see the expected shape.");
+    }
+    await handleAdminCallback(ctx, "tst", ["1"]);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

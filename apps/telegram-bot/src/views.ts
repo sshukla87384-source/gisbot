@@ -18,6 +18,7 @@ import {
   listVault,
   listReplaceableItems,
   productRating,
+  publishedTestimonials,
   storeRating,
   productRatings,
   greetName,
@@ -147,10 +148,11 @@ function timeLeft(until: Date): string {
 }
 
 export async function productView(user: BotUser, productId: string): Promise<View> {
-  const [p, rating, store] = await Promise.all([
+  const [p, rating, store, quotes] = await Promise.all([
     getProductView(productId, user.currency as Currency, user.id, "DIRECT", user.locale),
     productRating(productId),
     storeRating(),
+    publishedTestimonials({ productId, limit: 2 }),
   ]);
   // When the text was machine-translated, show the translated plain text rather
   // than the stored premium-emoji HTML (which is still the original language).
@@ -204,6 +206,14 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
     translated ? (p.description ? escapeHtml(p.description) : "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : "")),
     HR,
+    // Curated testimonials — clearly labelled, and never part of the star average.
+    ...(quotes.length > 0
+      ? ["", `💬 <b>What customers say</b>`,
+          ...quotes.flatMap((q) => [
+            `${"⭐".repeat(q.rating)} <i>“${escapeHtml(q.body).slice(0, 220)}”</i>`,
+            `— <b>${escapeHtml(q.customerName)}</b>${q.company ? `, ${escapeHtml(q.company)}` : ""} ${q.verified ? "· ✅ verified purchase" : "· <i>shared with permission</i>"}`,
+          ])]
+      : []),
   ].filter((l) => l !== "");
 
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";

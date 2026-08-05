@@ -1283,3 +1283,54 @@ model ReviewModeration {
   @@index([reviewId, createdAt])
   @@index([createdAt])
 }
+
+enum TestimonialStatus {
+  DRAFT
+  PENDING
+  PUBLISHED
+  ARCHIVED
+}
+
+/// Curated marketing testimonials. Deliberately SEPARATE from `Review`:
+/// testimonials never contribute to the public star average, which is computed
+/// only from approved in-bot reviews tied to real orders.
+model Testimonial {
+  id           String   @id @default(cuid())
+  customerName String
+  company      String?
+  avatarUrl    String? // http(s) URL or Telegram file_id
+  productId    String? // product it refers to
+  productName  String? // free text when not a catalogue product
+  rating       Int // 1-5, shown on the card only — never averaged into store stats
+  body         String   @db.Text
+  /// Where this came from (DM, email, group, screenshot…). Required for
+  /// admin-added entries so every published quote is traceable to real feedback.
+  source       String
+  /// True only when linked to a real completed order — never settable by hand.
+  verifiedOrderId String?
+  status       TestimonialStatus @default(DRAFT)
+  featured     Boolean  @default(false)
+  pinned       Boolean  @default(false)
+  sortOrder    Int      @default(0)
+  locale       String   @default("en")
+  spamScore    Int      @default(0)
+  createdBy    String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([status, pinned, sortOrder])
+  @@index([productId, status])
+  @@index([locale, status])
+}
+
+/// Append-only log of every testimonial action.
+model TestimonialLog {
+  id            String   @id @default(cuid())
+  testimonialId String
+  action        String
+  detail        String?
+  actor         String
+  createdAt     DateTime @default(now())
+
+  @@index([testimonialId, createdAt])
+}
