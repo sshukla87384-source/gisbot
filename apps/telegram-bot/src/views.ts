@@ -537,13 +537,11 @@ export async function profileView(user: BotUser): Promise<View> {
   const done = orders.items.filter((o) => o.status === "COMPLETED").length;
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
-    .add(sbtn("🔍 Search products", cb("shp", "find"), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
     .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
     .add(sbtn("🔔 My Watchlist", cb("wch", "list"), "primary"), sbtn("🔑 Find my keys", cb("lic", "find"), "primary")).row()
     .add(sbtn("🏆 My Tier", cb("prf", "tier"), "success"), sbtn("🎡 Spin & Win", cb("spn", "home"), "success")).row()
     .add(sbtn("🎯 Missions", cb("msn", "home"), "primary")).row()
-    .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
-    .add(sbtn(`💱 ${user.currency}`, cb("cur", "home"), "primary"), sbtn("🌐 Language", cb("lang", "home"), "primary")).row();
+    .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row();
   backToMenuRow(kb);
   return {
     text: [
