@@ -1387,6 +1387,9 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.menuView(user), false);
           break;
 
+        case "prf:orders":
+          await render(ctx, await views.recentOrdersView(user), true);
+          break;
         case "prf:view":
           await render(ctx, await views.profileView(user), true);
           break;

@@ -470,8 +470,8 @@ export async function profileView(user: BotUser): Promise<View> {
   const done = orders.items.filter((o) => o.status === "COMPLETED").length;
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
-    .add(sbtn("📦 My orders", cb("ord", "list", 1), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
-    .add(sbtn("🔑 My keys", cb("lic", "list", 1), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
+    .add(sbtn("🔍 Search products", cb("shp", "find"), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
+    .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
     .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
     .add(sbtn(`💱 ${user.currency}`, cb("cur", "home"), "primary"), sbtn("🌐 Language", cb("lang", "home"), "primary")).row();
   backToMenuRow(kb);
@@ -498,11 +498,11 @@ export async function profileView(user: BotUser): Promise<View> {
       `📅 Member since ${user.createdAt.toISOString().slice(0, 10)}`,
       ...(orders.items.length > 0
         ? ["", HR, `📦 <b>Recent orders</b>`,
-            ...orders.items.slice(0, 3).map((o) => {
+            ...orders.items.slice(0, 5).map((o) => {
               const icon = o.status === "COMPLETED" ? "✅" : o.status === "PENDING_PAYMENT" ? "⌛" : o.status === "CANCELLED" || o.status === "EXPIRED" ? "🚫" : "🕐";
               return `${icon} <b>${escapeHtml(o.orderNumber)}</b> · ${fmt(o.totalPaidMinor, o.currency)}`;
             }),
-            "<i>Tap 📦 My orders for all of them and your keys.</i>"]
+            "<i>Tap 📦 Recent orders to open one and get your keys.</i>"]
         : []),
     ].filter((l) => l !== "").join("\n"),
     kb,
@@ -626,6 +626,35 @@ export async function apiBalanceView(user: BotUser): Promise<View> {
       "",
       "This is what the API spends when you place an order (<code>POST /orders</code>). Top up via ➕ Top up.",
     ].join("\n"),
+    kb,
+  };
+}
+
+/** Last 5 orders — open one for its keys, or start a replacement. */
+export async function recentOrdersView(user: BotUser): Promise<View> {
+  const res = await listOrders(user.id, 1);
+  const items = res.items.slice(0, 5);
+  const icon = (st: string): string =>
+    st === "COMPLETED" ? "✅" : st === "PENDING_PAYMENT" ? "⌛" : st === "CANCELLED" || st === "EXPIRED" ? "🚫" : "🕐";
+  const kb = new InlineKeyboard();
+  for (const o of items) {
+    kb.text(`${icon(o.status)} ${o.orderNumber} · ${fmt(o.totalPaidMinor, o.currency)}`, cb("ord", "view", o.id)).row();
+  }
+  if (res.pages > 1) kb.add(sbtn("🗂 All orders", cb("ord", "list", 1), "primary")).row();
+  kb.add(sbtn("🔄 Request a replacement", cb("rep", "home"), "success")).row();
+  navRow(kb, cb("prf", "view"));
+  return {
+    text: items.length > 0
+      ? [
+          header(`📦 ${bold("Recent orders")}`),
+          "",
+          "Your last 5 orders. Tap one to see or re-copy its keys.",
+          "",
+          "✅ delivered · 🕐 in progress · ⌛ awaiting payment · 🚫 cancelled",
+          "",
+          "<i>Something not working? Tap 🔄 Request a replacement.</i>",
+        ].join("\n")
+      : `${header(`📦 ${bold("Recent orders")}`)}\n\nNo orders yet — head to 🛍 Shop to make your first purchase.`,
     kb,
   };
 }
