@@ -180,7 +180,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       ? (p.warrantyDays
           ? `🛡 <b>${p.warrantyDays}-day replacement warranty</b> — faulty item? we replace it free`
           : "🛡 <b>Replacement warranty included</b> — faulty item? we replace it free")
-      : "",
+      : "🏷 <b>As-is deal</b> — no replacement warranty, priced accordingly",
     p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
     translated ? (p.description ? escapeHtml(p.description) : "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : "")),
     HR,

@@ -413,7 +413,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const deliv = p.supplierId ? "🤖 Auto (supplier)" : p.fulfillmentMode === "AUTOMATIC" ? "⚡ Auto (instant)" : "🕐 Manual";
-  const war = p.warranty ? ` · 🛡 Warranty${p.warrantyDays ? ` ${p.warrantyDays}d` : ""}` : "";
+  const war = p.warranty ? ` · 🛡 Warranty${p.warrantyDays ? ` ${p.warrantyDays}d` : " (no limit)"}` : " · 🏷 As-is (no warranty)";
   const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible</b>" : "🙈 <b>Hidden</b>"} · ${p.status} · ${deliv}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}${war}`;
   await show(ctx, text, kb, true);
 }
