@@ -16,7 +16,7 @@ RUN set -eux; \
       (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
        echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories && \
        apk update) || true; \
-    (apk add --no-cache openssl || true); \
+    for i in 1 2 3; do apk add --no-cache openssl libssl3 && break || sleep 5; done || true; \
     npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /app
 COPY . .
@@ -27,6 +27,7 @@ RUN pnpm --filter @gis/admin-panel build
 
 FROM node:${NODE_VERSION}-alpine AS runner
 RUN for i in 1 2 3; do apk add --no-cache curl && break || sleep 5; done || true
+ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 WORKDIR /app
 COPY --from=build --chown=node:node /app/apps/admin-panel/.next/standalone ./

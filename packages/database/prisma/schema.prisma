@@ -3,6 +3,10 @@
 
 generator client {
   provider = "prisma-client-js"
+  // node:*-alpine ships OpenSSL 3.x (libssl3). Without this, Prisma guesses
+  // openssl-1.1.x, fails to load its engine and reports
+  // "Could not parse schema engine response ... Error load...".
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

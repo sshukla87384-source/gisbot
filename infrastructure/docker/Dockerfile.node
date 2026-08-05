@@ -20,8 +20,9 @@ RUN set -eux; \
       (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
        echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories && \
        apk update) || true; \
-    (apk add --no-cache openssl || true); \
+    for i in 1 2 3; do apk add --no-cache openssl libssl3 && break || sleep 5; done || true; \
     npm install -g pnpm@${PNPM_VERSION}
+ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
 WORKDIR /app
 COPY . .
 RUN pnpm install --no-frozen-lockfile
@@ -39,8 +40,9 @@ RUN set -eux; \
       (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
        echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories && \
        apk update) || true; \
-    (apk add --no-cache openssl curl || apk add --no-cache curl || true); \
+    for i in 1 2 3; do apk add --no-cache openssl libssl3 curl && break || sleep 5; done || apk add --no-cache curl || true; \
     npm install -g pnpm@${PNPM_VERSION}
+ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
 ENV NODE_ENV=production
 ENV APP_FILTER=${APP}
 WORKDIR /app
