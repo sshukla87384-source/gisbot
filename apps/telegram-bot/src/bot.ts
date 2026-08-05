@@ -28,6 +28,8 @@ import {
   getWallet,
   convertMinor,
   getCartView,
+  tierOf,
+  getSpinConfig,
   watchProduct,
   listWatches,
   reorderLines,
@@ -934,6 +936,23 @@ export function createBot(): Bot<Ctx> {
               { parse_mode: "HTML" },
             );
           }
+          // Discovery: after paying, show tier progress and offer the spin.
+          try {
+            const [ts, scfg] = await Promise.all([tierOf(user.id), getSpinConfig()]);
+            const rowKb = new InlineKeyboard();
+            rowKb.text("🏆 My Tier", cb("prf", "tier"));
+            if (scfg.enabled) rowKb.text("🎡 Spin & Win", cb("spn", "home"));
+            await ctx.reply(
+              [
+                `🏆 <b>${ts.tier.name} member</b> — ${escapeHtml(ts.tier.perk)}`,
+                ts.next
+                  ? `📈 Spend <b>${fmt(ts.toNextMinor, ts.currency)}</b> more to reach <b>${ts.next.name}</b>`
+                  : "👑 You're at the top tier — thank you!",
+                scfg.enabled ? "\n🎡 <b>Spin for a challenge</b> and earn wallet credit." : "",
+              ].filter(Boolean).join("\n"),
+              { parse_mode: "HTML", reply_markup: rowKb },
+            );
+          } catch { /* never block a delivery over this */ }
           // One tidy closing message: instructions + referral, not three separate ones.
           const closing = [
             await deliveryInstructionsMessage(),
