@@ -25,6 +25,7 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  addStock,
   saveReview,
   addReviewComment,
   logError,
@@ -303,6 +304,38 @@ export function createBot(): Bot<Ctx> {
   }
 
   // ── Admin sends a photo to set a product image ──
+  // ── Admin uploads stock as a .txt file (bulk keys / accounts) ──
+  bot.on("message:document", async (ctx) => {
+    if (ctx.session.awaiting !== "admin_addkeys") return;
+    if (!(await isBotAdmin(ctx.from?.id))) return;
+    const doc = ctx.message.document;
+    const variantId = ctx.session.admVariantId ?? "";
+    ctx.session.awaiting = null;
+    ctx.session.admVariantId = undefined;
+    if (!variantId) { await ctx.reply("That product expired — open it again and tap 🔑 Add stock keys."); return; }
+    if ((doc.file_size ?? 0) > 2_000_000) { await ctx.reply("⚠️ That file is too large (max 2 MB). Split it and upload again."); return; }
+    try {
+      await ctx.reply("📄 Reading your file…");
+      const file = await ctx.api.getFile(doc.file_id);
+      const url = `https://api.telegram.org/file/bot${loadConfig().BOT_TOKEN}/${file.file_path}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      if (!res.ok) { await ctx.reply("❌ Couldn't download that file from Telegram. Try again."); return; }
+      const body = await res.text();
+      const lines = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (lines.length === 0) { await ctx.reply("❌ That file is empty."); return; }
+      if (lines.length > 5000) { await ctx.reply(`⚠️ ${lines.length} lines is too many at once — split into files of 5000 or fewer.`); return; }
+      const r = await addStock(variantId, lines);
+      const unit = r.type === "DIGITAL_ACCOUNT" ? "account" : "key";
+      const bits = [`✅ Imported from <b>${escapeHtml(doc.file_name ?? "file")}</b>`, "", `📥 Read <b>${lines.length}</b> line(s)`, `➕ Added <b>${r.added}</b> ${unit}(s)`];
+      if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered`);
+      if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> (duplicate or unreadable)`);
+      await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
+    } catch (e) {
+      void logError("stockUpload", e, { variantId });
+      await ctx.reply("❌ Couldn't read that file. Send a plain <b>.txt</b> with one item per line.", { parse_mode: "HTML" });
+    }
+  });
+
   bot.on("message:photo", async (ctx) => {
     // Customer submitting a replacement screenshot.
     if (ctx.session.awaiting === "replace_proof") {

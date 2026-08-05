@@ -1589,6 +1589,8 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "• Accounts: <code>id|password</code> per line",
         "• With 2FA: <code>id|password|2fa_secret</code>",
         "",
+        "📄 <b>Or upload a .txt file</b> — one item per line, up to 5000. Just send the file here.",
+        "",
         "♻️ <b>Already delivered something (e.g. a test order)?</b> Just paste it again — it goes back on sale instead of creating a duplicate.",
       ].join("\\n"), { parse_mode: "HTML" });
       return;
