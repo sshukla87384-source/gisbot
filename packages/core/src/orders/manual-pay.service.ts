@@ -1,9 +1,10 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
-import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
+import { CoreError, cb, encryptSecret, decryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
+import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
@@ -486,6 +487,11 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
     include: { order: { include: { user: { select: { telegramId: true } } } }, variant: { include: { product: true } } },
   });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
+  // Decrypt what was delivered previously, so the replacement message can show it.
+  let oldPayload: { kind?: string; key?: string; username?: string; password?: string; twofa?: string } | null = null;
+  if (item.deliveryPayloadEncrypted) {
+    try { oldPayload = JSON.parse(decryptSecret(item.deliveryPayloadEncrypted, masterKey)); } catch { oldPayload = null; }
+  }
   const type = item.variant.product.type;
   if (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT") return { ok: false, reason: "NOT_AUTOMATIC" };
 
@@ -517,10 +523,29 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
       data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
     });
     if (item.order.user.telegramId !== null) {
+      // Show what they HAD alongside what they now have, so there is no doubt
+      // which value is dead and which one to use.
+      const oldLines: string[] = [];
+      if (oldPayload) {
+        const fixed = repairAccountPair(oldPayload.username, oldPayload.password);
+        const oId = fixed?.id ?? oldPayload.username;
+        const oPw = fixed?.pw ?? oldPayload.password;
+        const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        if (oldPayload.key) oldLines.push(`🔑 <s>${esc(oldPayload.key.split(/\r?\n/)[0] ?? "")}</s>`);
+        if (oId) oldLines.push(`👤 <s>${esc(oId)}</s>`);
+        if (oPw) oldLines.push(`🔐 <s>${esc(oPw)}</s>`);
+      }
+      const header = [
+        "🔄 <b>Replacement delivered</b>",
+        "",
+        ...(oldLines.length
+          ? ["❌ <b>Old — no longer works:</b>", ...oldLines, "", "✅ <b>Use this new one instead:</b>", ""]
+          : []),
+      ].join("\n");
       await enqueueTelegramMessage(
         item.order.user.telegramId,
-        `🔄 <b>Replacement delivered</b>\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
-        { buttons: DELIVERY_BUTTONS },
+        `${header}\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
+        { buttons: deliveryButtons(credsOf(payload)) },
       );
     }
     return { ok: true };
