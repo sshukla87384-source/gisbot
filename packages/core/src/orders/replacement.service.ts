@@ -34,8 +34,10 @@ export async function listReplaceableItems(userId: string, limit = 20): Promise<
     if (!p.warranty) { eligible = false; reason = "No warranty on this product"; }
     else if (r.replacements.some((x) => x.status === "PENDING")) { eligible = false; reason = "A request is already under review"; }
     else if (r.replacements.some((x) => x.status === "APPROVED")) { eligible = false; reason = "Already replaced once"; }
-    else if (p.warrantyDays && r.fulfilledAt) {
-      const ageDays = (Date.now() - r.fulfilledAt.getTime()) / 86_400_000;
+    else if (p.warrantyDays && (r.warrantyStartAt ?? r.fulfilledAt)) {
+      // Counts from the FIRST delivery, so a replacement does not extend cover.
+      const start = (r.warrantyStartAt ?? r.fulfilledAt) as Date;
+      const ageDays = (Date.now() - start.getTime()) / 86_400_000;
       if (ageDays > p.warrantyDays) { eligible = false; reason = `Warranty expired (${p.warrantyDays}d)`; }
     }
     return { orderItemId: r.id, label: `${r.productNameSnap}${vn}`, orderNumber: r.order.orderNumber, warranty: p.warranty, eligible, reason };
@@ -59,8 +61,9 @@ export async function getReplaceableItem(userId: string, orderItemId: string): P
   if (!p.warranty) { eligible = false; reason = "No warranty on this product"; }
   else if (r.replacements.some((x) => x.status === "PENDING")) { eligible = false; reason = "A request is already under review"; }
   else if (r.replacements.some((x) => x.status === "APPROVED")) { eligible = false; reason = "Already replaced once"; }
-  else if (p.warrantyDays && r.fulfilledAt) {
-    const ageDays = (Date.now() - r.fulfilledAt.getTime()) / 86_400_000;
+  else if (p.warrantyDays && (r.warrantyStartAt ?? r.fulfilledAt)) {
+    const start = (r.warrantyStartAt ?? r.fulfilledAt) as Date;
+    const ageDays = (Date.now() - start.getTime()) / 86_400_000;
     if (ageDays > p.warrantyDays) { eligible = false; reason = `Warranty expired (${p.warrantyDays}d)`; }
   }
   return { orderItemId: r.id, label: `${r.productNameSnap}${vn}`, orderNumber: r.order.orderNumber, warranty: p.warranty, eligible, reason };

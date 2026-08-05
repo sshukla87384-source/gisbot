@@ -794,6 +794,14 @@ export function currencyView(user: BotUser): View {
 
 export async function orderDetailView(user: BotUser, orderId: string): Promise<View> {
   const items = await listOrderItems(user.id, orderId);
+  // Explain a replacement-only order rather than leaving a mystery 0.00 entry.
+  const meta = await prisma.order.findFirst({
+    where: { id: orderId, userId: user.id },
+    select: { replacementOfOrderId: true },
+  }).catch(() => null);
+  const origNumber = meta?.replacementOfOrderId
+    ? (await prisma.order.findUnique({ where: { id: meta.replacementOfOrderId }, select: { orderNumber: true } }).catch(() => null))?.orderNumber ?? null
+    : null;
   const kb = new InlineKeyboard();
   if (items.length === 0) {
     kb.text("◀️ Orders", cb("ord", "list", 1));
@@ -809,7 +817,16 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
     if (g) g.count++;
     else groups.set(label, { name: label, count: 1, firstId: it.orderItemId });
   }
-  const lines = ["📦 <b>Order items</b>", ""];
+  const lines = origNumber
+    ? [
+        "🔄 <b>Replacement issued</b>",
+        `This order holds the replacement for <b>${escapeHtml(origNumber)}</b>.`,
+        "🛡 <i>Your warranty still runs from the original purchase date — a replacement does not extend it.</i>",
+        "",
+        "📦 <b>Replacement item</b>",
+        "",
+      ]
+    : ["📦 <b>Order items</b>", ""];
   for (const g of groups.values()) lines.push(`🔑 ${escapeHtml(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`);
   if (items.length > 10) {
     kb.add(sbtn(`📄 Get all ${items.length} keys`, cb("ord", "reveal", orderId), "success")).row();

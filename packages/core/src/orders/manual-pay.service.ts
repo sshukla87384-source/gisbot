@@ -518,10 +518,60 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
       return { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
     });
 
+    // Keep the ORIGINAL delivery date as the warranty start — a replacement must
+    // not hand out a fresh window. 5-day warranty replaced on day 4 leaves 1 day.
+    const warrantyStart = item.warrantyStartAt ?? item.fulfilledAt ?? new Date();
     await prisma.orderItem.update({
       where: { id: item.id },
-      data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+      data: {
+        fulfilledAt: new Date(),
+        warrantyStartAt: warrantyStart,
+        deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+      },
     });
+
+    // A separate order record for the replacement, with its own number, linked
+    // back to the original so opening it explains what it is.
+    let replacementNumber: string | null = null;
+    try {
+      const rep = await prisma.$transaction(async (tx) => {
+        const num = await nextOrderNumber(tx);
+        const o = await tx.order.create({
+          data: {
+            orderNumber: num,
+            userId: item.order.userId,
+            status: "COMPLETED",
+            currency: item.order.currency,
+            subtotalMinor: 0,
+            discountMinor: 0,
+            totalMinor: 0,
+            walletUsedMinor: 0,
+            paidAt: new Date(),
+            completedAt: new Date(),
+            replacementOfOrderId: item.orderId,
+          },
+        });
+        await tx.orderItem.create({
+          data: {
+            orderId: o.id,
+            variantId: item.variantId,
+            productNameSnap: item.productNameSnap,
+            variantNameSnap: item.variantNameSnap,
+            quantity: 1,
+            unitPriceMinor: 0,
+            totalMinor: 0,
+            fulfillmentMode: item.fulfillmentMode,
+            fulfilledAt: new Date(),
+            warrantyStartAt: warrantyStart,
+            deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+          },
+        });
+        return num;
+      });
+      replacementNumber = rep;
+    } catch {
+      // The replacement itself already succeeded — a bookkeeping row is optional.
+    }
     if (item.order.user.telegramId !== null) {
       // Show what they HAD alongside what they now have, so there is no doubt
       // which value is dead and which one to use.
@@ -539,8 +589,9 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
         "🔄 <b>Replacement delivered</b>",
         "",
         ...(oldLines.length
-          ? ["❌ <b>Old — no longer works:</b>", ...oldLines, "", "✅ <b>Use this new one instead:</b>", ""]
+          ? ["❌ <b>Previous</b> — no longer works:", ...oldLines, "", "✅ <b>Replacement</b> — use this one:", ""]
           : []),
+        ...(replacementNumber ? [`🧾 Saved as order <b>${replacementNumber}</b>`, ""] : []),
       ].join("\n");
       await enqueueTelegramMessage(
         item.order.user.telegramId,
