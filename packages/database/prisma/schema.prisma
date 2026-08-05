@@ -496,6 +496,7 @@ model Product {
   buttonStyle     String? // button colour: success | primary | danger (list + buy)
   priceLocked     Boolean @default(false) // admin set a custom price — sync won't overwrite it
   reusableSecretEnc String? // one value delivered to EVERY buyer (shared redemption link) — AES-GCM
+  reusableStock     Int?     // how many times it may still be sold; null = unlimited
   warranty        Boolean @default(false) // does this product come with a replacement warranty?
   warrantyDays    Int?    // replacement window in days (null = no time limit while warranty is on)
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)

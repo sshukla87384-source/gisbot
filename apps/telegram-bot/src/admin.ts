@@ -17,6 +17,7 @@ import {
   setProductPasswordChange,
   setProductWarranty,
   setProductReusableSecret,
+  setProductReusableStock,
   getProductReusableSecret,
   setTranslateCreds,
   getTranslateProvider,
@@ -405,6 +406,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.add(sbtn(`♾ Same link for everyone: ${p.reusable ? "✅ ON" : "🚫 OFF"}`, cb("adm", "preuse", p.id), p.reusable ? "success" : "primary")).row();
+  if (p.reusable) kb.text(`🔢 Quantity: ${p.reusableStock ?? "∞ unlimited"}`, cb("adm", "preuseqty", p.id)).row();
   kb.text("🎨 Button name & colour", cb("adm", "pbtn", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
@@ -1206,6 +1208,18 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "While this is set the product is <b>never out of stock</b> and no keys are consumed.",
         cur ? `\nCurrently: <code>${escapeHtml(cur)}</code>` : "",
         "\nSend <code>-</code> to turn it off and go back to normal stock.",
+      ].join("\n"));
+      return;
+    }
+    case "preuseqty": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_reuseqty";
+      await askStep(ctx, [
+        "🔢 <b>How many times can this link be sold?</b>",
+        "",
+        "Send a number (e.g. <code>50</code>) — it counts down with each sale and the product goes out of stock at 0.",
+        "",
+        "Send <code>-</code> for <b>unlimited</b> (never runs out).",
       ].join("\n"));
       return;
     }
@@ -2217,6 +2231,19 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       { parse_mode: "HTML" },
     );
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_p_reuseqty") {
+    const pid = ctx.session.admProductId ?? "";
+    if (text.trim() === "-") {
+      await setProductReusableStock(pid, null);
+      await ctx.reply("♾ Quantity set to <b>unlimited</b> — it will never run out.", { parse_mode: "HTML" });
+    } else {
+      const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+      await setProductReusableStock(pid, Number.isFinite(n) ? n : 0);
+      await ctx.reply(`🔢 Quantity set to <b>${Number.isFinite(n) ? n : 0}</b>. It counts down with each sale.`, { parse_mode: "HTML" });
+    }
+    await productView(ctx, pid);
     return true;
   }
   if (awaiting === "admin_p_reuse") {

@@ -73,6 +73,14 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
           // A reusable product (e.g. one shared redemption link) delivers the
           // SAME value to every buyer and never consumes inventory.
           if (line.reusableSecret) {
+            // Respect a sellable quantity when the admin set one.
+            if (line.reusableStock !== null && line.reusableStock !== undefined) {
+              const dec = await tx.product.updateMany({
+                where: { id: line.productId, reusableStock: { gte: 1 } },
+                data: { reusableStock: { decrement: 1 } },
+              });
+              if (dec.count === 0) throw new CoreError("OUT_OF_STOCK", `${line.productName} is sold out`);
+            }
             const payload = { kind: "LICENSE_KEY", key: line.reusableSecret };
             await tx.orderItem.update({
               where: { id: item.id },

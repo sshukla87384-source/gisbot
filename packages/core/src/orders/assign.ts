@@ -25,8 +25,10 @@ export interface PricedLine {
   unitPriceMinor: number;
   fulfillmentMode: "AUTOMATIC" | "MANUAL";
   allowPwChange: boolean;
-  /** When set, EVERY buyer gets this same value and nothing is consumed. */
+  /** When set, EVERY buyer gets this same value. */
   reusableSecret: string | null;
+  /** Remaining sellable quantity for a reusable product; null = unlimited. */
+  reusableStock: number | null;
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
@@ -81,6 +83,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       activationGuide: v.product.activationGuide,
       allowPwChange: v.product.allowPasswordChange,
       reusableSecret: v.product.reusableSecretEnc ? decryptSecret(v.product.reusableSecretEnc, masterKey) : null,
+      reusableStock: v.product.reusableStock,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
       unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),
