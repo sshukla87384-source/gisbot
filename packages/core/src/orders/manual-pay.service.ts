@@ -3,6 +3,7 @@ import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
+import { scheduleFollowup } from "../followup.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
@@ -534,6 +535,8 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
 
 /** Fire on EVERY paid order: auto-fulfil supplier items, then notify admins with a full summary. */
 export async function notifyOrderToAdmins(orderId: string, method = "order"): Promise<void> {
+  // After-sale follow-up (review request / promo), if the admin enabled one.
+  void scheduleFollowup(orderId, loadConfig().STORE_NAME).catch(() => undefined);
   try {
     const { autoFulfillSupplierItems } = await import("../supplier.service.js");
     await autoFulfillSupplierItems(orderId);

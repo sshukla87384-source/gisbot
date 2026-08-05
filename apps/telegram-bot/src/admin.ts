@@ -103,6 +103,9 @@ import {
   announcePriceChange,
   learnSupplierDocs,
   normalizeSupplierBase,
+  getFollowupConfig,
+  setFollowupConfig,
+  renderFollowup,
   readLogs,
   clearLogs,
   logCounts,
@@ -256,6 +259,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
+      [["💬 After-sale message", cb("adm", "fup"), "success"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
@@ -1215,6 +1219,55 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_reject_note";
       await askStep(ctx, "❌ Send a short <b>reason</b> the customer will see, or <code>-</code> to decline without a note:");
       return;
+    case "fup": {
+      const c = await getFollowupConfig();
+      const kb = new InlineKeyboard()
+        .add(sbtn(c.enabled ? "✅ ON — turn off" : "🚫 OFF — turn on", cb("adm", "fuptog"), c.enabled ? "success" : "danger")).row()
+        .text("✏️ Message", cb("adm", "fuptext")).text("⏱ Delay", cb("adm", "fupdelay")).row()
+        .text("🔗 Button (label + link)", cb("adm", "fupbtn")).row()
+        .add(sbtn("📤 Send me a preview", cb("adm", "fuptest"), "primary")).row()
+        .text("◀️ Back", cb("adm", "m_content"));
+      await show(ctx, [
+        "💬 <b>After-sale message</b>",
+        `Status: <b>${c.enabled ? "ON" : "OFF"}</b> · sent <b>${c.delayMins} min</b> after delivery`,
+        "",
+        "Sent automatically once an order is delivered — ask for a review, or promote your website/channel.",
+        "",
+        "<b>Placeholders:</b> <code>{name}</code> <code>{order}</code> <code>{product}</code> <code>{store}</code>",
+        "",
+        "<b>Current message:</b>",
+        c.text,
+        c.btnText && c.btnUrl ? `\n🔗 Button: <b>${escapeHtml(c.btnText)}</b> → ${escapeHtml(c.btnUrl)}` : "\n<i>No button set.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "fuptog": {
+      const c = await getFollowupConfig();
+      const n = await setFollowupConfig({ enabled: !c.enabled });
+      await ctx.reply(n.enabled ? `✅ After-sale message is ON — sent ${n.delayMins} min after each delivery.` : "🚫 After-sale message is OFF.");
+      return handleAdminCallback(ctx, "fup", []);
+    }
+    case "fuptext":
+      ctx.session.awaiting = "admin_fup_text";
+      await askStep(ctx, "✏️ Send the <b>after-sale message</b>.\n\nUse <code>{name}</code> <code>{order}</code> <code>{product}</code> <code>{store}</code> — premium emoji OK.");
+      return;
+    case "fupdelay":
+      ctx.session.awaiting = "admin_fup_delay";
+      await askStep(ctx, "⏱ How many <b>minutes</b> after delivery should it be sent? (e.g. <code>60</code>, or <code>0</code> for immediately)");
+      return;
+    case "fupbtn":
+      ctx.session.awaiting = "admin_fup_btn";
+      await askStep(ctx, "🔗 Send the button as <code>Label | https://your-link</code>\n\nExample: <code>⭐ Leave a review | https://t.me/yourchannel</code>\n\nSend <code>-</code> to remove the button.");
+      return;
+    case "fuptest": {
+      const c = await getFollowupConfig();
+      const text = renderFollowup(c.text, { name: ctx.from?.first_name ?? "there", order: "GIS-2026-000128", product: "Office 365 100GB", store: loadConfig().STORE_NAME });
+      const kb2 = c.btnText && c.btnUrl ? new InlineKeyboard().url(c.btnText, c.btnUrl) : undefined;
+      await ctx.reply(text, { parse_mode: "HTML", ...(kb2 ? { reply_markup: kb2 } : {}) }).catch(async () => {
+        await ctx.reply("⚠️ That message failed to send — check the HTML tags and the button link (must start with https://).");
+      });
+      return;
+    }
     case "trcfg": {
       const cur = await getTranslateProvider();
       const kb = new InlineKeyboard()
@@ -2074,6 +2127,36 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const r = await learnSupplierDocs(sid, text.trim());
     await ctx.reply(r.detail, { parse_mode: "HTML" });
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_fup_text") {
+    await setFollowupConfig({ text: composeBroadcastHtml(ctx) });
+    await ctx.reply("✅ Message saved. Tap 📤 Send me a preview to see it.");
+    await handleAdminCallback(ctx, "fup", []);
+    return true;
+  }
+  if (awaiting === "admin_fup_delay") {
+    const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    await setFollowupConfig({ delayMins: Number.isFinite(n) ? Math.min(n, 10080) : 60 });
+    await ctx.reply(`⏱ Delay set to <b>${Number.isFinite(n) ? Math.min(n, 10080) : 60}</b> minutes.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "fup", []);
+    return true;
+  }
+  if (awaiting === "admin_fup_btn") {
+    if (text.trim() === "-") {
+      await setFollowupConfig({ btnText: null, btnUrl: null });
+      await ctx.reply("🔗 Button removed.");
+    } else {
+      const [label, url] = text.split("|").map((x) => x.trim());
+      if (!label || !url || !/^https?:\/\//i.test(url)) {
+        ctx.session.awaiting = "admin_fup_btn";
+        await askStep(ctx, "⚠️ Use <code>Label | https://link</code> — the link must start with <code>https://</code>.");
+        return true;
+      }
+      await setFollowupConfig({ btnText: label.slice(0, 40), btnUrl: url });
+      await ctx.reply(`🔗 Button set: <b>${escapeHtml(label)}</b> → ${escapeHtml(url)}`, { parse_mode: "HTML" });
+    }
+    await handleAdminCallback(ctx, "fup", []);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

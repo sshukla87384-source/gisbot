@@ -38,6 +38,8 @@ export interface OutboxOptions {
   photo?: string;
   buttons?: OutboxButton[];
   pin?: boolean;
+  /** Send later (ms). Used by the after-sale follow-up. */
+  delayMs?: number;
 }
 export interface EmailJob {
   to: string;
@@ -98,7 +100,7 @@ export async function enqueueTelegramMessage(
     ...(opts.photo ? { photo: opts.photo } : {}),
     ...(opts.buttons && opts.buttons.length > 0 ? { buttons: opts.buttons } : {}),
     ...(opts.pin ? { pin: true } : {}),
-  } satisfies OutboxJob);
+  } satisfies OutboxJob, opts.delayMs && opts.delayMs > 0 ? { delay: Math.min(opts.delayMs, 7 * 24 * 3600_000) } : undefined);
 }
 
 /** Send a text file (e.g. a large order's keys) as a Telegram document, with a caption. */
