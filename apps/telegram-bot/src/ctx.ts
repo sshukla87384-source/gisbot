@@ -99,6 +99,9 @@ export interface SessionData {
     | "admin_spn_days"
     | "admin_fx_rate"
     | "admin_fx_surcharge"
+    | "admin_tool_adjust"
+    | "admin_tool_key"
+    | "admin_tool_risk"
     | "admin_tr_key"
     | "admin_tr_url"
     | null;
@@ -125,6 +128,7 @@ export interface SessionData {
   tstFilter?: "DRAFT" | "PENDING" | "PUBLISHED" | "ARCHIVED" | "ALL";
   tstSearch?: string;
   tstTarget?: string;
+  toolPct?: number;
   giftUser?: string;
   giftTitle?: string;
   tstDraft?: { customerName?: string; body?: string; rating?: number; productName?: string | null };

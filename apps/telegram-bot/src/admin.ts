@@ -122,6 +122,13 @@ import {
   moderationLog,
   REJECT_REASONS,
   topWatched,
+  rederiveInrPrices,
+  bulkAdjustPrices,
+  findOrderByKey,
+  stockHealth,
+  customerRisk,
+  exportOrdersCsv,
+  pricingSummary,
   getTiers,
   setTiers,
   listGifts,
@@ -256,7 +263,7 @@ function panelKeyboard(): InlineKeyboard {
     .add(sbtn("🧾 Orders", cb("adm", "m_orders"), "primary"), sbtn("📊 Stats", cb("adm", "m_stats"), "primary")).row()
     .add(sbtn("💳 Payments & APIs", cb("adm", "m_pay"), "primary")).row()
     .add(sbtn("📣 Marketing", cb("adm", "m_mkt"), "primary"), sbtn("🎨 Content & Style", cb("adm", "m_content"), "primary")).row()
-    .add(sbtn("🔐 Security", cb("adm", "m_sec"), "primary")).row()
+    .add(sbtn("🧰 Tools", cb("adm", "m_tools"), "primary"), sbtn("🔐 Security", cb("adm", "m_sec"), "primary")).row()
     .add(sbtn("↻ Refresh", cb("adm", "home"), "success")).row();
 }
 
@@ -303,6 +310,12 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
       [["💬 Testimonials", cb("adm", "tst"), "primary"]],
+    ] },
+    m_tools: { title: "🧰 <b>Tools</b>", subtitle: "Pricing, tracing and health checks", rows: [
+      [["🔄 Re-derive INR prices", cb("adm", "tlprice"), "success"], ["📈 Bulk ±%", cb("adm", "tladj"), "primary"]],
+      [["🔍 Find order by key", cb("adm", "tlkey"), "primary"]],
+      [["📊 Stock health", cb("adm", "tlstock"), "primary"], ["🛡 Customer risk", cb("adm", "tlrisk"), "primary"]],
+      [["📄 Export orders (CSV)", cb("adm", "tlcsv"), "primary"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
@@ -968,7 +981,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
-    case "m_prod": case "m_orders": case "m_stats": case "m_pay": case "m_mkt": case "m_content": case "m_sec":
+    case "m_prod": case "m_orders": case "m_stats": case "m_pay": case "m_mkt": case "m_content": case "m_sec": case "m_tools":
       await showSubmenu(ctx, `m_${action.slice(2)}`);
       return;
     case "ssale":
@@ -1789,6 +1802,78 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       if (!id) return;
       await dmUser(id, "❌ <b>We could not verify that UPI payment.</b>\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => undefined);
       await ctx.reply("❌ Rejected — the customer has been told.");
+      return;
+    }
+    case "tlprice": {
+      const r = await rederiveInrPrices(true);
+      const ps = pricingSummary();
+      if (r.changes.length === 0) {
+        await show(ctx, `🔄 <b>Re-derive INR prices</b>\n\n✅ Every INR price already matches the current rate (${ps.rate}) and surcharge (${ps.surchargePct.toFixed(1)}%). Nothing to change.`, new InlineKeyboard().text("◀️ Back", cb("adm", "m_tools")), true);
+        return;
+      }
+      const kb = new InlineKeyboard()
+        .add(sbtn(`✅ Apply to ${r.changes.length} price(s)`, cb("adm", "tlpricego"), "success")).row()
+        .text("✖️ Cancel", cb("adm", "m_tools"));
+      await show(ctx, [
+        "🔄 <b>Re-derive INR prices</b>",
+        `Rate <b>${ps.rate}</b> INR = \$1 · surcharge <b>${ps.surchargePct.toFixed(1)}%</b>`,
+        "",
+        `<b>${r.changes.length}</b> price(s) would change:`,
+        "",
+        ...r.changes.slice(0, 12).map((c) => `• ${escapeHtml(c.name).slice(0, 24)}: ${c.oldInrMinor === null ? "—" : `₹${(c.oldInrMinor / 100).toFixed(2)}`} → <b>₹${(c.newInrMinor / 100).toFixed(2)}</b>  <i>(\$${(c.usdMinor / 100).toFixed(2)})</i>`),
+        r.changes.length > 12 ? `<i>…and ${r.changes.length - 12} more</i>` : "",
+        "",
+        "<i>Nothing is saved until you tap Apply.</i>",
+      ].filter((l) => l !== "").join("\n").slice(0, 3900), kb, true);
+      return;
+    }
+    case "tlpricego": {
+      const r = await rederiveInrPrices(false);
+      await ctx.reply(`✅ Updated <b>${r.applied}</b> INR price(s) at the current rate and surcharge.`, { parse_mode: "HTML" });
+      return showSubmenu(ctx, "m_tools").then(() => undefined);
+    }
+    case "tladj":
+      ctx.session.awaiting = "admin_tool_adjust";
+      await askStep(ctx, "📈 Send a percentage to apply to <b>every</b> price.\n\n<code>10</code> = +10%, <code>-5</code> = −5%.\n\n<i>You'll see a preview before anything is saved.</i>");
+      return;
+    case "tladjgo": {
+      const pct = ctx.session.toolPct ?? 0;
+      ctx.session.toolPct = undefined;
+      const r = await bulkAdjustPrices(pct, false);
+      await ctx.reply(`✅ Adjusted <b>${r.changed}</b> price(s) by <b>${pct > 0 ? "+" : ""}${pct}%</b>.`, { parse_mode: "HTML" });
+      return showSubmenu(ctx, "m_tools").then(() => undefined);
+    }
+    case "tlkey":
+      ctx.session.awaiting = "admin_tool_key";
+      await askStep(ctx, "🔍 Paste the key, or the <b>id</b> of an account, to trace who received it:");
+      return;
+    case "tlstock": {
+      const h = await stockHealth();
+      const kb = new InlineKeyboard().text("🔄 Refresh", cb("adm", "tlstock")).text("◀️ Back", cb("adm", "m_tools"));
+      await show(ctx, [
+        "📊 <b>Stock health</b>",
+        `📦 Total units in stock: <b>${h.totalUnits}</b>`,
+        "",
+        h.low.length ? ["⚠️ <b>Running low</b>", ...h.low.map((x) => `• ${escapeHtml(x.name).slice(0, 26)} — <b>${x.left}</b> left`)].join("\n") : "✅ Nothing running low",
+        "",
+        h.outOfStock.length ? ["❌ <b>Out of stock</b>", ...h.outOfStock.map((x) => `• ${escapeHtml(x.name).slice(0, 26)}${x.waiting ? ` — 🔔 <b>${x.waiting}</b> waiting` : ""}`)].join("\n") : "",
+        "",
+        h.dead.length ? ["💀 <b>Dead stock</b> — bought but never sold", ...h.dead.map((x) => `• ${escapeHtml(x.name).slice(0, 26)} — ${x.units} units, ${x.ageDays}d old`)].join("\n") : "✅ No dead stock",
+        "",
+        "<i>Restock the ones with people waiting first. Stop buying the dead ones.</i>",
+      ].filter((l) => l !== "").join("\n").slice(0, 3900), kb, true);
+      return;
+    }
+    case "tlrisk":
+      ctx.session.awaiting = "admin_tool_risk";
+      await askStep(ctx, "🛡 Send the customer's <b>@username</b> or <b>Telegram ID</b> to see their claim history:");
+      return;
+    case "tlcsv": {
+      await ctx.reply("📄 Building the export…");
+      const csv = await exportOrdersCsv(90);
+      await ctx.replyWithDocument(new InputFile(Buffer.from(csv, "utf8"), `orders-${new Date().toISOString().slice(0, 10)}.csv`), {
+        caption: "📄 Last 90 days of orders — opens in Excel or Google Sheets.",
+      });
       return;
     }
     case "fxsur": {
@@ -2738,6 +2823,57 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const c = await setSpinConfig({ expiryDays: Number.isFinite(n) ? n : 14 });
     await ctx.reply(`⏳ Customers get <b>${c.expiryDays}</b> days.`, { parse_mode: "HTML" });
     await handleAdminCallback(ctx, "spncfg", []);
+    return true;
+  }
+  if (awaiting === "admin_tool_adjust") {
+    const pct = Number.parseFloat(text.trim().replace(/[^0-9.-]/g, ""));
+    if (!Number.isFinite(pct) || pct === 0) { ctx.session.awaiting = "admin_tool_adjust"; await askStep(ctx, "Send a percentage, e.g. <code>10</code> or <code>-5</code>"); return true; }
+    const r = await bulkAdjustPrices(pct, true);
+    if (r.changed === 0) { await ctx.reply("Nothing would change."); return true; }
+    ctx.session.toolPct = pct;
+    await ctx.reply(
+      [`📈 <b>${pct > 0 ? "+" : ""}${pct}%</b> would change <b>${r.changed}</b> price(s):`, "", ...r.sample.map((x) => `• ${escapeHtml(x)}`), "", "<i>Nothing is saved until you confirm.</i>"].join("\n"),
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().add(sbtn(`✅ Apply ${pct > 0 ? "+" : ""}${pct}%`, cb("adm", "tladjgo"), "success")).row().text("✖️ Cancel", cb("adm", "m_tools")) },
+    );
+    return true;
+  }
+  if (awaiting === "admin_tool_key") {
+    const t = await findOrderByKey(text);
+    if (!t.found) { await ctx.reply("🔍 No match — that key or account is not in your stock."); return true; }
+    await ctx.reply(
+      [
+        "🔍 <b>Key traced</b>",
+        `📦 ${escapeHtml(t.product ?? "—")}`,
+        `🏷 Type: ${t.kind === "DIGITAL_ACCOUNT" ? "account" : "license key"} · status <b>${t.status}</b>`,
+        t.orderNumber ? `🧾 Order <b>${escapeHtml(t.orderNumber)}</b>` : "🧾 <i>Not sold — still in stock</i>",
+        t.buyer ? `👤 ${escapeHtml(t.buyer)}  🆔 <code>${t.buyerTelegramId ?? "—"}</code>` : "",
+        t.deliveredAt ? `📅 Delivered ${t.deliveredAt.toISOString().slice(0, 16).replace("T", " ")}` : "",
+      ].filter(Boolean).join("\n"),
+      { parse_mode: "HTML" },
+    );
+    return true;
+  }
+  if (awaiting === "admin_tool_risk") {
+    const q = text.trim().replace(/^@/, "");
+    const found = (await resolveUserByTelegramId(q)) ?? null;
+    const uid = found?.id ?? (await getUserById(q).catch(() => null))?.id ?? null;
+    if (!uid) { await ctx.reply("Couldn't find that customer."); return true; }
+    const r = await customerRisk(uid);
+    if (!r) { await ctx.reply("Couldn't build a profile for them."); return true; }
+    const bar = r.score >= 60 ? "🔴" : r.score >= 30 ? "🟡" : "🟢";
+    await ctx.reply(
+      [
+        `🛡 <b>${escapeHtml(r.label)}</b>`,
+        `${bar} Risk score <b>${r.score}</b>/100`,
+        "",
+        `📦 Orders: <b>${r.orders}</b> · ✅ completed <b>${r.completed}</b>`,
+        `🔄 Replacement claims: <b>${r.claims}</b> (approved <b>${r.claimsApproved}</b>)`,
+        `↩️ Refunds: <b>${r.refunds}</b>`,
+        `📅 Account age: <b>${r.accountAgeDays}</b> day(s)`,
+        r.flags.length ? `\n⚠️ <b>Flags</b>\n${r.flags.map((f) => `• ${escapeHtml(f)}`).join("\n")}` : "\n✅ No flags",
+      ].join("\n"),
+      { parse_mode: "HTML" },
+    );
     return true;
   }
   if (awaiting === "admin_fx_surcharge") {
