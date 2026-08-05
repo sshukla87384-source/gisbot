@@ -22,9 +22,13 @@ function stockOut(n: number): { stock: number | null; stockText: string; unlimit
   return { stock: n, stockText: String(n), unlimited: false, inStock: n > 0 };
 }
 
-function currencyOf(q: unknown): Currency {
-  const c = String((q as { currency?: string })?.currency ?? "INR").toUpperCase();
-  return (c === "USD" ? "USD" : "INR") as Currency;
+/**
+ * The developer API is USDT-only. We therefore price internally in USD, which
+ * maps 1:1 to USDT and — critically — carries NO INR surcharge, so API sellers
+ * always see the true base price. The legacy ?currency= parameter is ignored.
+ */
+function currencyOf(_q?: unknown): Currency {
+  return "USD" as Currency;
 }
 
 /**
@@ -486,6 +490,7 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 }</pre>
 <ul>
 <li><b>variants[].id</b> is what you send as <code>variantId</code> to <code>POST /orders</code>.</li>
+<li><b>USDT only.</b> Every amount in this API — product prices, order totals and your balance — is USDT. There is no currency parameter; the INR handling fee that applies in the bot is NOT applied here, so you always see the true base price.</li>
 <li><b>All prices are USDT.</b> Every product, variant and order returns <code>price</code>/<code>priceUsdt</code> (2dp string) with <code>currency: "USDT"</code>. Raw <code>priceMinor</code> and <code>nativeCurrency</code> are also included for reference.</li>
 <li><b>stock</b> is the real number available. For supplier-backed products this is the upstream supplier stock.</li>
 <li><b>unlimited: true</b> means the item is not unit-stocked (<code>stock</code> is <code>null</code>); it is always orderable. Use <code>stockText</code> if you want a ready-to-display value — it is the number, or <code>"Unlimited"</code>.</li>
@@ -547,7 +552,7 @@ export class DeveloperDocsController {
       base_url: base,
       auth: { type: "bearer", header: "Authorization", format: "Bearer {API_KEY}", alt_header: "X-API-Key" },
       endpoints: {
-        products: { method: "GET", path: "/products", query: { all: "true", limit: "1-200", page: "N", inStock: "true", source: "own|supplier" } },
+        products: { method: "GET", path: "/products", query: { all: "true", limit: "1-200", page: "N", inStock: "true", source: "own|supplier" }, note: "all amounts USDT" },
         product: { method: "GET", path: "/products/{id}" },
         stock: { method: "GET", path: "/products/{id}/stock" },
         balance: { method: "GET", path: "/balance", scope: "wallet:read", returns: { balance: "USDT string", currency: "USDT" } },
@@ -572,7 +577,7 @@ export class DeveloperDocsController {
         currency: "currency",
       },
       notes: [
-        "All prices, balances and order totals are reported in USDT (price/priceUsdt/total, currency=USDT).",
+        "USDT ONLY: all prices, balances and order totals are USDT. No currency parameter, and no INR surcharge is applied to API prices.",
         "priceMinor/nativeCurrency are the underlying values, in integer MINOR units.",
         "Order using variants[].id as variantId.",
         "supplierBacked=true items are fulfilled upstream but bought identically.",
@@ -622,6 +627,8 @@ export class DeveloperDocsController {
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
       '  stock (display): "variants[].stockText"  (the number, or "Unlimited")',
       '  variant label: "variants[].label"  (product name, or "Product — Variant")',
+      "",
+      "All amounts are USDT. There is no currency parameter.",
       "",
       "Scopes: catalog:read, orders:read, orders:write, wallet:read",
       "A 403 response means the key is missing a scope; GET /ping lists them.",
