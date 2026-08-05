@@ -1,4 +1,4 @@
-import { addToCart, checkoutWithWallet, clearCart, getLedger, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
+import { addToCart, checkoutWithWallet, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { Body, Controller, Get, Header, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
@@ -284,6 +284,39 @@ export class DeveloperController {
       nativeBalanceMinor: native,
       nativeCurrency: w.currency,
       rate: { inrPerUsdt: usdtRate("INR") },
+    };
+  }
+
+  /**
+   * Your daily statement: spend, what the same goods cost at our public price,
+   * and the benefit your pricing gave you. USDT, like everything else here.
+   *
+   * We do not know your own selling prices, so `benchmarkMarginPct` is measured
+   * against OUR public price. It is a benchmark, not your actual margin.
+   */
+  @Scopes("orders:read")
+  @Get("stats")
+  async stats(@Req() req: DeveloperRequest, @Query("hours") hours?: string) {
+    const userId = req.apiKey?.ownerUserId;
+    if (!userId) throw forbidden("This API key isn't linked to a user account.");
+    const h = Math.max(1, Math.min(720, Number.parseInt(hours ?? "24", 10) || 24));
+    const d = await resellerDay(userId, h);
+    if (!d) {
+      return { windowHours: h, orders: 0, units: 0, spent: "0.00", publicValue: "0.00", benefit: "0.00", benchmarkMarginPct: null, currency: "USDT", topProducts: [], specialRates: [] };
+    }
+    const u = (minor: number): string => toUsdt(minor, d.currency);
+    return {
+      windowHours: h,
+      orders: d.orders,
+      units: d.units,
+      spent: u(d.spentMinor),
+      publicValue: u(d.publicValueMinor),
+      benefit: u(d.benefitMinor),
+      benchmarkMarginPct: d.benchmarkMarginBp === null ? null : Number((d.benchmarkMarginBp / 100).toFixed(2)),
+      benchmarkNote: "Measured against our public price — we cannot see your own selling prices, so this is a benchmark, not your actual margin.",
+      currency: "USDT",
+      topProducts: d.topProducts.map((p) => ({ name: p.name, units: p.units, spent: u(p.spentMinor) })),
+      specialRates: d.deals.map((x) => ({ product: x.name, yourPrice: u(x.yourMinor), publicPrice: u(x.publicMinor), discountPct: Number((x.offBp / 100).toFixed(2)) })),
     };
   }
 

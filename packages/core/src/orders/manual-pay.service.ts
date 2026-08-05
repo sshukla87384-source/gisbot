@@ -9,7 +9,7 @@ import { notifyTierChange } from "../loyalty.service.js";
 import { costForVariant } from "../finance.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
-import { referralNudgeMessage } from "../users/user.service.js";
+import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 import { toUsdtCharge, usdtToMinor, usdtCentInMinor, convertMinor } from "../fx.js";
@@ -378,7 +378,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       await tx.order.update({ where: { id: order.id }, data: { status: finalStatus, ...(finalStatus === "COMPLETED" ? { completedAt: new Date() } : {}) } });
       await tx.auditLog.create({ data: { actorId, actorType: "ADMIN", action: "order.confirm.manual", entityType: "Order", entityId: order.id, after: { finalStatus, delivered: deliveries.length } } });
 
-      return { kind: "done" as const, orderId: order.id, telegramId: order.user.telegramId, buyerHandle: order.user.telegramHandle, buyerFirst: order.user.firstName, buyerReferral: order.user.referralCode, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
+      return { kind: "done" as const, orderId: order.id, userId: order.userId, telegramId: order.user.telegramId, buyerHandle: order.user.telegramHandle, buyerFirst: order.user.firstName, buyerReferral: order.user.referralCode, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
     },
     { timeout: 20_000 },
   );
@@ -399,8 +399,11 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     }
     if (outcome.deliveries.length > 0) {
       await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));
-      const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
-      if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
+      // First delivery of the day only — see shouldSendReferralNudge.
+      if (await shouldSendReferralNudge(outcome.userId)) {
+        const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
+        if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
+      }
       const instr = await deliveryInstructionsMessage();
       if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
     }

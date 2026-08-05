@@ -1,3 +1,4 @@
+import { getRedis } from "../redis.js";
 import { prisma, type Currency, type User } from "@gis/database";
 import { REFERRAL_PREFIX } from "@gis/shared";
 
@@ -108,6 +109,30 @@ export async function getReferralStats(userId: string): Promise<{
     }),
   ]);
   return { invited, purchased, earnedMinor: BigInt(rewards._sum.amountMinor ?? 0) };
+}
+
+/**
+ * Once a day, not once an order.
+ *
+ * The nudge was sent after EVERY delivery, so a customer buying five things in
+ * an afternoon got the same "share & earn" pitch five times. That reads as
+ * spam and it trains people to ignore the referral programme entirely. This
+ * returns true only for a user's first delivery of the day.
+ *
+ * Redis with a TTL to the end of the day, so it costs one key per buyer per day
+ * and self-cleans. Failing open would restore the spam, so on a Redis error we
+ * stay quiet instead.
+ */
+export async function shouldSendReferralNudge(userId: string): Promise<boolean> {
+  try {
+    const redis = getRedis();
+    const day = new Date().toISOString().slice(0, 10);
+    const key = `ref:nudged:${day}:${userId}`;
+    const first = await redis.set(key, "1", "EX", 172_800, "NX");
+    return first !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** "Share & earn" nudge shown after a successful purchase (null if not configurable). */

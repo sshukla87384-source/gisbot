@@ -7,6 +7,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   runQualitySweep,
   reconcile,
   profitReport,
+  sendResellerStatements,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -238,6 +239,16 @@ async function dailyMoneySummary(): Promise<void> {
   ).catch(() => undefined);
 }
 
+/** Daily statement to every API user / reseller (once a day). */
+async function resellerStatements(): Promise<void> {
+  const { sent, skipped } = await sendResellerStatements();
+  if (sent > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.resellerStatements", entityType: "User", after: { sent, skipped } },
+    }).catch(() => undefined);
+  }
+}
+
 /** Fire scheduled / recurring broadcasts whose time has come (every 60 s). */
 async function runScheduledBroadcasts(): Promise<void> {
   await dispatchDueBroadcasts();
@@ -260,5 +271,6 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(300, "recovery", 290, recoverAbandonedCheckouts),
     every(21_600, "quality", 21_590, qualitySweep),
     every(86_400, "moneysummary", 86_390, dailyMoneySummary),
+    every(86_400, "resellerstmt", 86_390, resellerStatements),
   ];
 }

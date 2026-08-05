@@ -6,7 +6,7 @@ import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegra
 import { costForVariant } from "../finance.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
-import { referralNudgeMessage } from "../users/user.service.js";
+import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 
@@ -242,6 +242,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       return {
         kind: "fulfilled" as const,
         orderId: order.id,
+        userId: order.userId,
         buyerHandle: order.user.telegramHandle,
         buyerFirst: order.user.firstName,
         buyerReferral: order.user.referralCode,
@@ -282,8 +283,11 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
           outcome.telegramId,
           thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME),
         );
-        const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
-        if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
+        // First delivery of the day only — see shouldSendReferralNudge.
+        if (await shouldSendReferralNudge(outcome.userId)) {
+          const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
+          if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
+        }
         const instr = await deliveryInstructionsMessage();
         if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
       }

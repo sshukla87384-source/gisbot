@@ -11,6 +11,7 @@ import {
   removeCouponFromCart,
   couponReason,
   referralNudgeMessage,
+  shouldSendReferralNudge,
   deliveryInstructionsMessage,
   clearCart,
   createGatewayCheckout,
@@ -1019,7 +1020,8 @@ export function createBot(): Bot<Ctx> {
           // One tidy closing message: instructions + referral, not three separate ones.
           const closing = [
             await deliveryInstructionsMessage(),
-            referralNudgeMessage(user.referralCode, ctx.me.username),
+            // Referral pitch only on the day's first delivery, not every order.
+            (await shouldSendReferralNudge(user.id)) ? referralNudgeMessage(user.referralCode, ctx.me.username) : null,
           ].filter(Boolean).join("\n\n");
           if (closing) await ctx.reply(closing, { parse_mode: "HTML" }).catch(() => undefined);
           break;

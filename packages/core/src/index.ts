@@ -25,6 +25,7 @@ export * from "./orders/order.service.js";
 export * from "./support/ticket.service.js";
 export * from "./finance.service.js";
 export * from "./recovery.service.js";
+export * from "./reseller-report.service.js";
 export * from "./orders/manual-pay.service.js";
 export * from "./orders/replacement.service.js";
 export * from "./orders/coupon.service.js";

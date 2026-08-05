@@ -51,6 +51,7 @@ import {
   confirmAdminTotp,
   checkAdminTotp,
   disableAdminTotp,
+  sendResellerStatements,
   findTicketByOrderItem,
   listPendingManualItems,
   manualFulfillItem,
@@ -345,6 +346,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
+      [["📊 Reseller statements", cb("adm", "rstmt"), "success"]],
       [["💱 INR ⇄ USD Rate", cb("adm", "fxrate"), "primary"]],
       [["🇮🇳 INR Surcharge", cb("adm", "fxsur"), "primary"]],
     ] },
@@ -942,6 +944,31 @@ async function walletHistoryView(ctx: Ctx, userId: string): Promise<void> {
 
 const usd = (m: number): string => `$${(m / 100).toFixed(2)}`;
 const pct = (bp: number | null): string => (bp === null ? "—" : `${(bp / 100).toFixed(1)}%`);
+
+async function resellerStmtView(ctx: Ctx): Promise<void> {
+  const kb = new InlineKeyboard()
+    .add(sbtn("📤 Send now", cb("adm", "rstmtnow"), "success")).row()
+    .text("◀️ Back", cb("adm", "m_pay"));
+  await show(
+    ctx,
+    [
+      "📊 <b>Reseller statements</b>",
+      "",
+      "Every API user gets a daily message with:",
+      "• orders and units bought",
+      "• what they spent",
+      "• the same goods at your public price",
+      "• 🎁 what their special pricing saved them",
+      "• their standing special rates",
+      "",
+      "It runs once a day automatically. Anyone who bought nothing is skipped — a daily \"you did nothing\" message just gets you muted.",
+      "",
+      "<i>The margin shown is measured against your public price, and says so. We can't see what a reseller charges their own customers, so calling it their profit would be inventing a number.</i>",
+    ].join("\n"),
+    kb,
+    true,
+  );
+}
 
 async function twoFaView(ctx: Ctx): Promise<void> {
   const st = await adminTotpState();
@@ -1757,6 +1784,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       kb.text("◀️ Back", cb("adm", "prod", id));
       await show(ctx, vs.length ? "💰 Pick a variant to set your cost on:" : "No variants on this product.", kb, true);
       return;
+    }
+    case "rstmt": return resellerStmtView(ctx);
+    case "rstmtnow": {
+      await ctx.answerCallbackQuery({ text: "Sending…" }).catch(() => undefined);
+      const r = await sendResellerStatements();
+      await ctx.reply(`📊 Sent <b>${r.sent}</b> statement(s).${r.skipped > 0 ? ` ${r.skipped} skipped (no orders in the last 24h).` : ""}`, { parse_mode: "HTML" });
+      return resellerStmtView(ctx);
     }
     case "twofa": return twoFaView(ctx);
     case "twofaon": {
