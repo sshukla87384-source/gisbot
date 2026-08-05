@@ -17,6 +17,7 @@ import {
   listTickets,
   listVault,
   listReplaceableItems,
+  greetName,
   toUsdt,
   type CartView,
 } from "@gis/core";
@@ -173,7 +174,12 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     `📈 ${bold("Available")}`,
     stockStr,
     "",
-    ...(user.isVip ? [`${e("vip")} <b>VIP price applied</b>`] : []),
+    // A personal price the admin set for THIS customer.
+    ...(p.hasCustomPrice
+      ? [`💎 <b>Special price just for you, ${escapeHtml(greetName(user))}!</b>`, "<i>This is your personal rate — not the public price.</i>"]
+      : user.isVip
+        ? [`${e("vip")} <b>VIP price applied</b>`]
+        : []),
     (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked) ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
     // Warranty shown exactly as the admin set it, with the day count.
     p.warranty
@@ -275,6 +281,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     cartText(view),
     ...(coupon ? [`🎟 Coupon <b>${escapeHtml(coupon.code)}</b>: −${fmt(discount, view.currency)}`, `💳 <b>Total to pay: ${fmt(payable, view.currency)}</b>`] : []),
     "",
+    view.hasCustomPrice ? `💎 <b>Special price just for you, ${escapeHtml(greetName(user))}!</b>` : "",
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${walletCur === "USD" ? " USDT" : ""}`,
     crossCur ? `🔁 Wallet charge for this order: <b>${walletChargeLabel}</b>  <i>(${fmt(payable, view.currency)})</i>` : "",
     (user.currency as string) === "INR" && loadConfig().UPI_ID

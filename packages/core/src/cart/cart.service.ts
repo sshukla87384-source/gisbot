@@ -1,3 +1,4 @@
+import { convertMinor } from "../fx.js";
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
@@ -18,6 +19,8 @@ export interface CartView {
   subtotalMinor: number;
   currency: Currency;
   allAvailable: boolean;
+  /** true when at least one line uses this customer's personal price. */
+  hasCustomPrice: boolean;
 }
 
 async function getOrCreateCart(userId: string) {
@@ -84,7 +87,11 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
   const productIds = (cart?.items ?? []).map((i) => i.variant.productId);
   const overrides = await prisma.userPrice.findMany({ where: { userId, productId: { in: productIds }, channel: { in: ["DIRECT", "BOTH"] } } });
   const overrideByProduct = new Map<string, number>();
-  for (const o of overrides) { const cur = overrideByProduct.get(o.productId); if (cur === undefined || o.channel === "DIRECT") overrideByProduct.set(o.productId, o.amountMinor); }
+  for (const o of overrides) {
+    const amt = o.currency === currency ? o.amountMinor : convertMinor(o.amountMinor, o.currency as Currency, currency);
+    const cur = overrideByProduct.get(o.productId);
+    if (cur === undefined || o.channel === "DIRECT") overrideByProduct.set(o.productId, amt);
+  }
 
   const lines: CartLine[] = (cart?.items ?? []).map((item) => {
     const base = item.variant.prices[0]?.amountMinor ?? null;
@@ -113,5 +120,6 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
     subtotalMinor: lines.reduce((sum, l) => sum + (l.lineTotalMinor ?? 0), 0),
     currency,
     allAvailable: lines.length > 0 && lines.every((l) => l.available),
+    hasCustomPrice: (cart?.items ?? []).some((it) => overrideByProduct.has(it.variant.productId)),
   };
 }

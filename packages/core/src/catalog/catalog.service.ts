@@ -78,6 +78,8 @@ export interface ProductView {
   supplierBacked: boolean;
   warranty: boolean;
   warrantyDays: number | null;
+  /** true when THIS customer has a personal price on this product. */
+  hasCustomPrice: boolean;
   buyButtonText: string | null;
   buttonStyle: string | null;
   iconCustomEmojiId: string | null;
@@ -345,6 +347,7 @@ export async function getProductView(productId: string, currency: Currency, user
     supplierBacked: p.supplierId !== null,
     warranty: p.warranty,
     warrantyDays: p.warrantyDays,
+    hasCustomPrice: override !== null,
     buyButtonText: p.buyButtonText,
     buttonStyle: p.buttonStyle,
     iconCustomEmojiId: firstCustomEmojiId(p.nameHtml),
