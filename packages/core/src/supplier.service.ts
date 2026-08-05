@@ -13,7 +13,18 @@ import { usdtRate } from "./fx.js";
 interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: string; markupBp: number; active: boolean; docsConfig?: unknown }
 export interface SupplierProduct { ref: string; name: string; description: string; note: string; priceMinor: number; stock: number | null; variantRef?: string }
 
-const authHeaders = (key: string): Record<string, string> => ({ Authorization: `Bearer ${key}`, "X-API-Key": key, Accept: "application/json" });
+/**
+ * Send the key every common way at once. `apikey` matters for Supabase Edge
+ * Functions — their gateway rejects a request without it before your function
+ * ever runs, which looks exactly like a broken endpoint.
+ */
+const authHeaders = (key: string): Record<string, string> => ({
+  Authorization: `Bearer ${key}`,
+  "X-API-Key": key,
+  apikey: key, // Supabase gateway
+  "X-Api-Token": key,
+  Accept: "application/json",
+});
 
 /** URL candidates: as given, and with an /api/v1 prefix if the base has no version segment. */
 function urlCandidates(baseUrl: string, path: string): string[] {
@@ -123,9 +134,11 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
 }
 
 /** Try common product endpoints; return the parsed products, plus the path used and a raw sample for diagnostics. */
-async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string }> {
+async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string; trail?: string[] }> {
   let lastRaw = "";
   let lastNote = "";
+  const trail: string[] = [];
+  const note = (t: string): void => { lastNote = t; if (trail.length < 24) trail.push(t); };
   // Strategy: whatever we learned from the supplier's own documentation wins.
   const doc = (s.docsConfig ?? null) as DocsConfig | null;
   if (doc?.productsPath) {
@@ -134,7 +147,7 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
         const url = `${(doc.baseUrl ?? s.baseUrl).replace(/\/$/, "")}${attempt}`;
         const res = await fetch(url, { headers: authHeaders(decKey(s)) });
         const text = await res.text().catch(() => "");
-        if (!res.ok) { lastNote = `docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`; continue; }
+        if (!res.ok) { note(`docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
         let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
         const listed = atPath(json, doc.listField);
         const arr: any[] = Array.isArray(listed)
@@ -143,17 +156,17 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
         const products = parseProductArray(Array.isArray(arr) ? arr : []);
         if (products.length > 0) return { products, path: `docs:${attempt}`, raw: text.slice(0, 400), note: "ok" };
         lastRaw = text.slice(0, 400);
-        lastNote = `docs ${attempt} → parsed 0 products`;
-      } catch (e) { lastNote = `docs → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+        note(`docs ${attempt} → parsed 0 products`);
+      } catch (e) { note(`docs → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
     }
   }
   for (const path of PRODUCT_PATHS) {
     try {
       const res = await supFetch(s, path);
       const text = await res.text().catch(() => "");
-      if (!res.ok) { lastNote = `${path || "/"} → HTTP ${res.status} ${text.slice(0, 120)}`; continue; }
+      if (!res.ok) { note(`${path || "/"} → HTTP ${res.status} ${text.slice(0, 120)}`); continue; }
       let json: any;
-      try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); lastNote = `${path || "/"} → non-JSON response`; continue; }
+      try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); note(`${path || "/"} → non-JSON response`); continue; }
       const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
       if (products.length > 0) {
@@ -161,39 +174,43 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
         return { products, path: path || "/", raw: text.slice(0, 400), note: "ok" };
       }
       lastRaw = text.slice(0, 400);
-      lastNote = `${path || "/"} → parsed 0 products`;
-    } catch (e) { lastNote = `${path || "/"} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+      note(`${path || "/"} → parsed 0 products`);
+    } catch (e) { note(`${path || "/"} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
   }
   // Action-style APIs: GET <base>?action=products
   for (const action of PRODUCT_ACTIONS) {
     try {
       const res = await actionGet(s, { action });
       const text = await res.text().catch(() => "");
-      if (!res.ok) { lastNote = `?action=${action} → HTTP ${res.status} ${text.slice(0, 120)}`; continue; }
-      let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); lastNote = `?action=${action} → non-JSON`; continue; }
+      if (!res.ok) { note(`?action=${action} → HTTP ${res.status} ${text.slice(0, 120)}`); continue; }
+      let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); note(`?action=${action} → non-JSON`); continue; }
       const arr: any[] = Array.isArray(json)
         ? json
         : (json.products ?? json.data ?? json.result ?? json.items ?? json.list ?? json.catalog ?? json.stock ?? []);
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
       if (products.length > 0) return { products, path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
       lastRaw = text.slice(0, 400);
-      lastNote = `?action=${action} → parsed 0 products`;
-    } catch (e) { lastNote = `?action=${action} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+      note(`?action=${action} → parsed 0 products`);
+    } catch (e) { note(`?action=${action} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
   }
   // Fallback: some reseller APIs (e.g. Supabase functions) return the catalog via POST + an action.
-  for (const body of [{ action: "products" }, { action: "list_products" }, { action: "catalog" }, { action: "list" }, { type: "products" }]) {
+  for (const body of [
+    { action: "products" }, { action: "list_products" }, { action: "catalog" },
+    { action: "get_products" }, { action: "list" }, { action: "stock" },
+    { type: "products" }, { method: "products" },
+  ]) {
     try {
       const res = await supFetch(s, "", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const text = await res.text().catch(() => "");
-      if (!res.ok) { lastNote = `POST ${JSON.stringify(body)} → HTTP ${res.status} ${text.slice(0, 100)}`; continue; }
+      if (!res.ok) { note(`POST ${JSON.stringify(body)} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
       let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
       const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
       if (products.length > 0) return { products, path: `POST ${JSON.stringify(body)}`, raw: text.slice(0, 400), note: "ok" };
       lastRaw = text.slice(0, 400);
-    } catch (e) { lastNote = `POST → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`; }
+    } catch (e) { note(`POST → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
   }
-  return { products: [], path: "", raw: lastRaw, note: lastNote };
+  return { products: [], path: "", raw: lastRaw, note: lastNote, trail };
 }
 
 export async function fetchSupplierProducts(s: SupplierRow): Promise<SupplierProduct[]> {
@@ -213,7 +230,8 @@ export async function diagnoseSupplier(id: string): Promise<{ ok: boolean; detai
     detail: [
       "Couldn't read a product list from this supplier.",
       `Tried: GET ${PRODUCT_PATHS.join(", ")}; GET ?action=${PRODUCT_ACTIONS.join("/")}; POST {action:…}.`,
-      `Last attempt: ${r.note}`,
+      "Attempts:",
+      (r.trail ?? [r.note]).map((t) => `• ${t}`).join("\n"),
       "Raw response sample:",
       r.raw || "(empty)",
       "",
