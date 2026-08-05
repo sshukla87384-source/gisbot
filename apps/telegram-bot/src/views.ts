@@ -186,8 +186,19 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     : anyStock
       ? `<b>${num(totalStock)}</b> in Stock`
       : "❌ <b>Sold out</b>";
+  // A hook line, chosen from the product's own state — the same urgency copy the
+  // promo templates use, so the card and the announcement speak with one voice.
+  const hook = !anyStock
+    ? "🔔 <i>Restocking soon — price may change with the new batch.</i>"
+    : p.onSale
+      ? "🔥 <i>Flash sale — this price will not last.</i>"
+      : totalStock > 0 && totalStock <= 5
+        ? "⚡ <i>Selling fast — only a few left. No reservations, no holds.</i>"
+        : "⚠️ <i>Price can change without notice.</i>";
   const lines = [
     header(!anyStock ? "🔔 RESTOCKING SOON" : p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
+    "",
+    hook,
     "",
     `📦 ${bold("Product")}`,
     `${p.iconEmoji ? p.iconEmoji + " " : ""}${translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name))}`,

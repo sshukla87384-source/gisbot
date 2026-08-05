@@ -446,12 +446,14 @@ async function productsView(ctx: Ctx, page = 1): Promise<void> {
 }
 
 async function productView(ctx: Ctx, productId: string): Promise<void> {
+  const autoPromo = await getAutoPromo().catch(() => ({ productIds: [] as string[], enabled: false, everyHours: 12, lastRunAt: null }));
   const p = await getProductBriefById(productId);
   if (!p) { await productsView(ctx); return; }
   const kb = new InlineKeyboard();
   if (p.status === "ACTIVE") kb.add(sbtn("👁 Shown — tap to Hide", cb("adm", "ppause", p.id), "primary"));
   else kb.add(sbtn("🙈 Hidden — tap to Show", cb("adm", "pactive", p.id), "success"));
-  kb.text("📣 Announce", cb("adm", "announce", p.id)).row();
+  kb.text("📣 Announce", cb("adm", "announce", p.id)).text("📣 Promo styles", cb("adm", "promotp", p.id)).row();
+  kb.add(sbtn(`🤖 Auto-announce: ${autoPromo.productIds.includes(p.id) ? "✅ ON" : "🚫 OFF"}`, cb("adm", "pauto", p.id), autoPromo.productIds.includes(p.id) ? "success" : "primary")).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
@@ -1428,6 +1430,19 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "Send <code>-</code> for <b>unlimited</b> (never runs out).",
       ].join("\n"));
       return;
+    }
+    case "pauto": {
+      const a = await getAutoPromo();
+      const on = a.productIds.includes(id);
+      const ids = on ? a.productIds.filter((x) => x !== id) : [...a.productIds, id];
+      await setAutoPromo({ productIds: ids });
+      await ctx.reply(
+        on
+          ? "🚫 Removed from Auto-Promo — it won't be posted automatically."
+          : `✅ Added to Auto-Promo${a.enabled ? ` — it will be posted with a rotating style every ${a.everyHours}h.` : ".\n\n⚠️ Auto-Promo is currently OFF. Turn it on in Marketing → 🤖 Auto-Promo."}`,
+        { parse_mode: "HTML" },
+      );
+      return productView(ctx, id);
     }
     case "pwar": {
       const b = await getProductBriefById(id);
