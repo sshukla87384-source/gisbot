@@ -28,6 +28,7 @@ import {
   getWallet,
   convertMinor,
   getCartView,
+  getBnplStatus,
   addStock,
   saveReview,
   orderAlreadyRated,
@@ -924,7 +925,48 @@ export function createBot(): Bot<Ctx> {
           if (instr) await ctx.reply(instr, { parse_mode: "HTML" }).catch(() => undefined);
           break;
         }
+        // Pay Later is credit — confirm the debt before it is taken on.
         case "ord:paybnpl": {
+          await ctx.answerCallbackQuery();
+          const [cvb, bn] = await Promise.all([
+            getCartView(user.id, user.currency as Currency),
+            getBnplStatus(user.id),
+          ]);
+          if (cvb.lines.length === 0) { await ctx.reply(ERROR_COPY.CART_EMPTY ?? "🛒 Your cart is empty."); break; }
+          const bCur = bn.currency as Currency;
+          const bPayable = cvb.subtotalMinor;
+          const bCharge = bCur === (user.currency as Currency) ? bPayable : convertMinor(bPayable, user.currency as Currency, bCur);
+          const owedAfter = bn.outstandingMinor + bCharge;
+          const leftAfter = bn.availableMinor - bCharge;
+          await ctx.reply(
+            [
+              "🕐 <b>Confirm Pay Later</b>",
+              "",
+              ...cvb.lines.map((l) => `📦 ${escapeHtml(l.productName)}${l.quantity > 1 ? ` ×${l.quantity}` : ""} — ${l.lineTotalMinor === null ? "—" : fmt(l.lineTotalMinor, cvb.currency)}`),
+              "",
+              `💳 <b>Total: ${fmt(bPayable, cvb.currency)}</b>`,
+              bCur !== (user.currency as Currency) ? `🔁 Added to your credit: <b>${fmt(bCharge, bCur)}</b>` : "",
+              "",
+              `🕐 You already owe: <b>${fmt(bn.outstandingMinor, bCur)}</b>`,
+              `🧾 <b>You will owe: ${fmt(owedAfter, bCur)}</b>`,
+              `📉 Credit left after: <b>${fmt(Math.max(0, leftAfter), bCur)}</b>`,
+              "",
+              leftAfter < 0
+                ? "⚠️ This exceeds your Pay Later limit — pay from your wallet instead, or repay some of what you owe."
+                : "ℹ️ You are taking this on credit. Repay from 💳 Wallet → Repay to free the limit up again.",
+            ].filter((l) => l !== "").join("\n"),
+            {
+              parse_mode: "HTML",
+              reply_markup: leftAfter < 0
+                ? new InlineKeyboard().text("💰 Pay from wallet", cb("ord", "paywallet")).row().text("✖️ Cancel", cb("crt", "view"))
+                : new InlineKeyboard()
+                    .add(sbtn(`✅ Confirm — owe ${fmt(bCharge, bCur)}`, cb("ord", "paybnplok"), "primary")).row()
+                    .text("✖️ Cancel", cb("crt", "view")),
+            },
+          );
+          break;
+        }
+        case "ord:paybnplok": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
           await vipAnimation(ctx);
           try {
