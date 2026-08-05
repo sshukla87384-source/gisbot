@@ -28,6 +28,9 @@ import {
   getWallet,
   convertMinor,
   getCartView,
+  watchProduct,
+  unwatchProduct,
+  getProductView,
   spin,
   claimChallenge,
   getBnplStatus,
@@ -1503,6 +1506,30 @@ export function createBot(): Bot<Ctx> {
           await ctx.reply("✍️ Send your comment — we read every one.");
           break;
 
+        case "wch:onr": case "wch:onp": {
+          const kind = action === "wch:onr" ? "RESTOCK" : "PRICE_DROP";
+          const pid = args[0] ?? "";
+          let base: number | undefined;
+          if (kind === "PRICE_DROP") {
+            const pv = await getProductView(pid, user.currency as Currency, user.id, "DIRECT", user.locale).catch(() => null);
+            const priced = (pv?.variants ?? []).map((v) => v.priceMinor).filter((n): n is number => n !== null);
+            base = priced.length ? Math.min(...priced) : undefined;
+          }
+          const r = await watchProduct(user.id, pid, kind, base, user.currency as Currency);
+          await ctx.answerCallbackQuery({
+            text: r.already ? "Already on the list" : kind === "RESTOCK" ? "🔔 We'll tell you first!" : "📉 We'll tell you if it drops!",
+            show_alert: !r.already,
+          });
+          await render(ctx, await views.productView(user, pid), true);
+          break;
+        }
+        case "wch:offr": case "wch:offp": {
+          const kind = action === "wch:offr" ? "RESTOCK" : "PRICE_DROP";
+          await unwatchProduct(user.id, args[0] ?? "", kind);
+          await ctx.answerCallbackQuery({ text: "Stopped notifying" });
+          await render(ctx, await views.productView(user, args[0] ?? ""), true);
+          break;
+        }
         case "rep:home":
           await render(ctx, await views.replaceListView(user), true);
           break;

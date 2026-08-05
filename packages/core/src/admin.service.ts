@@ -342,7 +342,12 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
   }
   if (added + relisted > 0) {
     const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
-    if (v) await announceRestock(v.productId, added + relisted, { createdById: "bot-admin" }).catch(() => undefined);
+    if (v) {
+      await announceRestock(v.productId, added + relisted, { createdById: "bot-admin" }).catch(() => undefined);
+      // Tell everyone who asked to be notified when this came back.
+      const { notifyRestock } = await import("./watch.service.js");
+      void notifyRestock(v.productId).catch(() => undefined);
+    }
     await invalidate("cat:*");
   }
   return { added, skipped, relisted };
@@ -429,7 +434,12 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
   }
   if (added + relisted > 0) {
     const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
-    if (v) await announceRestock(v.productId, added + relisted, { createdById: "bot-admin" }).catch(() => undefined);
+    if (v) {
+      await announceRestock(v.productId, added + relisted, { createdById: "bot-admin" }).catch(() => undefined);
+      // Tell everyone who asked to be notified when this came back.
+      const { notifyRestock } = await import("./watch.service.js");
+      void notifyRestock(v.productId).catch(() => undefined);
+    }
     await invalidate("cat:*");
   }
   return { added, skipped, relisted };
@@ -638,6 +648,11 @@ export async function setProductPublicPrice(
   await invalidate("cat:*");
 
   const newMinor = (announceCurrency === "USD" ? usd : inr) || null;
+  if (oldMinor !== null && newMinor !== null && newMinor < oldMinor) {
+    // Price-drop watchers are told regardless of whether you broadcast publicly.
+    const { notifyPriceDrop } = await import("./watch.service.js");
+    void notifyPriceDrop(productId, newMinor, announceCurrency).catch(() => undefined);
+  }
   if (opts.announce && oldMinor !== null && newMinor !== null && oldMinor !== newMinor) {
     const { announcePriceChange } = await import("./broadcast.service.js");
     await announcePriceChange(productId, oldMinor, newMinor, announceCurrency).catch(() => undefined);

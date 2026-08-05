@@ -19,6 +19,7 @@ import {
   listReplaceableItems,
   productRating,
   publishedTestimonials,
+  isWatching,
   tierOf,
   getTiers,
   getSpinConfig,
@@ -152,11 +153,13 @@ function timeLeft(until: Date): string {
 }
 
 export async function productView(user: BotUser, productId: string): Promise<View> {
-  const [p, rating, store, quotes] = await Promise.all([
+  const [p, rating, store, quotes, watchingStock, watchingPrice] = await Promise.all([
     getProductView(productId, user.currency as Currency, user.id, "DIRECT", user.locale),
     productRating(productId),
     storeRating(),
     publishedTestimonials({ productId, limit: 2 }),
+    isWatching(user.id, productId, "RESTOCK"),
+    isWatching(user.id, productId, "PRICE_DROP"),
   ]);
   // When the text was machine-translated, show the translated plain text rather
   // than the stored premium-emoji HTML (which is still the original language).
@@ -205,7 +208,11 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
          "┃ with the new batch.</i>",
          "┗━━━━━━━━━━━━━━━━━━",
          "",
-         "👉 Tap 🛍 <b>All products</b> — plenty in stock right now!"]
+         watchingStock
+           ? "🔔 <b>You're on the list</b> — we'll message you the moment it lands."
+           : "🔔 Tap <b>Notify me</b> below and you'll hear first.",
+         "",
+         "👉 Or tap 🛍 <b>All products</b> — plenty in stock right now!"]
       : []),
     "",
     // A personal price the admin set for THIS customer.
@@ -259,6 +266,11 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       kb.add(sbtn(`❌ ${bl} — out of stock`, cb("mnu", "noop"), "danger")).row();
     }
   }
+  // Notify-me options: restock when sold out, price drop always.
+  if (!anyStock) {
+    kb.add(sbtn(watchingStock ? "🔔 On the list — stop notifying" : "🔔 Notify me when back in stock", cb("wch", watchingStock ? "offr" : "onr", productId), watchingStock ? "primary" : "success")).row();
+  }
+  kb.add(sbtn(watchingPrice ? "📉 Watching price — stop" : "📉 Tell me if the price drops", cb("wch", watchingPrice ? "offp" : "onp", productId), "primary")).row();
   navRow(kb, cb("shp", "home", 1));
   return { text: lines.join("\n"), kb, photo: p.imageUrl || undefined };
 }

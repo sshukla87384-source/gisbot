@@ -273,6 +273,7 @@ model User {
   reviews             Review[]
   loyaltyGifts        LoyaltyGift[]
   spinChallenges      SpinChallenge[]
+  productWatches      ProductWatch[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1385,4 +1386,26 @@ model SpinChallenge {
 
   @@index([userId, status])
   @@index([status, expiresAt])
+}
+
+enum WatchType {
+  RESTOCK
+  PRICE_DROP
+}
+
+/// "Notify me" subscriptions: back-in-stock and price-drop alerts.
+model ProductWatch {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  productId  String
+  type       WatchType
+  /// Price when they subscribed, so a drop can be measured against it.
+  basePriceMinor Int?
+  currency   String?
+  notifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([userId, productId, type])
+  @@index([productId, type, notifiedAt])
 }

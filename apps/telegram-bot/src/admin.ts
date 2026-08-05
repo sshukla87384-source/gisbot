@@ -121,6 +121,7 @@ import {
   setVerifiedPurchase,
   moderationLog,
   REJECT_REASONS,
+  topWatched,
   getTiers,
   setTiers,
   listGifts,
@@ -269,6 +270,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_prod: { title: "🛍 <b>Products Management</b>", subtitle: "Add and manage your catalog", rows: [
       [["➕ Add Product", cb("adm", "addp"), "success"]],
       [["📦 All Products", cb("adm", "prods"), "primary"]],
+      [["🔔 Waiting Lists", cb("adm", "wait"), "success"]],
       [["🧰 Repair account stock", cb("adm", "fixacc"), "primary"]],
     ] },
     m_orders: { title: "🧾 <b>Orders</b>", subtitle: "Review and fulfil orders", rows: [
@@ -1725,6 +1727,24 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const r = await announceCatalogue({ inStockOnly: id === "instock" });
       await ctx.reply(`🗂 Sent <b>${r.products}</b> products to <b>${r.targets}</b> customers. 🎉`, { parse_mode: "HTML" });
       return sendPanel(ctx, false);
+    }
+    case "wait": {
+      const [restock, drops] = await Promise.all([topWatched("RESTOCK", 10), topWatched("PRICE_DROP", 10)]);
+      const kb = new InlineKeyboard().text("🔄 Refresh", cb("adm", "wait")).text("◀️ Back", cb("adm", "m_prod"));
+      await show(ctx, [
+        "🔔 <b>Waiting Lists</b>",
+        "",
+        restock.length
+          ? ["<b>Waiting for restock</b> — buy these first:", ...restock.map((r, i) => `${i + 1}. <b>${escapeHtml(r.name)}</b> — ${r.count} waiting`)].join("\n")
+          : "<i>Nobody waiting on a restock right now.</i>",
+        "",
+        drops.length
+          ? ["<b>Watching for a price drop</b>:", ...drops.map((r) => `• ${escapeHtml(r.name)} — ${r.count} watching`)].join("\n")
+          : "",
+        "",
+        "<i>Everyone on a restock list is messaged automatically when you add stock, and price-drop watchers when you lower a price. Each person is told once, then removed.</i>",
+      ].filter((l) => l !== "").join("\n"), kb, true);
+      return;
     }
     case "fixacc": {
       await ctx.reply("🧰 Checking stored account stock…");
