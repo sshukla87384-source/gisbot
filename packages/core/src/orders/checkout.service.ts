@@ -70,6 +70,21 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
           // Auto-deliver from available stock whenever stock exists — regardless of the
           // coarse fulfillment mode — so any product with keys/accounts is delivered instantly.
           let delivered = false;
+          // A reusable product (e.g. one shared redemption link) delivers the
+          // SAME value to every buyer and never consumes inventory.
+          if (line.reusableSecret) {
+            const payload = { kind: "LICENSE_KEY", key: line.reusableSecret };
+            await tx.orderItem.update({
+              where: { id: item.id },
+              data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+            });
+            deliveries.push({
+              orderItemId: item.id,
+              productName: line.productName, variantName: line.variantName,
+              kind: "LICENSE_KEY", secret: payload, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange,
+            } as unknown as DeliveredSecret);
+            continue;
+          }
           try {
             if (line.productType === "DIGITAL_ACCOUNT") {
               const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);

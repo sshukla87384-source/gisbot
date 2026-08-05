@@ -70,6 +70,7 @@ export interface SessionData {
     | "replace_reason"
     | "replace_proof"
     | "admin_reject_note"
+    | "admin_p_reuse"
     | "admin_p_warrantydays"
     | "wallet_inr_amount"
     | "wallet_inr_utr"

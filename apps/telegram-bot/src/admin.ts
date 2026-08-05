@@ -16,6 +16,8 @@ import {
   setProductFulfillmentMode,
   setProductPasswordChange,
   setProductWarranty,
+  setProductReusableSecret,
+  getProductReusableSecret,
   setTranslateCreds,
   getTranslateProvider,
   setProductWarrantyDays,
@@ -402,6 +404,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
+  kb.add(sbtn(`♾ Same link for everyone: ${p.reusable ? "✅ ON" : "🚫 OFF"}`, cb("adm", "preuse", p.id), p.reusable ? "success" : "primary")).row();
   kb.text("🎨 Button name & colour", cb("adm", "pbtn", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
@@ -1190,6 +1193,21 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await setProductPasswordChange(id, !cur);
       await ctx.reply(!cur ? "🔓 Customers can now change this account's password." : "🔒 Customers are told not to change this account's password.");
       return productView(ctx, id);
+    }
+    case "preuse": {
+      const cur = await getProductReusableSecret(id);
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_reuse";
+      await askStep(ctx, [
+        "♾ <b>Same link for everyone</b>",
+        "",
+        "Send the value EVERY buyer should receive — a redemption link, invite link or coupon code.",
+        "",
+        "While this is set the product is <b>never out of stock</b> and no keys are consumed.",
+        cur ? `\nCurrently: <code>${escapeHtml(cur)}</code>` : "",
+        "\nSend <code>-</code> to turn it off and go back to normal stock.",
+      ].join("\n"));
+      return;
     }
     case "pwar": {
       const b = await getProductBriefById(id);
@@ -2199,6 +2217,18 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       { parse_mode: "HTML" },
     );
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_p_reuse") {
+    const pid = ctx.session.admProductId ?? "";
+    if (text.trim() === "-") {
+      await setProductReusableSecret(pid, null);
+      await ctx.reply("♾ Turned off — this product uses normal stock again.");
+    } else {
+      await setProductReusableSecret(pid, text.trim());
+      await ctx.reply("♾ Saved. Every buyer now receives this same value, and the product will never show out of stock.");
+    }
+    await productView(ctx, pid);
     return true;
   }
   if (awaiting === "admin_p_warrantydays") {

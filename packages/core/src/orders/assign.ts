@@ -1,4 +1,5 @@
 import type { Currency, Prisma } from "@gis/database";
+import { loadConfig } from "@gis/config";
 import { convertMinor } from "../fx.js";
 import { CoreError, decryptSecret } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
@@ -24,10 +25,13 @@ export interface PricedLine {
   unitPriceMinor: number;
   fulfillmentMode: "AUTOMATIC" | "MANUAL";
   allowPwChange: boolean;
+  /** When set, EVERY buyer gets this same value and nothing is consumed. */
+  reusableSecret: string | null;
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
 export async function priceCart(tx: Tx, userId: string, currency: Currency, channel: "DIRECT" | "API" = "DIRECT"): Promise<PricedLine[]> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   const cart = await tx.cart.findUnique({
     where: { userId },
     include: {
@@ -76,6 +80,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       productType: v.product.type,
       activationGuide: v.product.activationGuide,
       allowPwChange: v.product.allowPasswordChange,
+      reusableSecret: v.product.reusableSecretEnc ? decryptSecret(v.product.reusableSecretEnc, masterKey) : null,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
       unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),

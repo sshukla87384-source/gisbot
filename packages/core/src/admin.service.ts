@@ -162,11 +162,11 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null }
+export interface ProductBrief { id: string; reusable?: boolean; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null }
 
 type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null };
 function toBrief(p: PRow): ProductBrief {
-  return { id: p.id, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays };
+  return { id: p.id, reusable: Boolean((p as unknown as { reusableSecretEnc?: string | null }).reusableSecretEnc), name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays };
 }
 
 export async function getProductBriefById(id: string): Promise<ProductBrief | null> {
@@ -1020,4 +1020,24 @@ export async function closeBnpl(userId: string, writeOff = false): Promise<{ ok:
     data: { bnplLimitMinor: 0, ...(writeOff ? { bnplOutstandingMinor: 0 } : {}) },
   });
   return { ok: true, clearedMinor: writeOff ? u.bnplOutstandingMinor : 0 };
+}
+
+/**
+ * One value delivered to EVERY buyer (a shared redemption link, invite, or
+ * coupon). While set, the product is never out of stock and no inventory is
+ * consumed. Pass null to clear it and go back to unit stock.
+ */
+export async function setProductReusableSecret(productId: string, value: string | null): Promise<void> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  await prisma.product.update({
+    where: { id: productId },
+    data: { reusableSecretEnc: value && value.trim() ? encryptSecret(value.trim(), masterKey) : null },
+  });
+  await invalidate("cat:*");
+}
+
+export async function getProductReusableSecret(productId: string): Promise<string | null> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { reusableSecretEnc: true } });
+  if (!p?.reusableSecretEnc) return null;
+  try { return decryptSecret(p.reusableSecretEnc, loadConfig().ENCRYPTION_MASTER_KEY); } catch { return null; }
 }

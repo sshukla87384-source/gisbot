@@ -91,7 +91,7 @@ export const UNLIMITED_STOCK = Number.MAX_SAFE_INTEGER;
  * COUNTs.
  */
 async function stockMapFor(
-  rows: Array<{ id: string; type: string; supplierId: string | null; supplierStock: number | null; variantIds: string[] }>,
+  rows: Array<{ id: string; type: string; supplierId: string | null; supplierStock: number | null; reusable: boolean; manual: boolean; variantIds: string[] }>,
 ): Promise<Map<string, number>> {
   const map = new Map<string, number>();
   const keyIds: string[] = [];
@@ -99,6 +99,13 @@ async function stockMapFor(
   for (const p of rows) {
     if (p.supplierId && p.supplierStock !== null && p.supplierStock !== undefined) {
       for (const v of p.variantIds) map.set(v, p.supplierStock);
+      continue;
+    }
+    // A reusable product (same link for everyone) and a MANUAL product are
+    // fulfilled by hand or from one shared value — they are never out of stock
+    // unless the admin hides them.
+    if (p.reusable || p.manual) {
+      for (const v of p.variantIds) map.set(v, UNLIMITED_STOCK);
       continue;
     }
     if (p.type === "LICENSE_KEY") keyIds.push(...p.variantIds);
@@ -122,12 +129,14 @@ async function stockMapFor(
 async function variantStock(
   variantId: string,
   type: string,
-  supplier?: { supplierId: string | null; supplierStock: number | null },
+  supplier?: { supplierId: string | null; supplierStock: number | null; reusableSecretEnc?: string | null; fulfillmentMode?: string },
 ): Promise<number> {
   // Supplier-backed products are stocked at the supplier, not locally.
   if (supplier?.supplierId && supplier.supplierStock !== null && supplier.supplierStock !== undefined) {
     return supplier.supplierStock;
   }
+  // Reusable / manual products are never unit-stocked.
+  if (supplier?.reusableSecretEnc || supplier?.fulfillmentMode === "MANUAL") return UNLIMITED_STOCK;
   if (type === "LICENSE_KEY")
     return prisma.licenseKey.count({ where: { variantId, status: "AVAILABLE", deletedAt: null } });
   if (type === "DIGITAL_ACCOUNT")
@@ -202,7 +211,7 @@ export async function listProducts(opts: {
       ? await resolveUserPriceMap(userId, products.map((p) => p.id), channel, currency)
       : new Map<string, number>();
     const stockMap = await stockMapFor(
-      products.map((p) => ({ id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock, variantIds: p.variants.map((v) => v.id) })),
+      products.map((p) => ({ id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock, reusable: p.reusableSecretEnc !== null, manual: p.fulfillmentMode === "MANUAL", variantIds: p.variants.map((v) => v.id) })),
     );
     const items: ProductListItem[] = [];
     for (const p of products) {
