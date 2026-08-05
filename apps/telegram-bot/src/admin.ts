@@ -106,6 +106,8 @@ import {
   getFollowupConfig,
   setFollowupConfig,
   renderFollowup,
+  listReviews,
+  reviewStats,
   readLogs,
   clearLogs,
   logCounts,
@@ -260,6 +262,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
+      [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
@@ -1219,6 +1222,22 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_reject_note";
       await askStep(ctx, "❌ Send a short <b>reason</b> the customer will see, or <code>-</code> to decline without a note:");
       return;
+    case "revs": {
+      const [rows, st] = await Promise.all([listReviews(12), reviewStats()]);
+      const kb = new InlineKeyboard().text("🔄 Refresh", cb("adm", "revs")).text("◀️ Back", cb("adm", "m_content"));
+      const lines = [
+        "⭐ <b>Customer Reviews</b>",
+        st.count > 0 ? `${"⭐️".repeat(Math.round(st.avg))} <b>${st.avg.toFixed(1)}</b>/5 from <b>${st.count}</b> review(s)` : "",
+        "",
+      ].filter(Boolean);
+      if (rows.length === 0) lines.push("<i>No reviews yet — they arrive 10 minutes after each delivery.</i>");
+      for (const r of rows) {
+        lines.push(`${"⭐️".repeat(r.rating)} · <b>${escapeHtml(r.who)}</b> · ${r.at.toISOString().slice(5, 16).replace("T", " ")}`);
+        if (r.comment) lines.push(`   <i>${escapeHtml(r.comment).slice(0, 300)}</i>`);
+      }
+      await show(ctx, lines.join("\n").slice(0, 3900), kb, true);
+      return;
+    }
     case "fup": {
       const c = await getFollowupConfig();
       const kb = new InlineKeyboard()
@@ -1230,6 +1249,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await show(ctx, [
         "💬 <b>After-sale message</b>",
         `Status: <b>${c.enabled ? "ON" : "OFF"}</b> · sent <b>${c.delayMins} min</b> after delivery`,
+        c.btnText && c.btnUrl ? "" : "<i>Default button: ⭐ Leave a review (rating captured in the bot, customer thanked instantly by name).</i>",
         "",
         "Sent automatically once an order is delivered — ask for a review, or promote your website/channel.",
         "",

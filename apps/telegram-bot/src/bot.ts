@@ -25,6 +25,8 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   createTicket,
+  saveReview,
+  addReviewComment,
   logError,
   grantAllScopesToOwner,
   getInrPerUsdt,
@@ -351,6 +353,18 @@ export function createBot(): Bot<Ctx> {
     if (awaiting && (awaiting.startsWith("admin_") || awaiting.startsWith("sale_"))) {
       const handled = await handleAdminText(ctx, awaiting);
       if (handled) return;
+    }
+    if (awaiting === "review_comment") {
+      const rid = ctx.session.reviewId ?? "";
+      const body = ctx.message.text.trim().slice(0, 1000);
+      if (!rid) return; // no pending review — fall through to normal handling
+      ctx.session.reviewId = undefined;
+      await addReviewComment(rid, body);
+      await enqueueAdminAlert(`💬 <b>Review comment</b> — ${escapeHtml(greetName(ctx.user))}\n\n${escapeHtml(body).slice(0, 600)}`).catch(() => undefined);
+      return ctx.reply(
+        `💖 <b>Thank you, ${escapeHtml(greetName(ctx.user))}!</b>\n\nYour words have been sent straight to our team. We truly appreciate you taking the time. 🙏✨`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home") },
+      );
     }
     if (awaiting === "replace_proof") {
       // They typed instead of sending a photo — keep the claim alive.
@@ -1243,6 +1257,65 @@ export function createBot(): Bot<Ctx> {
           );
           break;
         }
+        case "rev:new": {
+          await ctx.answerCallbackQuery();
+          const oid = args[0] ?? "";
+          const kb = new InlineKeyboard()
+            .text("⭐️", `rev:rate:${oid}:1`).text("⭐️⭐️", `rev:rate:${oid}:2`).row()
+            .text("⭐️⭐️⭐️", `rev:rate:${oid}:3`).row()
+            .text("⭐️⭐️⭐️⭐️", `rev:rate:${oid}:4`).row()
+            .text("⭐️⭐️⭐️⭐️⭐️", `rev:rate:${oid}:5`);
+          await ctx.reply(
+            `⭐ <b>How would you rate your order, ${escapeHtml(greetName(user))}?</b>\n\nTap the stars — it takes one second and really helps us. 🙏`,
+            { parse_mode: "HTML", reply_markup: kb },
+          );
+          break;
+        }
+        case "rev:rate": {
+          const oid = args[0] ?? "";
+          const rating = Math.min(5, Math.max(1, Number.parseInt(args[1] ?? "5", 10) || 5));
+          const saved = await saveReview(user.id, rating, oid || undefined);
+          ctx.session.reviewId = saved.id;
+          await ctx.answerCallbackQuery({ text: "Thank you! 🙏" });
+          const stars = "⭐️".repeat(rating);
+          const warm = rating >= 4
+            ? [
+                `🎉 <b>Thank you so much, ${escapeHtml(greetName(user))}!</b> 💖`,
+                "",
+                `${stars}`,
+                "",
+                "Your support genuinely means a lot to us — it is customers like you that keep this store going. 🙏✨",
+                "",
+                "🛍 We'll keep the best deals coming just for you!",
+              ]
+            : [
+                `🙏 <b>Thank you for the honest feedback, ${escapeHtml(greetName(user))}.</b>`,
+                "",
+                `${stars}`,
+                "",
+                "We're sorry it wasn't perfect — and we want to make it right.",
+                "",
+                "Tell us what went wrong below and our team will fix it personally. 💬",
+              ];
+          ctx.session.awaiting = "review_comment";
+          await ctx.reply(warm.join("\n"), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("✍️ Add a comment", "rev:comment").row()
+              .text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
+          });
+          // Let admins see it immediately.
+          await enqueueAdminAlert(
+            [`⭐ <b>New review</b> — ${stars} (${rating}/5)`, `👤 ${escapeHtml(greetName(user))}`, `🆔 <code>${user.telegramId ?? "—"}</code>`].join("\n"),
+          ).catch(() => undefined);
+          break;
+        }
+        case "rev:comment":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "review_comment";
+          await ctx.reply("✍️ Send your comment — we read every one.");
+          break;
+
         case "rep:home":
           await render(ctx, await views.replaceListView(user), true);
           break;

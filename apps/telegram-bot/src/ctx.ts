@@ -66,6 +66,7 @@ export interface SessionData {
     | "sale_btntext"
     | "sale_timer"
     | "sale_url"
+    | "review_comment"
     | "replace_reason"
     | "replace_proof"
     | "admin_reject_note"
@@ -98,6 +99,8 @@ export interface SessionData {
   /** Auto-translate provider being configured. */
   trProvider?: string;
   trKey?: string;
+  /** Review awaiting an optional written comment. */
+  reviewId?: string;
   /** Order item the customer is raising a replacement claim on. */
   replaceItemId?: string;
   /** Reason text captured before the screenshot step. */

@@ -270,6 +270,7 @@ model User {
   mediaUploaded   Media[]
   productsApproved Product[]      @relation("ProductApprover")
   replacementRequests ReplacementRequest[]
+  reviews             Review[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1235,4 +1236,18 @@ model Translation {
 
   @@unique([hash, lang])
   @@index([lang])
+}
+
+/// A customer's review of a delivered order.
+model Review {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  orderId   String?
+  rating    Int      // 1-5
+  comment   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
 }

@@ -28,7 +28,7 @@ export async function getFollowupConfig(): Promise<FollowupConfig> {
   const v = (row?.value ?? null) as Partial<FollowupConfig> | null;
   return {
     enabled: v?.enabled ?? false,
-    delayMins: Number(v?.delayMins ?? 60),
+    delayMins: Number(v?.delayMins ?? 10),
     text: v?.text ?? DEFAULT_TEXT,
     btnText: v?.btnText ?? null,
     btnUrl: v?.btnUrl ?? null,
@@ -69,11 +69,50 @@ export async function scheduleFollowup(orderId: string, storeName: string): Prom
     const products = [...new Set(order.items.map((i) => i.productNameSnap))];
     const product = esc(products.slice(0, 2).join(", ") + (products.length > 2 ? ` +${products.length - 2} more` : ""));
     const text = renderFollowup(cfg.text, { name, order: esc(order.orderNumber), product, store: esc(storeName) });
-    const buttons: OutboxButton[] | undefined =
-      cfg.btnText && cfg.btnUrl ? [{ text: cfg.btnText, url: cfg.btnUrl, style: "success" }] : undefined;
+    // Default to an IN-BOT review button so the rating is captured here and we
+    // can thank them instantly. A custom link replaces it when one is set.
+    const buttons: OutboxButton[] = cfg.btnText && cfg.btnUrl
+      ? [{ text: cfg.btnText, url: cfg.btnUrl, style: "success" }]
+      : [{ text: "⭐ Leave a review", callbackData: `rev:new:${order.id}`, style: "success" }];
     await enqueueTelegramMessage(order.user.telegramId, text, { buttons, delayMs: Math.max(0, cfg.delayMins) * 60_000 });
     return true;
   } catch {
     return false;
   }
+}
+
+/* ── Reviews ──────────────────────────────────────────────────────────────── */
+
+export async function saveReview(userId: string, rating: number, orderId?: string, comment?: string): Promise<{ id: string }> {
+  const r = await prisma.review.create({
+    data: { userId, rating: Math.min(5, Math.max(1, Math.round(rating))), orderId: orderId || null, comment: comment?.slice(0, 1000) || null },
+  });
+  return { id: r.id };
+}
+
+export async function addReviewComment(reviewId: string, comment: string): Promise<void> {
+  await prisma.review.update({ where: { id: reviewId }, data: { comment: comment.slice(0, 1000) } }).catch(() => undefined);
+}
+
+export interface ReviewRow { id: string; who: string; telegramId: string; rating: number; comment: string | null; at: Date }
+
+export async function listReviews(limit = 15): Promise<ReviewRow[]> {
+  const rows = await prisma.review.findMany({
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    include: { user: { select: { telegramHandle: true, firstName: true, telegramId: true } } },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    who: r.user.telegramHandle ? `@${r.user.telegramHandle}` : (r.user.firstName ?? "customer"),
+    telegramId: String(r.user.telegramId ?? ""),
+    rating: r.rating,
+    comment: r.comment,
+    at: r.createdAt,
+  }));
+}
+
+export async function reviewStats(): Promise<{ count: number; avg: number }> {
+  const agg = await prisma.review.aggregate({ _count: { _all: true }, _avg: { rating: true } }).catch(() => null);
+  return { count: agg?._count._all ?? 0, avg: Number(agg?._avg.rating ?? 0) };
 }
