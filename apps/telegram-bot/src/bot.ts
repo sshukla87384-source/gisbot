@@ -1639,6 +1639,7 @@ export function createBot(): Bot<Ctx> {
               text:
                 r.reason === "ALREADY_SPUN" ? "You already spun for this order"
                 : r.reason === "DAILY_LIMIT" ? `Daily limit reached — ${r.maxSpinsPerDay} spins a day. Try again tomorrow!`
+                : r.reason === "ON_MISSION" ? "Spins are paused while your Mission is active"
                 : r.reason === "DISABLED" ? "Not running right now"
                 : "Not eligible",
               show_alert: true,
@@ -1670,7 +1671,10 @@ export function createBot(): Bot<Ctx> {
         case "spn:home":
           await render(ctx, await views.spinView(user), true);
           break;
-        case "spn:go": {
+        case "msn:home":
+          await render(ctx, await views.missionView(user), true);
+          break;
+        case "msn:go": {
           const r = await spin(user.id);
           await ctx.answerCallbackQuery({ text: r.ok ? "🎡 Spinning…" : r.reason === "ALREADY_ACTIVE" ? "You already have a challenge" : "Not available" });
           if (r.ok && r.challenge) {
@@ -1687,16 +1691,16 @@ export function createBot(): Bot<Ctx> {
               { parse_mode: "HTML" },
             );
           }
-          await render(ctx, await views.spinView(user), false);
+          await render(ctx, await views.missionView(user), false);
           break;
         }
-        case "spn:claim": {
+        case "msn:claim": {
           const r = await claimChallenge(user.id, args[0] ?? "");
           await ctx.answerCallbackQuery({
             text: r.ok ? "🎉 Reward added!" : r.reason === "NOT_REACHED" ? "Not there yet" : r.reason === "ALREADY_CLAIMED" ? "Already claimed" : "Expired",
             show_alert: !r.ok,
           });
-          await render(ctx, await views.spinView(user), false);
+          await render(ctx, await views.missionView(user), false);
           break;
         }
         case "prf:orders":

@@ -541,6 +541,7 @@ export async function profileView(user: BotUser): Promise<View> {
     .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
     .add(sbtn("🔔 My Watchlist", cb("wch", "list"), "primary"), sbtn("🔑 Find my keys", cb("lic", "find"), "primary")).row()
     .add(sbtn("🏆 My Tier", cb("prf", "tier"), "success"), sbtn("🎡 Spin & Win", cb("spn", "home"), "success")).row()
+    .add(sbtn("🎯 Missions", cb("msn", "home"), "primary")).row()
     .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
     .add(sbtn(`💱 ${user.currency}`, cb("cur", "home"), "primary"), sbtn("🌐 Language", cb("lang", "home"), "primary")).row();
   backToMenuRow(kb);
@@ -896,38 +897,70 @@ export async function tierView(user: BotUser): Promise<View> {
   };
 }
 
-/** 🎡 Spin — draws a spend challenge, shows progress, claims the reward. */
+/** 🎡 Spin & Win — one spin per purchase, explained. */
 export async function spinView(user: BotUser): Promise<View> {
+  const [cfg, mission] = await Promise.all([getSpinConfig(), activeChallenge(user.id)]);
+  const kb = new InlineKeyboard();
+  if (mission) kb.add(sbtn("🎯 Open my Mission", cb("msn", "home"), "primary")).row();
+  else kb.add(sbtn("🎯 Try a Mission instead", cb("msn", "home"), "primary")).row();
+  navRow(kb, cb("prf", "view"));
+  if (!cfg.enabled) {
+    return { text: `${header(`🎡 ${bold("Spin & Win")}`)}\n\nNot running right now — check back soon!`, kb };
+  }
+  return {
+    text: [
+      header(`🎡 ${bold("Spin & Win")}`),
+      "",
+      "🎁 <b>Every purchase earns a spin.</b>",
+      "",
+      `• Orders of <b>${fmt(cfg.minSpendMinor, user.currency as Currency)}</b> or more can win`
+        + ` up to <b>${fmt(cfg.maxRewardMinor, user.currency as Currency)}</b> in wallet credit`,
+      "• Smaller orders get a “better luck next time”",
+      `• Up to <b>${cfg.maxSpinsPerDay}</b> spins a day`,
+      "",
+      mission
+        ? "⚠️ <b>You're on a Mission right now</b>, so spins are paused. Finish or let it expire to spin again."
+        : "👉 Your spin button appears right after you pay. 🛍",
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** 🎯 Missions — the spend challenge (bigger reward, one at a time). */
+export async function missionView(user: BotUser): Promise<View> {
   const [cfg, active] = await Promise.all([getSpinConfig(), activeChallenge(user.id)]);
   const kb = new InlineKeyboard();
   if (!cfg.enabled) {
     navRow(kb, cb("prf", "view"));
-    return { text: `${header(`🎡 ${bold("Spin & Win")}`)}\n\nNot running right now — check back soon!`, kb };
+    return { text: `${header(`🎯 ${bold("Missions")}`)}\n\nNot running right now — check back soon!`, kb };
   }
   if (!active) {
-    kb.add(sbtn("🎡 SPIN NOW", cb("spn", "go"), "success")).row();
+    kb.add(sbtn("🎯 Start a Mission", cb("msn", "go"), "success")).row();
+    kb.add(sbtn("🎡 Or spin per purchase", cb("spn", "home"), "primary")).row();
     navRow(kb, cb("prf", "view"));
     return {
       text: [
-        header(`🎡 ${bold("Spin & Win")}`),
+        header(`🎯 ${bold("Missions")}`),
         "",
-        "Spin to get a <b>shopping challenge</b>. Complete it and the reward lands straight in your wallet. 💰",
+        "Take on a <b>spending target</b> and earn a bigger reward when you reach it. 💪",
         "",
-        `🎁 Rewards are up to <b>${(cfg.rewardBp / 100).toFixed(1)}%</b> of the challenge amount.`,
-        `⏳ You get <b>${cfg.expiryDays} days</b> to complete it.`,
+        `🎁 Rewards go up to <b>${(cfg.rewardBp / 100).toFixed(1)}%</b> of the target.`,
+        `⏳ You get <b>${cfg.expiryDays} days</b> to finish.`,
         "",
-        "<i>One challenge at a time. Only spending after you spin counts.</i>",
+        "⚠️ <b>While a Mission is running, per-purchase spins are paused</b> — one reward path at a time.",
+        "",
+        "<i>Only spending after you start counts.</i>",
       ].join("\n"),
       kb,
     };
   }
   const bar = "█".repeat(Math.round(active.pct / 10)).padEnd(10, "░");
-  if (active.claimable) kb.add(sbtn(`🎉 Claim ${fmt(active.rewardMinor, active.currency)}`, cb("spn", "claim", active.id), "success")).row();
+  if (active.claimable) kb.add(sbtn(`🎉 Claim ${fmt(active.rewardMinor, active.currency)}`, cb("msn", "claim", active.id), "success")).row();
   else kb.add(sbtn("🛍 Shop now", cb("shp", "home", 1), "primary")).row();
   navRow(kb, cb("prf", "view"));
   return {
     text: [
-      header(`🎡 ${bold("Your Challenge")}`),
+      header(`🎯 ${bold("Your Mission")}`),
       "",
       `🎯 Spend <b>${fmt(active.targetMinor, active.currency)}</b>`,
       `🎁 Earn <b>${fmt(active.rewardMinor, active.currency)}</b> wallet credit`,
@@ -936,10 +969,13 @@ export async function spinView(user: BotUser): Promise<View> {
       `✅ Done: <b>${fmt(active.progressMinor, active.currency)}</b>`,
       active.claimable ? "\n🎉 <b>Complete — claim your reward!</b>" : `⏳ <b>${fmt(active.remainingMinor, active.currency)}</b> to go`,
       `📅 Expires ${active.expiresAt.toISOString().slice(0, 10)}`,
+      "",
+      "<i>Spins are paused while a Mission is active.</i>",
     ].join("\n"),
     kb,
   };
 }
+
 
 /** 🔔 My watchlist — what they asked to be told about. */
 export async function watchlistView(user: BotUser): Promise<View> {

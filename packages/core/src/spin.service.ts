@@ -113,7 +113,7 @@ export async function activeChallenge(userId: string): Promise<ChallengeView | n
 /** Draw a challenge. One active at a time. */
 export async function spin(userId: string): Promise<{ ok: boolean; reason?: string; challenge?: ChallengeView }> {
   const cfg = await getSpinConfig();
-  if (!cfg.enabled) return { ok: false, reason: "DISABLED" };
+  if (!cfg.enabled || !(await promoEnabled("spin"))) return { ok: false, reason: "DISABLED" };
   const existing = await activeChallenge(userId);
   if (existing) return { ok: false, reason: "ALREADY_ACTIVE", challenge: existing };
 
@@ -186,7 +186,7 @@ export async function spinStats(): Promise<{ active: number; completed: number; 
 
 export interface PurchaseSpinResult {
   ok: boolean;
-  reason?: "DISABLED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "ALREADY_SPUN" | "DAILY_LIMIT";
+  reason?: "DISABLED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "ALREADY_SPUN" | "DAILY_LIMIT" | "ON_MISSION";
   spinsToday?: number;
   maxSpinsPerDay?: number;
   won?: boolean;
@@ -216,6 +216,9 @@ export async function spinForOrder(userId: string, orderId: string): Promise<Pur
   // Daily cap, regardless of how many orders they place.
   const dayStart = new Date();
   dayStart.setHours(0, 0, 0, 0);
+  // A customer on a Mission has chosen that reward path — no spins as well.
+  if (await activeChallenge(userId)) return { ok: false, reason: "ON_MISSION" };
+
   const spinsToday = await prisma.spinChallenge.count({ where: { userId, createdAt: { gte: dayStart }, orderId: { not: null } } });
   if (spinsToday >= cfg.maxSpinsPerDay) {
     return { ok: false, reason: "DAILY_LIMIT", spinsToday, maxSpinsPerDay: cfg.maxSpinsPerDay };
