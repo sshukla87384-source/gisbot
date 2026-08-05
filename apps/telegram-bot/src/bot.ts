@@ -28,6 +28,8 @@ import {
   getWallet,
   convertMinor,
   getCartView,
+  spin,
+  claimChallenge,
   getBnplStatus,
   addStock,
   saveReview,
@@ -1503,6 +1505,41 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.menuView(user), false);
           break;
 
+        case "prf:tier":
+          await render(ctx, await views.tierView(user), true);
+          break;
+        case "spn:home":
+          await render(ctx, await views.spinView(user), true);
+          break;
+        case "spn:go": {
+          const r = await spin(user.id);
+          await ctx.answerCallbackQuery({ text: r.ok ? "🎡 Spinning…" : r.reason === "ALREADY_ACTIVE" ? "You already have a challenge" : "Not available" });
+          if (r.ok && r.challenge) {
+            await ctx.reply(
+              [
+                "🎡 <b>Your challenge is set!</b>",
+                "",
+                `🎯 Spend <b>${fmt(r.challenge.targetMinor, r.challenge.currency)}</b>`,
+                `🎁 Earn <b>${fmt(r.challenge.rewardMinor, r.challenge.currency)}</b> wallet credit`,
+                `📅 You have until ${r.challenge.expiresAt.toISOString().slice(0, 10)}`,
+                "",
+                "Only spending from now on counts. Good luck! 🍀",
+              ].join("\n"),
+              { parse_mode: "HTML" },
+            );
+          }
+          await render(ctx, await views.spinView(user), false);
+          break;
+        }
+        case "spn:claim": {
+          const r = await claimChallenge(user.id, args[0] ?? "");
+          await ctx.answerCallbackQuery({
+            text: r.ok ? "🎉 Reward added!" : r.reason === "NOT_REACHED" ? "Not there yet" : r.reason === "ALREADY_CLAIMED" ? "Already claimed" : "Expired",
+            show_alert: !r.ok,
+          });
+          await render(ctx, await views.spinView(user), false);
+          break;
+        }
         case "prf:orders":
           await render(ctx, await views.recentOrdersView(user), true);
           break;

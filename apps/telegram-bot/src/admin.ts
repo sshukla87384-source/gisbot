@@ -121,6 +121,15 @@ import {
   setVerifiedPurchase,
   moderationLog,
   REJECT_REASONS,
+  getTiers,
+  setTiers,
+  listGifts,
+  createGift,
+  markGiftDelivered,
+  getSpinConfig,
+  setSpinConfig,
+  spinStats,
+  REWARD_CAP_BP,
   listTestimonials,
   testimonialStats,
   getTestimonial,
@@ -727,6 +736,8 @@ async function usersMenuView(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard()
     .add(sbtn("📋 View Users", cb("adm", "uview"), "primary")).row()
     .add(sbtn("💰 Wallets & BNPL", cb("adm", "ufund"), "success")).row()
+    .add(sbtn("🏆 Loyalty Tiers", cb("adm", "loy"), "primary"), sbtn("🎁 Gifts", cb("adm", "gifts"), "primary")).row()
+    .add(sbtn("🎡 Spin & Win", cb("adm", "spncfg"), "primary")).row()
     .add(sbtn("🔎 Customer Lookup", cb("adm", "ulook"), "primary")).row()
     .text("◀️ Back", cb("adm", "home"));
   await show(ctx, "👥 <b>Users Management</b>\n<i>View, look up, credit/debit or ban customers</i>", kb, true);
@@ -997,6 +1008,93 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("🧹 Cleared.");
       return logsMenuView(ctx);
     }
+    case "loy": {
+      const tiers = await getTiers();
+      const kb = new InlineKeyboard()
+        .add(sbtn("✏️ Edit tiers", cb("adm", "loyedit"), "primary")).row()
+        .text("◀️ Back", cb("adm", "m_users"));
+      await show(ctx, [
+        "🏆 <b>Loyalty Tiers</b>",
+        "",
+        "Tiers are calculated from each customer's real lifetime spend on completed orders, and they are told when they level up.",
+        "",
+        ...tiers.map((t) => `<b>${escapeHtml(t.name)}</b> — from <b>${(t.minSpendMinor / 100).toFixed(2)}</b> · ${escapeHtml(t.perk)}`),
+        "",
+        "<i>Send gifts from 🎁 Gifts — the bot notifies the customer and you deliver by hand.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "loyedit":
+      ctx.session.awaiting = "admin_loy_tiers";
+      await askStep(ctx, [
+        "✏️ <b>Edit tiers</b> — one per line as <code>Name | minimum spend | perk</code>",
+        "",
+        "Example:",
+        "<code>Bronze | 0 | Member pricing</code>",
+        "<code>Silver | 50 | Priority support</code>",
+        "<code>Gold | 250 | Priority support + gifts</code>",
+      ].join("\n"));
+      return;
+    case "gifts": {
+      const rows = await listGifts("PENDING", 12);
+      const kb = new InlineKeyboard().add(sbtn("🎁 Send a gift", cb("adm", "giftnew"), "success")).row();
+      for (const g of rows) kb.text(`✅ Mark delivered — ${g.who.slice(0, 14)} · ${g.title.slice(0, 16)}`, cb("adm", "giftdone", g.id)).row();
+      kb.text("◀️ Back", cb("adm", "m_users"));
+      await show(ctx, [
+        "🎁 <b>Gifts</b>",
+        rows.length ? `🕐 <b>${rows.length}</b> waiting for you to deliver` : "✅ Nothing pending",
+        "",
+        ...rows.flatMap((g) => [`🎁 <b>${escapeHtml(g.title)}</b> → ${escapeHtml(g.who)}${g.tier ? ` (${g.tier})` : ""}`, g.detail ? `   <i>${escapeHtml(g.detail).slice(0, 120)}</i>` : ""]),
+        "",
+        "<i>The customer has already been notified. Send the gift yourself, then mark it delivered.</i>",
+      ].filter((l) => l !== "").join("\n"), kb, true);
+      return;
+    }
+    case "giftnew":
+      ctx.session.awaiting = "admin_gift_user";
+      await askStep(ctx, "🎁 Send the customer's <b>@username</b> or <b>Telegram ID</b>:");
+      return;
+    case "giftdone": {
+      const ok = await markGiftDelivered(id, "bot-admin");
+      await ctx.reply(ok ? "✅ Marked delivered — the customer has been told." : "Couldn't update that gift.");
+      return handleAdminCallback(ctx, "gifts", []);
+    }
+    case "spncfg": {
+      const [cfg, st] = await Promise.all([getSpinConfig(), spinStats()]);
+      const kb = new InlineKeyboard()
+        .add(sbtn(cfg.enabled ? "✅ ON — turn off" : "🚫 OFF — turn on", cb("adm", "spntog"), cfg.enabled ? "success" : "danger")).row()
+        .add(sbtn("🎯 Challenge amounts", cb("adm", "spntgt"), "primary"), sbtn("⏳ Days to finish", cb("adm", "spnexp"), "primary")).row()
+        .text("◀️ Back", cb("adm", "m_users"));
+      await show(ctx, [
+        "🎡 <b>Spin &amp; Win</b>",
+        `Status: <b>${cfg.enabled ? "ON" : "OFF"}</b>`,
+        "",
+        "A spin assigns a <b>spend challenge</b>. When the customer reaches it, the reward is credited to their wallet automatically.",
+        "",
+        `🎯 Amounts drawn: ${cfg.targetsMinor.map((t) => `<b>${(t / 100).toFixed(2)}</b>`).join(" · ")}`,
+        `🎁 Reward: <b>${(cfg.rewardBp / 100).toFixed(1)}%</b> of the amount (hard-capped at <b>${(REWARD_CAP_BP / 100).toFixed(0)}%</b> in code)`,
+        `⏳ Time to finish: <b>${cfg.expiryDays}</b> days`,
+        "",
+        `📊 Active: <b>${st.active}</b> · Completed: <b>${st.completed}</b> · Paid out: <b>${(st.paidMinor / 100).toFixed(2)}</b>`,
+        "",
+        "<i>Only spend AFTER the spin counts, verified from completed orders. Each reward is credited once.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "spntog": {
+      const cfg = await getSpinConfig();
+      const n = await setSpinConfig({ enabled: !cfg.enabled });
+      await ctx.reply(n.enabled ? "🎡 Spin & Win is ON — customers can spin from My Account." : "🚫 Spin & Win is OFF.");
+      return handleAdminCallback(ctx, "spncfg", []);
+    }
+    case "spntgt":
+      ctx.session.awaiting = "admin_spn_targets";
+      await askStep(ctx, "🎯 Send the challenge amounts, comma separated (e.g. <code>50, 100, 250</code>):");
+      return;
+    case "spnexp":
+      ctx.session.awaiting = "admin_spn_days";
+      await askStep(ctx, "⏳ How many <b>days</b> does a customer get to finish a challenge? (e.g. <code>14</code>)");
+      return;
     case "ufund": return fundedUsersView(ctx);
     case "uhist": return walletHistoryView(ctx, id);
     case "ubnpl":
@@ -2548,6 +2646,56 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await ctx.reply("⚠️ That is not valid JSON. Export a file first to see the expected shape.");
     }
     await handleAdminCallback(ctx, "tst", ["1"]);
+    return true;
+  }
+  if (awaiting === "admin_loy_tiers") {
+    const tiers = text.split("\n").map((l) => l.split("|").map((x) => x.trim())).filter((p) => p[0])
+      .map((p) => ({ name: p[0] ?? "", minSpendMinor: Math.round(Number.parseFloat((p[1] ?? "0").replace(/[^0-9.]/g, "")) * 100) || 0, perk: p[2] ?? "" }));
+    if (tiers.length === 0) { await ctx.reply("⚠️ Couldn't read any tiers — use <code>Name | amount | perk</code> per line.", { parse_mode: "HTML" }); return true; }
+    await setTiers(tiers);
+    await ctx.reply(`🏆 Saved <b>${tiers.length}</b> tier(s).`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "loy", []);
+    return true;
+  }
+  if (awaiting === "admin_gift_user") {
+    const u = await resolveUserByTelegramId(text.trim().replace(/^@/, "")) ?? null;
+    if (!u) {
+      const byId = await getUserById(text.trim()).catch(() => null);
+      if (!byId) { await ctx.reply("Couldn't find that customer. Send their @username or Telegram ID."); return true; }
+      ctx.session.giftUser = byId.id;
+    } else ctx.session.giftUser = u.id;
+    ctx.session.awaiting = "admin_gift_title";
+    await askStep(ctx, "🎁 What is the gift? (short title the customer will see, e.g. <code>Free 1-month Netflix</code>)");
+    return true;
+  }
+  if (awaiting === "admin_gift_title") {
+    ctx.session.giftTitle = text.trim().slice(0, 120);
+    ctx.session.awaiting = "admin_gift_detail";
+    await askStep(ctx, "📝 Any detail for them? Send <code>-</code> to skip.");
+    return true;
+  }
+  if (awaiting === "admin_gift_detail") {
+    const uid = ctx.session.giftUser ?? ""; const title = ctx.session.giftTitle ?? "";
+    ctx.session.giftUser = undefined; ctx.session.giftTitle = undefined;
+    if (!uid || !title) { await ctx.reply("Gift draft expired — start again from 🎁 Gifts."); return true; }
+    await createGift(uid, title, text.trim() === "-" ? null : text.trim(), "bot-admin");
+    await ctx.reply("🎁 <b>Gift created.</b> The customer has been notified — now send it to them and tap ✅ Mark delivered.", { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "gifts", []);
+    return true;
+  }
+  if (awaiting === "admin_spn_targets") {
+    const nums = text.split(/[,\s]+/).map((x) => Math.round(Number.parseFloat(x.replace(/[^0-9.]/g, "")) * 100)).filter((n) => Number.isFinite(n) && n > 0);
+    if (nums.length === 0) { await ctx.reply("⚠️ Send at least one amount, e.g. <code>50, 100</code>", { parse_mode: "HTML" }); return true; }
+    const c = await setSpinConfig({ targetsMinor: nums });
+    await ctx.reply(`🎯 Amounts set: ${c.targetsMinor.map((t) => (t / 100).toFixed(2)).join(" · ")}\nMax reward each: ${c.targetsMinor.map((t) => (Math.floor((t * c.rewardBp) / 10000) / 100).toFixed(2)).join(" · ")}`);
+    await handleAdminCallback(ctx, "spncfg", []);
+    return true;
+  }
+  if (awaiting === "admin_spn_days") {
+    const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+    const c = await setSpinConfig({ expiryDays: Number.isFinite(n) ? n : 14 });
+    await ctx.reply(`⏳ Customers get <b>${c.expiryDays}</b> days.`, { parse_mode: "HTML" });
+    await handleAdminCallback(ctx, "spncfg", []);
     return true;
   }
   if (awaiting === "admin_fx_rate") {

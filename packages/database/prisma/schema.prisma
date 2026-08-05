@@ -271,6 +271,8 @@ model User {
   productsApproved Product[]      @relation("ProductApprover")
   replacementRequests ReplacementRequest[]
   reviews             Review[]
+  loyaltyGifts        LoyaltyGift[]
+  spinChallenges      SpinChallenge[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1333,4 +1335,54 @@ model TestimonialLog {
   createdAt     DateTime @default(now())
 
   @@index([testimonialId, createdAt])
+}
+
+enum GiftStatus {
+  PENDING
+  DELIVERED
+  CANCELLED
+}
+
+/// A gift the admin sends to a customer. The bot only NOTIFIES — delivery is
+/// done by hand from the admin panel and marked here.
+model LoyaltyGift {
+  id          String     @id @default(cuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id])
+  title       String
+  detail      String?    @db.Text
+  tierAtGrant String?
+  status      GiftStatus @default(PENDING)
+  createdBy   String
+  deliveredBy String?
+  deliveredAt DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+enum ChallengeStatus {
+  ACTIVE
+  COMPLETED
+  EXPIRED
+}
+
+/// A spend challenge drawn from the wheel. Reward is capped at 2% of the target
+/// in code (see spin.service.ts) and paid to the wallet once, idempotently.
+model SpinChallenge {
+  id            String          @id @default(cuid())
+  userId        String
+  user          User            @relation(fields: [userId], references: [id])
+  targetMinor   Int
+  rewardMinor   Int
+  currency      String
+  baselineMinor Int // spend already recorded when the challenge started
+  status        ChallengeStatus @default(ACTIVE)
+  claimedAt     DateTime?
+  expiresAt     DateTime
+  createdAt     DateTime        @default(now())
+
+  @@index([userId, status])
+  @@index([status, expiresAt])
 }

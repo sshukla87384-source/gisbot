@@ -19,6 +19,10 @@ import {
   listReplaceableItems,
   productRating,
   publishedTestimonials,
+  tierOf,
+  getTiers,
+  getSpinConfig,
+  activeChallenge,
   storeRating,
   productRatings,
   greetName,
@@ -499,6 +503,7 @@ export async function profileView(user: BotUser): Promise<View> {
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
     .add(sbtn("🔍 Search products", cb("shp", "find"), "primary"), sbtn("💳 Wallet", cb("wal", "view"), "primary")).row()
     .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
+    .add(sbtn("🏆 My Tier", cb("prf", "tier"), "success"), sbtn("🎡 Spin & Win", cb("spn", "home"), "success")).row()
     .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row()
     .add(sbtn(`💱 ${user.currency}`, cb("cur", "home"), "primary"), sbtn("🌐 Language", cb("lang", "home"), "primary")).row();
   backToMenuRow(kb);
@@ -821,6 +826,77 @@ export function replaceAskReasonView(label: string): View {
       `📦 <b>${escapeHtml(label)}</b>`,
       "",
       "Step 1 of 2 — describe the problem in one message (e.g. <i>password not working</i>, <i>key already used</i>).",
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** 🏆 My Tier — real lifetime spend, next tier, and any gifts. */
+export async function tierView(user: BotUser): Promise<View> {
+  const [st, tiers] = await Promise.all([tierOf(user.id), getTiers()]);
+  const bar = (pct: number): string => "█".repeat(Math.round(pct / 10)).padEnd(10, "░");
+  const kb = new InlineKeyboard();
+  kb.add(sbtn("🎡 Spin for a challenge", cb("spn", "home"), "success")).row();
+  navRow(kb, cb("prf", "view"));
+  return {
+    text: [
+      header(`🏆 ${bold("My Tier")}`),
+      "",
+      `Your tier: <b>${st.tier.name}</b> — ${escapeHtml(st.tier.perk)}`,
+      `💰 Lifetime spend: <b>${fmt(st.spendMinor, st.currency)}</b>`,
+      "",
+      st.next
+        ? `${bar(st.progressPct)} ${st.progressPct}%\n📈 Spend <b>${fmt(st.toNextMinor, st.currency)}</b> more to reach <b>${st.next.name}</b>`
+        : "👑 <b>You are at the top tier.</b> Thank you!",
+      "",
+      HR,
+      "<b>All tiers</b>",
+      ...tiers.map((t) => `${t.name === st.tier.name ? "▶️" : "  "} <b>${t.name}</b> — from ${fmt(t.minSpendMinor, st.currency)} · ${escapeHtml(t.perk)}`),
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** 🎡 Spin — draws a spend challenge, shows progress, claims the reward. */
+export async function spinView(user: BotUser): Promise<View> {
+  const [cfg, active] = await Promise.all([getSpinConfig(), activeChallenge(user.id)]);
+  const kb = new InlineKeyboard();
+  if (!cfg.enabled) {
+    navRow(kb, cb("prf", "view"));
+    return { text: `${header(`🎡 ${bold("Spin & Win")}`)}\n\nNot running right now — check back soon!`, kb };
+  }
+  if (!active) {
+    kb.add(sbtn("🎡 SPIN NOW", cb("spn", "go"), "success")).row();
+    navRow(kb, cb("prf", "view"));
+    return {
+      text: [
+        header(`🎡 ${bold("Spin & Win")}`),
+        "",
+        "Spin to get a <b>shopping challenge</b>. Complete it and the reward lands straight in your wallet. 💰",
+        "",
+        `🎁 Rewards are up to <b>${(cfg.rewardBp / 100).toFixed(1)}%</b> of the challenge amount.`,
+        `⏳ You get <b>${cfg.expiryDays} days</b> to complete it.`,
+        "",
+        "<i>One challenge at a time. Only spending after you spin counts.</i>",
+      ].join("\n"),
+      kb,
+    };
+  }
+  const bar = "█".repeat(Math.round(active.pct / 10)).padEnd(10, "░");
+  if (active.claimable) kb.add(sbtn(`🎉 Claim ${fmt(active.rewardMinor, active.currency)}`, cb("spn", "claim", active.id), "success")).row();
+  else kb.add(sbtn("🛍 Shop now", cb("shp", "home", 1), "primary")).row();
+  navRow(kb, cb("prf", "view"));
+  return {
+    text: [
+      header(`🎡 ${bold("Your Challenge")}`),
+      "",
+      `🎯 Spend <b>${fmt(active.targetMinor, active.currency)}</b>`,
+      `🎁 Earn <b>${fmt(active.rewardMinor, active.currency)}</b> wallet credit`,
+      "",
+      `${bar} <b>${active.pct}%</b>`,
+      `✅ Done: <b>${fmt(active.progressMinor, active.currency)}</b>`,
+      active.claimable ? "\n🎉 <b>Complete — claim your reward!</b>" : `⏳ <b>${fmt(active.remainingMinor, active.currency)}</b> to go`,
+      `📅 Expires ${active.expiresAt.toISOString().slice(0, 10)}`,
     ].join("\n"),
     kb,
   };

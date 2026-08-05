@@ -91,6 +91,12 @@ export interface SessionData {
     | "admin_fup_text"
     | "admin_fup_delay"
     | "admin_fup_btn"
+    | "admin_loy_tiers"
+    | "admin_gift_user"
+    | "admin_gift_title"
+    | "admin_gift_detail"
+    | "admin_spn_targets"
+    | "admin_spn_days"
     | "admin_fx_rate"
     | "admin_tr_key"
     | "admin_tr_url"
@@ -118,6 +124,8 @@ export interface SessionData {
   tstFilter?: "DRAFT" | "PENDING" | "PUBLISHED" | "ARCHIVED" | "ALL";
   tstSearch?: string;
   tstTarget?: string;
+  giftUser?: string;
+  giftTitle?: string;
   tstDraft?: { customerName?: string; body?: string; rating?: number; productName?: string | null };
   /** Review awaiting an optional written comment. */
   reviewId?: string;

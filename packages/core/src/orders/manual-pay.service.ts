@@ -4,6 +4,7 @@ import { CoreError, cb, encryptSecret, formatMinor, type CurrencyCode } from "@g
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
+import { notifyTierChange } from "../loyalty.service.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage } from "../users/user.service.js";
@@ -535,6 +536,11 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
 export async function notifyOrderToAdmins(orderId: string, method = "order"): Promise<void> {
   // After-sale follow-up (review request / promo), if the admin enabled one.
   void scheduleFollowup(orderId, loadConfig().STORE_NAME).catch(() => undefined);
+  // Tier may have changed with this order — tell them if so (never blocks).
+  void (async () => {
+    const o = await prisma.order.findUnique({ where: { id: orderId }, select: { userId: true } });
+    if (o) await notifyTierChange(o.userId);
+  })().catch(() => undefined);
   try {
     const { autoFulfillSupplierItems } = await import("../supplier.service.js");
     await autoFulfillSupplierItems(orderId);
