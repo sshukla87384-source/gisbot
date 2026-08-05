@@ -18,6 +18,7 @@ import {
   setProductWarranty,
   setProductReusableSecret,
   setProductReusableStock,
+  setProductManualStock,
   getProductReusableSecret,
   setTranslateCreds,
   getTranslateProvider,
@@ -407,12 +408,13 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.add(sbtn(`♾ Same link for everyone: ${p.reusable ? "✅ ON" : "🚫 OFF"}`, cb("adm", "preuse", p.id), p.reusable ? "success" : "primary")).row();
   if (p.reusable) kb.text(`🔢 Quantity: ${p.reusableStock ?? "∞ unlimited"}`, cb("adm", "preuseqty", p.id)).row();
+  else if (p.fulfillmentMode === "MANUAL") kb.text(`🔢 Quantity: ${p.manualStock ?? "∞ unlimited"}`, cb("adm", "pmanqty", p.id)).row();
   kb.text("🎨 Button name & colour", cb("adm", "pbtn", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
   const deliv = p.supplierId ? "🤖 Auto (supplier)" : p.fulfillmentMode === "AUTOMATIC" ? "⚡ Auto (instant)" : "🕐 Manual";
-  const war = p.warranty ? `🛡 Warranty${p.warrantyDays ? ` ${p.warrantyDays}d` : ""}` : "🚫 No warranty";
-  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible</b>" : "🙈 <b>Hidden</b>"} · ${p.status} · ${deliv}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""} · ${war}`;
+  const war = p.warranty ? ` · 🛡 Warranty${p.warrantyDays ? ` ${p.warrantyDays}d` : ""}` : "";
+  const text = `📦 <b>${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.nameHtml ?? escapeHtml(p.name)}</b>\n${p.status === "ACTIVE" ? "👁 <b>Visible</b>" : "🙈 <b>Hidden</b>"} · ${p.status} · ${deliv}${p.onSalePct ? ` · 🔥 ${Math.round(p.onSalePct / 100)}% off` : ""}${war}`;
   await show(ctx, text, kb, true);
 }
 
@@ -1208,6 +1210,18 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "While this is set the product is <b>never out of stock</b> and no keys are consumed.",
         cur ? `\nCurrently: <code>${escapeHtml(cur)}</code>` : "",
         "\nSend <code>-</code> to turn it off and go back to normal stock.",
+      ].join("\n"));
+      return;
+    }
+    case "pmanqty": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_manqty";
+      await askStep(ctx, [
+        "🔢 <b>Quantity for this manual product</b>",
+        "",
+        "Send a number (e.g. <code>25</code>) — it counts down with each sale and shows sold out at 0.",
+        "",
+        "Send <code>-</code> for <b>unlimited</b> (the default for manual products).",
       ].join("\n"));
       return;
     }
@@ -2233,6 +2247,19 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       { parse_mode: "HTML" },
     );
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_p_manqty") {
+    const pid = ctx.session.admProductId ?? "";
+    if (text.trim() === "-") {
+      await setProductManualStock(pid, null);
+      await ctx.reply("♾ Quantity set to <b>unlimited</b> — this manual product never shows sold out.", { parse_mode: "HTML" });
+    } else {
+      const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
+      await setProductManualStock(pid, Number.isFinite(n) ? n : 0);
+      await ctx.reply(`🔢 Quantity set to <b>${Number.isFinite(n) ? n : 0}</b>. It counts down with each sale.`, { parse_mode: "HTML" });
+    }
+    await productView(ctx, pid);
     return true;
   }
   if (awaiting === "admin_p_reuseqty") {

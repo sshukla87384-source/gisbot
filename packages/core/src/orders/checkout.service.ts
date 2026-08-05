@@ -69,6 +69,14 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
 
           // Auto-deliver from available stock whenever stock exists — regardless of the
           // coarse fulfillment mode — so any product with keys/accounts is delivered instantly.
+          // A MANUAL product with a declared quantity counts down too.
+          if (!line.reusableSecret && line.manualStock !== null && line.manualStock !== undefined) {
+            const dec = await tx.product.updateMany({
+              where: { id: line.productId, manualStock: { gte: 1 } },
+              data: { manualStock: { decrement: 1 } },
+            });
+            if (dec.count === 0) throw new CoreError("OUT_OF_STOCK", `${line.productName} is sold out`);
+          }
           let delivered = false;
           // A reusable product (e.g. one shared redemption link) delivers the
           // SAME value to every buyer and never consumes inventory.

@@ -162,11 +162,11 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; reusable?: boolean; reusableStock?: number | null; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null }
+export interface ProductBrief { id: string; reusable?: boolean; reusableStock?: number | null; manualStock?: number | null; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null }
 
 type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null };
 function toBrief(p: PRow): ProductBrief {
-  return { id: p.id, reusable: Boolean((p as unknown as { reusableSecretEnc?: string | null }).reusableSecretEnc), reusableStock: (p as unknown as { reusableStock?: number | null }).reusableStock ?? null, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays };
+  return { id: p.id, reusable: Boolean((p as unknown as { reusableSecretEnc?: string | null }).reusableSecretEnc), reusableStock: (p as unknown as { reusableStock?: number | null }).reusableStock ?? null, manualStock: (p as unknown as { manualStock?: number | null }).manualStock ?? null, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays };
 }
 
 export async function getProductBriefById(id: string): Promise<ProductBrief | null> {
@@ -1027,6 +1027,14 @@ export async function closeBnpl(userId: string, writeOff = false): Promise<{ ok:
  * coupon). While set, the product is never out of stock and no inventory is
  * consumed. Pass null to clear it and go back to unit stock.
  */
+export async function setProductManualStock(productId: string, qty: number | null): Promise<void> {
+  await prisma.product.update({
+    where: { id: productId },
+    data: { manualStock: qty !== null && qty >= 0 ? Math.round(qty) : null },
+  });
+  await invalidate("cat:*");
+}
+
 export async function setProductReusableStock(productId: string, qty: number | null): Promise<void> {
   await prisma.product.update({
     where: { id: productId },

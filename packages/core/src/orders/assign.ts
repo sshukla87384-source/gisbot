@@ -29,6 +29,8 @@ export interface PricedLine {
   reusableSecret: string | null;
   /** Remaining sellable quantity for a reusable product; null = unlimited. */
   reusableStock: number | null;
+  /** Optional sellable quantity for a MANUAL product; null = unlimited. */
+  manualStock: number | null;
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
@@ -84,6 +86,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       allowPwChange: v.product.allowPasswordChange,
       reusableSecret: v.product.reusableSecretEnc ? decryptSecret(v.product.reusableSecretEnc, masterKey) : null,
       reusableStock: v.product.reusableStock,
+      manualStock: v.product.fulfillmentMode === "MANUAL" ? v.product.manualStock : null,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
       unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),

@@ -72,6 +72,7 @@ export interface SessionData {
     | "admin_reject_note"
     | "admin_p_reuse"
     | "admin_p_reuseqty"
+    | "admin_p_manqty"
     | "admin_p_warrantydays"
     | "wallet_inr_amount"
     | "wallet_inr_utr"

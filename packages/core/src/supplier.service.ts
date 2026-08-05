@@ -124,7 +124,10 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
       ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid", "_id"]),
       name: pickStr(p, ["name", "title", "product", "label", "productName", "product_name"]) || "Product",
       description: pickStr(p, ["description", "desc", "details", "info", "about", "content", "body", "long_description", "longDescription", "summary"]),
-      note: pickStr(p, ["note", "notes", "instructions", "instruction", "warranty", "terms", "guide", "activation", "how_to_use", "howToUse", "delivery_note", "deliveryNote"]),
+      // NOTE: "warranty" is deliberately NOT read here — warranty is a real
+      // per-product toggle in this store, and importing a supplier's warranty
+      // blurb made it appear in the description even for no-warranty products.
+      note: pickStr(p, ["note", "notes", "instructions", "instruction", "terms", "guide", "activation", "how_to_use", "howToUse", "delivery_note", "deliveryNote"]),
       priceMinor: priceMinorOf(p),
       stock: stockOf(p),
       // Sibling shops need the VARIANT id to place an order, not the product id.
