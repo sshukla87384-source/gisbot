@@ -18,7 +18,6 @@ async function main(): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Open the store" },
     { command: "shop", description: "Browse products" },
-    { command: "menu", description: "Main menu" },
     { command: "help", description: "Help & support" },
     { command: "wallet", description: "Wallet & deposit" },
     { command: "orders", description: "My orders" },
