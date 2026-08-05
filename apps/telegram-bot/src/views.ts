@@ -374,6 +374,9 @@ export async function walletView(user: BotUser): Promise<View> {
   const lines = [
     header(`💰 ${bold("Wallet")}`),
     `Balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+    wallet.currency === "USD"
+      ? `🇮🇳 Worth about <b>₹${(convertMinor(Number(wallet.balanceMinor), "USD" as Currency, "INR" as Currency) / 100).toFixed(2)}</b> at the store rate`
+      : `🪙 Worth about <b>${toUsdt(Number(wallet.balanceMinor), wallet.currency as Currency)} USDT</b> at the store rate`,
   ];
   if (bnpl.limitMinor > 0) {
     lines.push(
@@ -485,7 +488,11 @@ export async function profileView(user: BotUser): Promise<View> {
       user.isVip ? `${e("vip")} <b>VIP member</b>` : "",
       "",
       HR,
-      `💳 Wallet: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>`,
+      `💳 Wallet: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${
+        wallet.currency === "USD"
+          ? `  <i>(≈ ₹${(convertMinor(Number(wallet.balanceMinor), "USD" as Currency, "INR" as Currency) / 100).toFixed(2)})</i>`
+          : `  <i>(≈ ${toUsdt(Number(wallet.balanceMinor), wallet.currency as Currency)} USDT)</i>`
+      }`,
       bnpl && bnpl.limitMinor > 0
         ? `🕒 Pay Later: <b>${fmt(bnpl.availableMinor, bnpl.currency)}</b> available${bnpl.outstandingMinor > 0 ? ` · owed <b>${fmt(bnpl.outstandingMinor, bnpl.currency)}</b>` : ""}`
         : "",

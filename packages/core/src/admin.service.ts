@@ -615,9 +615,16 @@ export async function setProductPublicPrice(
     take: 1,
   });
   const oldMinor = beforeRows[0]?.amountMinor ?? null;
+  // Whichever currency you skip is derived from the other at the store rate, so a
+  // product is never left unpriced for half your customers.
+  const rate = usdtRate("INR"); // INR per 1 USD
+  let usd = prices.usdMinor && prices.usdMinor > 0 ? prices.usdMinor : 0;
+  let inr = prices.inrMinor && prices.inrMinor > 0 ? prices.inrMinor : 0;
+  if (usd > 0 && inr === 0) inr = Math.max(1, Math.round(usd * rate));
+  else if (inr > 0 && usd === 0) usd = Math.max(1, Math.round(inr / rate));
   const entries: Array<["USD" | "INR", number]> = [];
-  if (prices.usdMinor && prices.usdMinor > 0) entries.push(["USD", prices.usdMinor]);
-  if (prices.inrMinor && prices.inrMinor > 0) entries.push(["INR", prices.inrMinor]);
+  if (usd > 0) entries.push(["USD", usd]);
+  if (inr > 0) entries.push(["INR", inr]);
   for (const v of variants) {
     for (const [currency, amt] of entries) {
       await prisma.variantPrice.upsert({
@@ -630,7 +637,7 @@ export async function setProductPublicPrice(
   await prisma.product.update({ where: { id: productId }, data: { priceLocked: true } }); // keep this price through supplier re-syncs
   await invalidate("cat:*");
 
-  const newMinor = (announceCurrency === "USD" ? prices.usdMinor : prices.inrMinor) ?? null;
+  const newMinor = (announceCurrency === "USD" ? usd : inr) || null;
   if (opts.announce && oldMinor !== null && newMinor !== null && oldMinor !== newMinor) {
     const { announcePriceChange } = await import("./broadcast.service.js");
     await announcePriceChange(productId, oldMinor, newMinor, announceCurrency).catch(() => undefined);

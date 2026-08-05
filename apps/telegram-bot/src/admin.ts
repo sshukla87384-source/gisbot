@@ -2053,7 +2053,10 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const usdMinor = ctx.session.pubUsdMinor ?? 0; ctx.session.pubUsdMinor = undefined;
     if (usdMinor <= 0 && inrMinor <= 0) { await ctx.reply("No price set (both were 0)."); await productView(ctx, pid); return true; }
     const chg = await setProductPublicPrice(pid, { usdMinor, inrMinor });
-    const parts = [usdMinor > 0 ? `$${(usdMinor / 100).toFixed(2)}` : null, inrMinor > 0 ? `₹${(inrMinor / 100).toFixed(2)}` : null].filter(Boolean).join(" · ");
+    const rate = await getInrPerUsdt();
+    const shownUsd = usdMinor > 0 ? usdMinor : Math.max(1, Math.round(inrMinor / rate));
+    const shownInr = inrMinor > 0 ? inrMinor : Math.max(1, Math.round(usdMinor * rate));
+    const parts = [`$${(shownUsd / 100).toFixed(2)}`, `₹${(shownInr / 100).toFixed(2)}`].join(" · ") + ((usdMinor > 0) !== (inrMinor > 0) ? ` <i>(the skipped one was auto-converted at ${rate} INR = $1)</i>` : "");
     await ctx.reply(`✅ Public price updated: <b>${parts}</b> (all variants).`, { parse_mode: "HTML" });
     // Offer the customer-facing alert only when the price actually moved.
     if (chg.oldMinor !== null && chg.newMinor !== null && chg.oldMinor !== chg.newMinor) {
