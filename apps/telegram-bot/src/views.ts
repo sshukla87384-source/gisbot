@@ -818,6 +818,7 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
     if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
   }
   kb.add(sbtn("⚡ Buy this again", cb("ord", "again", orderId), "success")).row();
+  kb.add(sbtn("⭐ Rate this order", cb("rev", "new", orderId), "primary")).row();
   kb.text("🔄 Request a replacement", cb("rep", "home")).row();
   kb.text("◀️ Orders", cb("ord", "list", 1));
   backToMenuRow(kb);

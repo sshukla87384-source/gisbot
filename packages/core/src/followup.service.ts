@@ -28,7 +28,8 @@ export async function getFollowupConfig(): Promise<FollowupConfig> {
   const row = await prisma.setting.findUnique({ where: { key: KEY } }).catch(() => null);
   const v = (row?.value ?? null) as Partial<FollowupConfig> | null;
   return {
-    enabled: v?.enabled ?? false,
+    // ON by default: the review request 10 min after delivery is the whole point.
+    enabled: v?.enabled ?? true,
     delayMins: Number(v?.delayMins ?? 10),
     text: v?.text ?? DEFAULT_TEXT,
     btnText: v?.btnText ?? null,
