@@ -1,12 +1,13 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
-import { CoreError, encryptSecret } from "@gis/shared";
+import { CoreError, encryptSecret, isCoreError } from "@gis/shared";
 import { convertMinor } from "../fx.js";
+import { logWallet } from "../logs.service.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
+import { accrueCommissionTx } from "./commission.js";
 import { assignAccountSlot, assignLicenseKey, priceCart, type PricedLine } from "./assign.js";
-import { costForVariant } from "../finance.service.js";
 
 /**
  * Wallet-funded checkout with automatic fulfillment (PRD §6.1, Security doc §5).
@@ -43,7 +44,7 @@ export interface CheckoutResult {
 type Tx2 = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 /** Shared: create order items for priced lines, assign inventory, return deliveries. */
-async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], masterKey: string): Promise<{ deliveries: DeliveredSecret[]; pendingManualItems: number }> {
+async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], masterKey: string, orderCurrency: Currency): Promise<{ deliveries: DeliveredSecret[]; pendingManualItems: number }> {
       // 4) Items — inventory-backed quantities expand to unit items so the
       //    1:1 unique inventory↔item constraint can do its job.
       const deliveries: DeliveredSecret[] = [];
@@ -96,7 +97,7 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
-                costMinor: await costForVariant(line.variantId, null),
+                costMinor: line.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
@@ -116,7 +117,7 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
                 data: {
                   fulfilledAt: new Date(),
                   warrantyStartAt: new Date(),
-                  costMinor: await costForVariant(line.variantId, creds.costMinor),
+                  costMinor: creds.costMinor ?? line.defaultCostMinor,
                   deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
                 },
               });
@@ -130,16 +131,29 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
                 data: {
                   fulfilledAt: new Date(),
                   warrantyStartAt: new Date(),
-                  costMinor: await costForVariant(line.variantId, cost),
+                  costMinor: cost ?? line.defaultCostMinor,
                   deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
                 },
               });
               deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "LICENSE_KEY", secret: { key, expiresAt: expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
               delivered = true;
             }
-          } catch {
-            delivered = false; // no stock available
+          } catch (e) {
+            delivered = false;
+            // OUT_OF_STOCK is expected; anything else (encryption, key
+            // management, a DB fault) was being silently reported as "sold out",
+            // so a master-key problem looked like an empty catalogue with no log
+            // line anywhere. Record it — the customer flow is unchanged.
+            if (!(isCoreError(e) && e.code === "OUT_OF_STOCK")) {
+              // eslint-disable-next-line no-console
+              console.error("delivery failed (not stock)", { variantId: line.variantId, error: String(e).slice(0, 300) });
+              void logWallet("delivery.error", `Delivery failed for ${line.productName} — NOT a stock problem`, {
+                variantId: line.variantId, error: String(e).slice(0, 200),
+              });
+            }
           }
+          // Reseller commission on every rail, not just the gateway.
+          if (delivered) await accrueCommissionTx(tx, { id: item.id, resellerIdSnap: item.resellerIdSnap, totalMinor: item.totalMinor }, orderCurrency);
           if (!delivered) {
             // Automatic key/account products with no stock must NOT charge — abort the order.
             if (line.fulfillmentMode !== "MANUAL" && (line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT")) {
@@ -193,7 +207,7 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
       });
       if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
 
-      const { deliveries, pendingManualItems } = await fulfillLinesTx(tx, order.id, lines, masterKey);
+      const { deliveries, pendingManualItems } = await fulfillLinesTx(tx, order.id, lines, masterKey, wallet.currency as Currency);
 
       // 5) Wallet debit (append-only ledger + cached balance).
       const newBalance = wallet.balanceMinor - BigInt(totalMinor);
@@ -315,7 +329,7 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
       });
       if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
 
-      const { deliveries, pendingManualItems } = await fulfillLinesTx(tx, order.id, lines, masterKey);
+      const { deliveries, pendingManualItems } = await fulfillLinesTx(tx, order.id, lines, masterKey, currency as Currency);
 
       await tx.user.update({ where: { id: userId }, data: { bnplOutstandingMinor: { increment: totalMinor } } });
       await tx.invoice.create({ data: { orderId: order.id, invoiceNumber: orderNumber.replace(/^GIS/, "INV") } });
@@ -367,9 +381,21 @@ export async function repayBnpl(userId: string, amountMinor?: number): Promise<B
     const pay = Math.min(want, balInUserCur);
     const debit = w.currency === u.currency ? pay : convertMinor(pay, u.currency as Currency, w.currency as Currency);
     if (pay <= 0) throw new CoreError("INSUFFICIENT_BALANCE");
-    const newBal = w.balanceMinor - BigInt(pay);
+    // `debit` is in the WALLET's currency; `pay` is in the user's. Subtracting
+    // `pay` from a wallet balance was the same cross-currency bug the comment
+    // above says was fixed — it turned a Rs 500 repayment into a $500 debit.
+    const newBal = w.balanceMinor - BigInt(debit);
+    if (newBal < 0n) throw new CoreError("INSUFFICIENT_BALANCE");
     await tx.walletTransaction.create({
-      data: { walletId: w.id, type: "PURCHASE", amountMinor: -BigInt(debit), balanceAfterMinor: newBal, currency: u.currency, referenceNote: "BNPL repayment" },
+      data: {
+        walletId: w.id,
+        type: "PURCHASE",
+        amountMinor: -BigInt(debit),
+        balanceAfterMinor: newBal,
+        currency: w.currency,
+        referenceNote: "BNPL repayment",
+        idempotencyKey: `bnpl-repay:${userId}:${Date.now()}`,
+      },
     });
     await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: newBal } });
     await tx.user.update({ where: { id: userId }, data: { bnplOutstandingMinor: { decrement: pay } } });

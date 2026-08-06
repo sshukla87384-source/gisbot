@@ -139,9 +139,10 @@ export async function orderAlreadyRated(orderId: string): Promise<boolean> {
   return (await prisma.review.findUnique({ where: { orderId }, select: { id: true } })) !== null;
 }
 
-async function bustRatingCache(productId?: string | null): Promise<void> {
+async function bustRatingCache(_productId?: string | null): Promise<void> {
+  // The namespace bump already invalidates every rating key, including this
+  // product's, so the per-product call was pure redundant work.
   await invalidate("rating:*").catch(() => undefined);
-  if (productId) await invalidate(`rating:p:${productId}`).catch(() => undefined);
 }
 
 export interface RatingSummary { count: number; avg: number; stars: string }

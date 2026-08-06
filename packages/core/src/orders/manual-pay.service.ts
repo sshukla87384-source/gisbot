@@ -1,12 +1,12 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
-import { CoreError, cb, encryptSecret, decryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
+import { CoreError, cb, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
 import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
-import { costForVariant } from "../finance.service.js";
+import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
@@ -71,17 +71,33 @@ async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
   });
   for (const o of stale) {
     if (o.walletUsedMinor && o.walletUsedMinor > 0) {
-      const w = await tx.wallet.findUnique({ where: { userId } });
+      // Locked read: this writes an absolute balance (see applyWalletTx).
+      const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+        SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
+      const w = locked[0];
       if (w) {
-        const back = w.balanceMinor + BigInt(o.walletUsedMinor);
-        await tx.walletTransaction.create({
-          data: {
-            walletId: w.id, type: "REFUND", amountMinor: BigInt(o.walletUsedMinor),
-            balanceAfterMinor: back, currency: w.currency, orderId: o.id,
-            referenceNote: `cancelled ${o.orderNumber}`, idempotencyKey: `refund-cancel:${o.id}`,
-          },
+        // walletUsedMinor is in the ORDER's currency; the wallet has its own.
+        // Refunding the raw number returned the wrong amount of money.
+        const backMinor = w.currency === o.currency
+          ? o.walletUsedMinor
+          : convertMinor(o.walletUsedMinor, o.currency as Currency, w.currency as Currency);
+        // The expiry cron may have refunded this same order already. The unique
+        // key would throw and abort the customer's new checkout, so check first.
+        const done = await tx.walletTransaction.findUnique({
+          where: { idempotencyKey: `refund-cancel:${o.id}` },
+          select: { id: true },
         });
-        await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
+        if (!done) {
+          const back = w.balanceMinor + BigInt(backMinor);
+          await tx.walletTransaction.create({
+            data: {
+              walletId: w.id, type: "REFUND", amountMinor: BigInt(backMinor),
+              balanceAfterMinor: back, currency: w.currency, orderId: o.id,
+              referenceNote: `cancelled ${o.orderNumber}`, idempotencyKey: `refund-cancel:${o.id}`,
+            },
+          });
+          await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
+        }
       }
     }
     await tx.order.update({ where: { id: o.id }, data: { status: "CANCELLED", cancelledAt: new Date(), walletUsedMinor: 0 } });
@@ -101,7 +117,13 @@ async function applyWalletTx(
   totalMinor: number,
   opts: { alignToUsdtCent?: Currency; orderCurrency?: Currency } = {},
 ): Promise<{ walletUsed: number; owed: number }> {
-  const w = await tx.wallet.findUnique({ where: { userId } });
+  // SELECT ... FOR UPDATE, not findUnique. This writes an ABSOLUTE balance, so
+  // without the row lock two concurrent checkouts both read the same balance and
+  // both write it away — spending the same money twice. checkoutWithWallet and
+  // adjustWallet already lock; this path did not.
+  const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+    SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
+  const w = locked[0];
   if (!w || w.balanceMinor <= 0n) return { walletUsed: 0, owed: totalMinor };
   // The wallet and the order can be in DIFFERENT currencies (wallets are USD,
   // an INR customer's cart is INR). Compare in the ORDER's currency, then debit
@@ -119,7 +141,9 @@ async function applyWalletTx(
     const step = usdtCentInMinor(opts.alignToUsdtCent);
     const remainder = (totalMinor - use) % step;
     if (remainder > 0) {
-      if (Number(w.balanceMinor) >= use + remainder) {
+      // Compare in the ORDER's currency — balanceInOrderCur, not the raw wallet
+      // balance, which is a different scale entirely.
+      if (balanceInOrderCur >= use + remainder) {
         // Spend a touch more from the wallet: ₹159.20 with ₹200 → wallet ₹159.20.
         use += remainder;
       } else if (use >= step - remainder) {
@@ -333,7 +357,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
-                costMinor: await costForVariant(item.variantId, cost),
+                costMinor: cost ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
@@ -346,14 +370,26 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
-                costMinor: await costForVariant(item.variantId, creds.costMinor),
+                costMinor: creds.costMinor ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
             if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           }
-        } catch {
+          // Reseller commission on the UPI / Binance rail too.
+          await accrueCommissionTx(tx, item, order.currency);
+        } catch (e) {
           awaitingStock++;
+          // Only OUT_OF_STOCK is expected here. Everything else was being
+          // reported to the admin as "temporarily out of stock", so a systemic
+          // failure looked like empty shelves.
+          if (!(isCoreError(e) && e.code === "OUT_OF_STOCK")) {
+            // eslint-disable-next-line no-console
+            console.error("fulfilment failed (not stock)", { orderItemId: item.id, error: String(e).slice(0, 300) });
+            void logWallet("fulfil.error", `Fulfilment failed for ${item.productNameSnap} — NOT a stock problem`, {
+              orderItemId: item.id, error: String(e).slice(0, 200),
+            });
+          }
         }
       }
 
@@ -473,15 +509,22 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   const clean = secretText.trim();
   if (!clean) return { ok: false, reason: "EMPTY" };
   const payload = { kind: "LICENSE_KEY", key: clean };
-  await prisma.orderItem.update({
-    where: { id: item.id },
+  // Conditional claim on fulfilledAt: two admins tapping Deliver at the same
+  // moment both passed the earlier check and both messaged the customer, who
+  // then held two different secrets while the vault showed only one.
+  const claimed = await prisma.orderItem.updateMany({
+    where: { id: item.id, fulfilledAt: null },
     data: {
       fulfilledAt: new Date(),
       warrantyStartAt: item.warrantyStartAt ?? new Date(),
-      costMinor: await costForVariant(item.variantId, null),
+      costMinor: item.variant.defaultCostMinor,
       deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
     },
   });
+  if (claimed.count === 0) return { ok: false, reason: "ALREADY_DELIVERED" };
+  // A manually-delivered reseller item earns commission as well; the old code
+  // skipped MANUAL items entirely.
+  await accrueCommission(item.id).catch(() => undefined);
 
   // Recompute remaining manual items on the order.
   const remainingItems = await prisma.orderItem.count({ where: { orderId: item.orderId, fulfillmentMode: "MANUAL", fulfilledAt: null } });
@@ -522,7 +565,10 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
 
   try {
     let replacementCostMinor: number | null = null;
-    const payload = await prisma.$transaction(async (tx) => {
+    // Keep the ORIGINAL delivery date as the warranty start — a replacement must
+    // not hand out a fresh window. 5-day warranty replaced on day 4 leaves 1 day.
+    const warrantyStart = item.warrantyStartAt ?? item.fulfilledAt ?? new Date();
+    const assignReplacement = async (tx: TxM) => {
       if (type === "LICENSE_KEY") {
         // Detach + permanently retire the faulty key, then assign a DIFFERENT one.
         const bad = await tx.licenseKey.findMany({ where: { orderItemId: item.id }, select: { id: true } });
@@ -544,23 +590,29 @@ export async function adminReplaceOrderItem(orderItemId: string): Promise<Replac
       const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, false, badAccountIds);
       replacementCostMinor = creds.costMinor;
       return { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
-    });
+    }
 
-    // Keep the ORIGINAL delivery date as the warranty start — a replacement must
-    // not hand out a fresh window. 5-day warranty replaced on day 4 leaves 1 day.
-    const warrantyStart = item.warrantyStartAt ?? item.fulfilledAt ?? new Date();
-    // A replacement burns a SECOND unit of stock. Adding its cost to the sale is
-    // what makes the profit report honest — and makes a faulty batch visible as
-    // a margin problem, not just a support problem.
-    const extraCost = await costForVariant(item.variantId, replacementCostMinor);
-    await prisma.orderItem.update({
-      where: { id: item.id },
-      data: {
-        fulfilledAt: new Date(),
-        warrantyStartAt: warrantyStart,
-        ...(extraCost !== null ? { costMinor: (item.costMinor ?? 0) + extraCost } : {}),
-        deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
-      },
+    const payload = await prisma.$transaction(async (tx) => {
+      const p = await assignReplacement(tx);
+      // Store the new payload IN THE SAME TRANSACTION as the assignment. Doing it
+      // afterwards meant a crash in between left the faulty key DISABLED, a fresh
+      // key SOLD to this item, and the customer's vault still showing the dead
+      // value — with the new one unrecoverable.
+      const extraCost = replacementCostMinor ?? item.variant.defaultCostMinor;
+      await tx.orderItem.update({
+        where: { id: item.id },
+        data: {
+          fulfilledAt: new Date(),
+          warrantyStartAt: warrantyStart,
+          // A replacement burns a SECOND unit of stock. Adding its cost to the
+          // sale is what makes the profit report honest, and makes a faulty batch
+          // visible as a margin problem rather than only a support problem.
+          // `increment` so two concurrent replacements cannot lose one.
+          ...(extraCost !== null ? { costMinor: { increment: extraCost } } : {}),
+          deliveryPayloadEncrypted: encryptSecret(JSON.stringify(p), masterKey),
+        },
+      });
+      return p;
     });
 
     // A separate order record for the replacement, with its own number, linked

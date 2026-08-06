@@ -393,7 +393,9 @@ model WalletTopup {
   currency     Currency
   binanceAsset String   // "USDT"
   binanceAmount String  // exact USDT the user must send
-  binanceTxnId String?  // settling Binance transaction (dedupe)
+  /// Settling Binance transaction. @unique enforces "one txn credits once"
+  /// in the DATABASE — the read-then-write check alone lost that race.
+  binanceTxnId String?  @unique
   status       String   @default("PENDING") // PENDING | CREDITED | EXPIRED | CANCELLED
   creditedAt   DateTime?
   expiresAt    DateTime
@@ -599,7 +601,7 @@ model LicenseKey {
   deletedAt     DateTime?
 
   @@unique([variantId, keyHash])
-  @@index([variantId, status])
+  @@index([variantId, status, deletedAt])
   @@index([status, reservedUntil])
   @@index([batchId])
 }
@@ -728,7 +730,9 @@ model Order {
   cancelledAt    DateTime?
   binanceAsset   String? // e.g. "USDT" — asset expected for Binance Pay
   binanceAmount  String? // exact (unique) amount the customer must send, for matching
-  binanceTxnId   String? // Binance Pay transactionId that settled this order (dedupe)
+  /// Binance Pay transactionId that settled this order. @unique so one payment
+  /// can never settle two orders, whatever races upstream.
+  binanceTxnId   String? @unique
   items          OrderItem[]
   payments       Payment[]
   refunds        Refund[]
@@ -740,6 +744,7 @@ model Order {
   @@index([status, createdAt])
   @@index([status, expiresAt])
   @@index([status, binanceAsset])
+  @@index([paidAt])
 }
 
 model OrderItem {
@@ -771,6 +776,9 @@ model OrderItem {
   replacements    ReplacementRequest[]
   createdAt       DateTime        @default(now())
 
+  /// Every report and the 60s supplier-retry sweep filter on fulfilledAt. Without
+  /// this the sweep sequentially scanned the whole table once a minute, forever.
+  @@index([fulfilledAt, createdAt])
   @@index([orderId])
   @@index([variantId])
   @@index([resellerIdSnap])
@@ -811,6 +819,10 @@ model Payment {
   @@unique([provider, providerRef])
   @@index([orderId])
   @@index([status, createdAt])
+
+  /// Webhooks look up by providerRef ALONE; the composite unique is led by
+  /// `provider`, so it could not be used and every webhook scanned the table.
+  @@index([providerRef])
 }
 
 model WebhookEvent {
@@ -1043,6 +1055,7 @@ model SupportTicket {
   @@index([status, priority])
   @@index([userId])
   @@index([assigneeId, status])
+  @@index([orderItemId])
 }
 
 model TicketMessage {

@@ -53,11 +53,13 @@ export interface View {
 }
 
 export async function menuView(user: BotUser): Promise<View> {
-  const [wallet, orderCount] = await Promise.all([
+  // getButtonConfig was a separate sequential round trip on the most-rendered
+  // screen in the bot.
+  const [wallet, orderCount, btnCfg] = await Promise.all([
     getWallet(user.id),
     prisma.order.count({ where: { userId: user.id } }),
+    getButtonConfig(),
   ]);
-  const btnCfg = await getButtonConfig();
   return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg) };
 }
 
@@ -798,12 +800,15 @@ export function currencyView(user: BotUser): View {
 }
 
 export async function orderDetailView(user: BotUser, orderId: string): Promise<View> {
-  const items = await listOrderItems(user.id, orderId);
-  // Explain a replacement-only order rather than leaving a mystery 0.00 entry.
-  const meta = await prisma.order.findFirst({
-    where: { id: orderId, userId: user.id },
-    select: { replacementOfOrderId: true },
-  }).catch(() => null);
+  // Independent reads, so fetch them together.
+  const [items, meta] = await Promise.all([
+    listOrderItems(user.id, orderId),
+    // Explain a replacement-only order rather than leaving a mystery 0.00 entry.
+    prisma.order.findFirst({
+      where: { id: orderId, userId: user.id },
+      select: { replacementOfOrderId: true },
+    }).catch(() => null),
+  ]);
   const origNumber = meta?.replacementOfOrderId
     ? (await prisma.order.findUnique({ where: { id: meta.replacementOfOrderId }, select: { orderNumber: true } }).catch(() => null))?.orderNumber ?? null
     : null;

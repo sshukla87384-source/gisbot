@@ -1,4 +1,5 @@
 import { prisma, type Currency } from "@gis/database";
+import { sha256Hex } from "@gis/shared";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
 import { translateMany } from "../translate.service.js";
 import { convertMinor, convertPriceMinor } from "../fx.js";
@@ -94,7 +95,7 @@ export const UNLIMITED_STOCK = Number.MAX_SAFE_INTEGER;
  * single biggest source of latency: a 100-product page issued ~105 sequential
  * COUNTs.
  */
-async function stockMapFor(
+export async function stockMapFor(
   rows: Array<{ id: string; type: string; supplierId: string | null; supplierStock: number | null; reusable: boolean; reusableStock: number | null; manual: boolean; manualStock: number | null; variantIds: string[] }>,
 ): Promise<Map<string, number>> {
   const map = new Map<string, number>();
@@ -191,7 +192,20 @@ export async function listProducts(opts: {
   const { categoryId, search, featuredOnly, currency, page, userId, channel = "DIRECT" } = opts;
   const locale = opts.locale ?? "en";
   const size = opts.pageSize ?? PAGE_SIZE;
-  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${search ?? ""}:${currency}:${page}:${size}:${userId ?? "-"}:${channel}:${locale}`;
+  // Only the VIP price override is user-dependent, and overrides are rare. Keying
+  // the whole page on userId gave a ~0% hit rate (every user's first shop open
+  // paid full price) and would have stored one 8KB page per user per view. So:
+  // users WITHOUT overrides share one cache entry; only the few who have them
+  // get a private one.
+  const hasOverrides = userId
+    ? await cached(`cat:hasov:${userId}:${channel}`, 300, async () =>
+        (await prisma.userPrice.count({ where: { userId, channel: { in: [channel, "BOTH"] } } })) > 0,
+      ).catch(() => true)
+    : false;
+  const userPart = hasOverrides ? (userId ?? "-") : "-";
+  // Hash the search term so an attacker cannot grow the keyspace with long strings.
+  const searchPart = search ? `s${sha256Hex(search).slice(0, 12)}` : "";
+  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
@@ -295,6 +309,22 @@ async function resolveUserPrice(userId: string, productId: string, channel: "DIR
 }
 
 export async function getProductView(productId: string, currency: Currency, userId?: string, channel: "DIRECT" | "API" = "DIRECT", locale = "en"): Promise<ProductView> {
+  // The product page was the one hot read with no cache at all, despite being
+  // the detail view, the deep-link landing page and two API endpoints. Same
+  // namespace as the list, so the existing invalidate("cat:*") already clears it.
+  const hasOv = userId
+    ? await cached(`cat:hasov:${userId}:${channel}`, 300, async () =>
+        (await prisma.userPrice.count({ where: { userId, channel: { in: [channel, "BOTH"] } } })) > 0,
+      ).catch(() => true)
+    : false;
+  return cached(
+    `cat:view:${productId}:${currency}:${hasOv ? (userId ?? "-") : "-"}:${channel}:${locale}`,
+    CACHE_TTL,
+    () => getProductViewUncached(productId, currency, userId, channel, locale),
+  );
+}
+
+async function getProductViewUncached(productId: string, currency: Currency, userId?: string, channel: "DIRECT" | "API" = "DIRECT", locale = "en"): Promise<ProductView> {
   const p = await prisma.product.findFirst({
     where: { id: productId, status: "ACTIVE", deletedAt: null },
     include: {
@@ -308,20 +338,34 @@ export async function getProductView(productId: string, currency: Currency, user
   if (!p) throw new CoreError("PRODUCT_NOT_FOUND");
 
   const onSale = isSaleActive(p);
-  const override = userId ? await resolveUserPrice(userId, p.id, channel, currency) : null;
-  const variants: VariantView[] = await Promise.all(
-    p.variants.map(async (v) => {
-      const base = v.prices[0]?.amountMinor ?? null;
-      const eff = override ?? (base === null ? null : effectivePriceMinor(base, p));
-      return {
-        id: v.id,
-        name: v.name,
-        priceMinor: eff,
-        originalPriceMinor: override !== null && base !== null ? base : (onSale && base !== null ? base : null),
-        stock: await variantStock(v.id, p.type, p),
-      };
-    }),
-  );
+  // One batched stock lookup for every variant (2 groupBy queries) instead of a
+  // COUNT per variant. The counts were already parallel, but each still burned a
+  // connection-pool slot on the product page.
+  const [override, stockMap] = await Promise.all([
+    userId ? resolveUserPrice(userId, p.id, channel, currency) : Promise.resolve(null),
+    stockMapFor([{
+      id: p.id,
+      type: p.type,
+      supplierId: p.supplierId,
+      supplierStock: p.supplierStock,
+      reusable: p.reusableSecretEnc !== null,
+      reusableStock: p.reusableStock,
+      manual: p.fulfillmentMode === "MANUAL",
+      manualStock: p.manualStock,
+      variantIds: p.variants.map((v) => v.id),
+    }]),
+  ]);
+  const variants: VariantView[] = p.variants.map((v) => {
+    const base = v.prices[0]?.amountMinor ?? null;
+    const eff = override ?? (base === null ? null : effectivePriceMinor(base, p));
+    return {
+      id: v.id,
+      name: v.name,
+      priceMinor: eff,
+      originalPriceMinor: override !== null && base !== null ? base : (onSale && base !== null ? base : null),
+      stock: stockMap.get(v.id) ?? 0,
+    };
+  });
   const tr = locale === "en"
     ? [p.name, p.description ?? ""]
     : (await Promise.race([

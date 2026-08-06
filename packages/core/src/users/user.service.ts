@@ -1,4 +1,4 @@
-import { getRedis } from "../redis.js";
+import { cached, getRedis } from "../redis.js";
 import { prisma, type Currency, type User } from "@gis/database";
 import { REFERRAL_PREFIX } from "@gis/shared";
 
@@ -23,12 +23,26 @@ function defaultCurrencyForLocale(locale?: string): Currency {
   return l === "hi" || l.endsWith("-in") || l === "en" ? "INR" : "USD";
 }
 
+/**
+ * Role names for a user, cached briefly.
+ *
+ * This runs in the bot middleware, so it fired a second sequential DB round trip
+ * on EVERY button tap. Roles change approximately never, so a short cache
+ * removes the query from the hot path entirely without any staleness that
+ * matters — and a cache failure just falls through to the query.
+ */
 async function withRoleNames(user: User): Promise<User & { roleNames: string[] }> {
-  const roles = await prisma.userRole.findMany({
-    where: { userId: user.id },
-    include: { role: { select: { name: true } } },
+  const names = await cached(`role:u:${user.id}`, 120, async () => {
+    const roles = await prisma.userRole.findMany({
+      where: { userId: user.id },
+      include: { role: { select: { name: true } } },
+    });
+    return roles.map((r) => r.role.name);
+  }).catch(async () => {
+    const roles = await prisma.userRole.findMany({ where: { userId: user.id }, include: { role: { select: { name: true } } } });
+    return roles.map((r) => r.role.name);
   });
-  return Object.assign(user, { roleNames: roles.map((r) => r.role.name) });
+  return Object.assign(user, { roleNames: names });
 }
 
 /**

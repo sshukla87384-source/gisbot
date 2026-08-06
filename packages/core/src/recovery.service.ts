@@ -92,7 +92,11 @@ export async function runRecoverySweep(limit = 30): Promise<{ sent: number }> {
     if (claimed.count === 0) continue;
     if (!o.user.telegramId) continue;
 
-    const due = Math.max(0, o.totalMinor - o.walletUsedMinor);
+    // applyWalletTx already wrote `totalMinor = total - walletUsed`, so
+    // totalMinor IS the amount still owed. Subtracting the wallet again told
+    // customers to pay too little, and their underpayment then failed the
+    // amount check — costing them the money with no order.
+    const due = Math.max(0, o.totalMinor);
     const minsLeft = o.expiresAt ? Math.max(1, Math.round((o.expiresAt.getTime() - now) / 60_000)) : null;
     const what = o.items.map((i) => i.productNameSnap).filter(Boolean).slice(0, 3).join(", ");
 

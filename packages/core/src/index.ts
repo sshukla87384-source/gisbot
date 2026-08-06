@@ -28,6 +28,7 @@ export * from "./recovery.service.js";
 export * from "./reseller-report.service.js";
 export * from "./orders/manual-pay.service.js";
 export * from "./orders/replacement.service.js";
+export * from "./orders/commission.js";
 export * from "./orders/coupon.service.js";
 export * from "./orders/maintenance.service.js";
 export * from "./orders/stars.service.js";

@@ -74,6 +74,21 @@ export async function invalidate(pattern: string): Promise<void> {
     }
     return;
   }
+  // An EXACT key: delete it directly, using the same versioned name `cached`
+  // wrote it under. This used to fall into the SCAN below and match nothing —
+  // cached("a:b") is stored at "a:v3:b", so MATCH "a:b" never hit. So it deleted
+  // nothing AND swept the entire keyspace to do it, thousands of round trips on
+  // the same Redis connection grammY reads sessions from. It ran on every order.
+  if (!pattern.includes("*")) {
+    try {
+      const ns = pattern.split(":")[0] ?? pattern;
+      const versioned = `${ns}:v${await nsVersion(ns)}:${pattern.slice(ns.length + 1)}`;
+      await redis.unlink(versioned);
+    } catch {
+      // best-effort
+    }
+    return;
+  }
   try {
     let cursor = "0";
     do {

@@ -89,9 +89,16 @@ export async function pollBinancePayments(): Promise<number> {
   const creds = await getBinanceCreds();
   if (!creds) return 0;
 
+  // OLDEST FIRST, and bounded. Two customers can owe the identical USDT amount
+  // for the same product; with no ordering the credit went to whichever row
+  // Postgres happened to return, so Alice's payment could deliver Bob's goods
+  // and let Alice's order expire. Oldest-first at least settles the person who
+  // has been waiting longest, and the txn is claimed atomically below.
   const pending = await prisma.order.findMany({
     where: { status: "PENDING_PAYMENT", binanceAsset: "USDT", expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: "asc" },
     select: { id: true, orderNumber: true, binanceAmount: true },
+    take: 500,
   });
   if (pending.length === 0) return 0;
 
@@ -114,14 +121,22 @@ export async function pollBinancePayments(): Promise<number> {
     const match = credits.find((t) => Math.abs(parseFloat(t.amount) - want) < 0.01);
     if (!match) continue;
 
-    // One Binance transaction can settle only one order.
-    const used = await prisma.order.findFirst({ where: { binanceTxnId: match.transactionId }, select: { id: true } });
-    if (used) continue;
-    const claimed = await prisma.order.updateMany({
-      where: { id: order.id, status: "PENDING_PAYMENT" },
-      data: { binanceTxnId: match.transactionId },
-    });
-    if (claimed.count === 0) continue;
+    // One Binance transaction settles exactly one order. binanceTxnId is @unique,
+    // so this claim is decided by the database rather than by a read-then-write
+    // that two pollers or a poller and a customer could both pass.
+    let claimedOk = false;
+    try {
+      const claimed = await prisma.order.updateMany({
+        where: { id: order.id, status: "PENDING_PAYMENT", binanceTxnId: null },
+        data: { binanceTxnId: match.transactionId },
+      });
+      claimedOk = claimed.count > 0;
+    } catch {
+      claimedOk = false; // unique violation: this txn already settled something
+    }
+    if (!claimedOk) continue;
+    // Don't let the same credit match a second order in this same pass.
+    credits.splice(credits.indexOf(match), 1);
 
     try {
       await confirmManualPayment(order.id);

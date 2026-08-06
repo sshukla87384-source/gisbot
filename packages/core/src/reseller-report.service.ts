@@ -1,6 +1,6 @@
 import { prisma } from "@gis/database";
 import type { Currency } from "@gis/database";
-import { convertMinor, priceUsdFromInr } from "./fx.js";
+import { convertMinor, priceInrFromUsd, priceUsdFromInr } from "./fx.js";
 import { enqueueTelegramMessage } from "./queues.js";
 
 /**
@@ -39,22 +39,64 @@ export interface ResellerDay {
   topProducts: Array<{ name: string; units: number; spentMinor: number }>;
 }
 
-/** Public retail price of a product in a currency, surcharge-aware for INR. */
-async function publicPriceOf(productId: string, currency: Currency): Promise<number | null> {
-  const v = await prisma.productVariant.findFirst({
-    where: { productId, isActive: true, deletedAt: null },
-    orderBy: { sortOrder: "asc" },
-    select: { prices: { where: { tier: { name: "RETAIL" } }, select: { amountMinor: true, currency: true } } },
+/**
+ * Public retail prices for many VARIANTS at once.
+ *
+ * Two bugs are fixed by keying on the variant rather than the product: the old
+ * version benchmarked every purchase against the product's FIRST variant, so a
+ * reseller buying the 12-month tier was compared to the 1-month public price and
+ * their real discount showed as a negative benefit. And it was one query per
+ * product plus two per override — ~130 sequential round trips per reseller.
+ */
+async function publicPriceMap(variantIds: string[], currency: Currency): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (variantIds.length === 0) return out;
+  const rows = await prisma.variantPrice.findMany({
+    where: { variantId: { in: variantIds }, tier: { name: "RETAIL" } },
+    select: { variantId: true, amountMinor: true, currency: true },
   });
-  if (!v) return null;
-  const exact = v.prices.find((p) => p.currency === currency);
-  if (exact) return exact.amountMinor;
-  const other = v.prices[0];
-  if (!other) return null;
-  // Cross-currency: use the PRICE conversion, so the comparison is against what
-  // a normal customer would actually be charged, surcharge included.
-  if (currency === "USD" && other.currency === "INR") return priceUsdFromInr(other.amountMinor);
-  return convertMinor(other.amountMinor, other.currency as Currency, currency);
+  const byVariant = new Map<string, Array<{ amountMinor: number; currency: string }>>();
+  for (const r of rows) {
+    const list = byVariant.get(r.variantId) ?? [];
+    list.push({ amountMinor: r.amountMinor, currency: r.currency });
+    byVariant.set(r.variantId, list);
+  }
+  for (const [vid, list] of byVariant) {
+    const exact = list.find((p) => p.currency === currency);
+    if (exact) { out.set(vid, exact.amountMinor); continue; }
+    const other = list[0];
+    if (!other) continue;
+    // Cross-currency: use the PRICE conversion in BOTH directions, so the
+    // benchmark is what a normal customer would actually be charged — surcharge
+    // included. Plain convertMinor omitted it one way round.
+    out.set(
+      vid,
+      currency === "USD" && other.currency === "INR"
+        ? priceUsdFromInr(other.amountMinor)
+        : currency === "INR" && other.currency === "USD"
+          ? priceInrFromUsd(other.amountMinor)
+          : convertMinor(other.amountMinor, other.currency as Currency, currency),
+    );
+  }
+  return out;
+}
+
+/** Cheapest active variant per product — used for standing special rates, which are per PRODUCT. */
+async function productBenchmark(productIds: string[], currency: Currency): Promise<Map<string, { priceMinor: number; name: string }>> {
+  const out = new Map<string, { priceMinor: number; name: string }>();
+  if (productIds.length === 0) return out;
+  const products = await prisma.product.findMany({
+    where: { id: { in: productIds } },
+    select: { id: true, name: true, variants: { where: { isActive: true, deletedAt: null }, select: { id: true } } },
+  });
+  const allVariantIds = products.flatMap((p) => p.variants.map((v) => v.id));
+  const prices = await publicPriceMap(allVariantIds, currency);
+  for (const p of products) {
+    const vals = p.variants.map((v) => prices.get(v.id)).filter((n): n is number => typeof n === "number" && n > 0);
+    if (vals.length === 0) continue;
+    out.set(p.id, { priceMinor: Math.min(...vals), name: p.name });
+  }
+  return out;
 }
 
 /** One reseller's day. Returns null when they bought nothing — no empty spam. */
@@ -70,13 +112,16 @@ export async function resellerDay(userId: string, hours = 24): Promise<ResellerD
   const items = await prisma.orderItem.findMany({
     where: {
       fulfilledAt: { gte: since },
-      order: { userId, status: { in: ["COMPLETED", "PAID", "PENDING_FULFILLMENT", "PARTIALLY_REFUNDED"] } },
+      // A warranty replacement is not a purchase: zero spend but a full public
+      // price, so it fabricated "savings" the reseller never earned.
+      order: { userId, status: { in: ["COMPLETED", "PAID", "PENDING_FULFILLMENT", "PARTIALLY_REFUNDED"] }, replacementOfOrderId: null },
     },
     select: {
       quantity: true,
       totalMinor: true,
       productNameSnap: true,
       orderId: true,
+      variantId: true,
       order: { select: { currency: true } },
       variant: { select: { productId: true } },
     },
@@ -84,12 +129,24 @@ export async function resellerDay(userId: string, hours = 24): Promise<ResellerD
   });
   if (items.length === 0) return null;
 
+  // Their standing special prices, whether or not they bought them today.
+  const overrides = await prisma.userPrice.findMany({
+    where: { userId, channel: { in: ["BOTH", "API"] } },
+    select: { productId: true, amountMinor: true, currency: true },
+    take: 50,
+  });
+
+  // Two batched lookups instead of ~130 sequential ones.
+  const [variantPrices, productPrices] = await Promise.all([
+    publicPriceMap([...new Set(items.map((i) => i.variantId))], currency),
+    productBenchmark([...new Set(overrides.map((o) => o.productId))], currency),
+  ]);
+
   const orderIds = new Set<string>();
   let spent = 0;
   let units = 0;
   let publicValue = 0;
   const byProduct = new Map<string, { name: string; units: number; spentMinor: number }>();
-  const publicCache = new Map<string, number | null>();
 
   for (const it of items) {
     orderIds.add(it.orderId);
@@ -97,33 +154,32 @@ export async function resellerDay(userId: string, hours = 24): Promise<ResellerD
     spent += paid;
     units += it.quantity;
 
-    const pid = it.variant.productId;
-    if (!publicCache.has(pid)) publicCache.set(pid, await publicPriceOf(pid, currency));
-    const pub = publicCache.get(pid) ?? null;
+    // Benchmarked against the VARIANT they actually bought, not the product's
+    // first variant — that compared a 12-month purchase to a 1-month price.
+    const pub = variantPrices.get(it.variantId) ?? null;
     // No public price to compare against → count their own price, so the
     // benefit figure can never be inflated by a missing comparison.
     publicValue += pub === null ? paid : pub * Math.max(1, it.quantity);
 
+    const pid = it.variant.productId;
     const row = byProduct.get(pid) ?? { name: it.productNameSnap, units: 0, spentMinor: 0 };
     row.units += it.quantity;
     row.spentMinor += paid;
     byProduct.set(pid, row);
   }
 
-  // Their standing special prices, whether or not they bought them today.
-  const overrides = await prisma.userPrice.findMany({
-    where: { userId, channel: { in: ["BOTH", "API"] } },
-    select: { productId: true, amountMinor: true, currency: true },
-    take: 50,
-  });
   const deals: ResellerDay["deals"] = [];
   for (const o of overrides) {
-    const pub = await publicPriceOf(o.productId, currency);
-    if (pub === null || pub <= 0) continue;
+    const bench = productPrices.get(o.productId);
+    if (!bench || bench.priceMinor <= 0) continue;
     const yours = convertMinor(o.amountMinor, o.currency as Currency, currency);
-    if (yours >= pub) continue; // not actually a discount
-    const p = await prisma.product.findUnique({ where: { id: o.productId }, select: { name: true } });
-    deals.push({ name: p?.name ?? "Product", yourMinor: yours, publicMinor: pub, offBp: Math.round(((pub - yours) / pub) * 10_000) });
+    if (yours >= bench.priceMinor) continue; // not actually a discount
+    deals.push({
+      name: bench.name,
+      yourMinor: yours,
+      publicMinor: bench.priceMinor,
+      offBp: Math.round(((bench.priceMinor - yours) / bench.priceMinor) * 10_000),
+    });
   }
   deals.sort((a, b) => b.offBp - a.offBp);
 
@@ -185,7 +241,7 @@ export function renderResellerDay(d: ResellerDay): string {
  * Anyone who bought nothing is skipped — a daily "you did nothing" message is
  * how you get muted.
  */
-export async function sendResellerStatements(): Promise<{ sent: number; skipped: number }> {
+export async function sendResellerStatements(): Promise<{ sent: number; skipped: number; failed: number }> {
   const keys = await prisma.apiKey.findMany({
     where: { revokedAt: null, ownerUserId: { not: null } },
     select: { ownerUserId: true },
@@ -194,8 +250,19 @@ export async function sendResellerStatements(): Promise<{ sent: number; skipped:
 
   let sent = 0;
   let skipped = 0;
+  let failed = 0;
   for (const userId of userIds) {
-    const d = await resellerDay(userId).catch(() => null);
+    // Distinguish "bought nothing" from "the report threw" — the old catch
+    // reported a real failure as a skip, so a broken statement was invisible.
+    let d: ResellerDay | null = null;
+    try {
+      d = await resellerDay(userId);
+    } catch (e) {
+      failed++;
+      // eslint-disable-next-line no-console
+      console.error("reseller statement failed", { userId, error: String(e).slice(0, 200) });
+      continue;
+    }
     if (!d || !d.telegramId) { skipped++; continue; }
     await enqueueTelegramMessage(d.telegramId, renderResellerDay(d), {
       buttons: [
@@ -205,5 +272,5 @@ export async function sendResellerStatements(): Promise<{ sent: number; skipped:
     }).catch(() => undefined);
     sent++;
   }
-  return { sent, skipped };
+  return { sent, skipped, failed };
 }

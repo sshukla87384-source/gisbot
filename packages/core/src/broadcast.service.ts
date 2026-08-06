@@ -1,6 +1,7 @@
 import { loadConfig } from "@gis/config";
+import { stockMapFor } from "./catalog/catalog.service.js";
 import { prisma } from "@gis/database";
-import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
+import { enqueueTelegramBulk, enqueueTelegramMessage, type OutboxButton } from "./queues.js";
 import { effectivePriceMinor, isSaleActive } from "./pricing.js";
 import { getProductView } from "./catalog/catalog.service.js";
 import { getFlashHeadline } from "./admin.service.js";
@@ -19,7 +20,9 @@ function renderText(title: string, body: string): string {
 async function targetTelegramIds(segment: BroadcastSegment): Promise<bigint[]> {
   const where: Record<string, unknown> = { notifiable: true, telegramId: { not: null }, status: "ACTIVE" };
   if (segment === "resellers") where.roles = { some: { role: { name: "RESELLER" } } };
-  const users = await prisma.user.findMany({ where, select: { telegramId: true } });
+  // Bounded. An unbounded findMany over every user is fine at 10k and a problem
+  // at 1M, and there was no cursor to fall back on.
+  const users = await prisma.user.findMany({ where, select: { telegramId: true }, take: 200_000 });
   return users.map((u) => u.telegramId).filter((id): id is bigint => id !== null);
 }
 
@@ -41,11 +44,11 @@ async function deliver(broadcast: {
   const btnStyle = (sq?.style === "primary" || sq?.style === "danger" || sq?.style === "success" ? sq.style : "success") as "primary" | "success" | "danger";
   const buttons: OutboxButton[] | undefined =
     broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: btnStyle }] : undefined;
-  let sent = 0;
-  for (const id of ids) {
-    await enqueueTelegramMessage(id, text, { photo: broadcast.imageUrl ?? undefined, buttons, pin: broadcast.pin });
-    sent++;
-  }
+  // One pipelined bulk-add per 500 recipients, at low priority so a marketing
+  // blast never sits in front of a paid delivery on the shared outbox queue.
+  const sent = await enqueueTelegramBulk(
+    ids.map((id) => ({ telegramId: id, text, opts: { photo: broadcast.imageUrl ?? undefined, buttons, pin: broadcast.pin } })),
+  );
   await prisma.broadcast.update({
     where: { id: broadcast.id },
     data: { totalTargets: ids.length, sentCount: sent },
@@ -418,7 +421,24 @@ export async function announceCatalogue(
     where: { status: "ACTIVE", deletedAt: null },
     orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
     include: { variants: { where: { isActive: true, deletedAt: null }, include: { prices: { where: { currency, tier: { name: "RETAIL" } } } } } },
+    take: 5_000,
   });
+  // Stock for EVERY variant in 2 queries. This used to call getProductView once
+  // per product — ~6,000 sequential queries and half a minute of one process,
+  // for data already loaded above plus a stock number.
+  const stockMap = await stockMapFor(
+    products.map((p) => ({
+      id: p.id,
+      type: p.type,
+      supplierId: p.supplierId,
+      supplierStock: p.supplierStock,
+      reusable: p.reusableSecretEnc !== null,
+      reusableStock: p.reusableStock,
+      manual: p.fulfillmentMode === "MANUAL",
+      manualStock: p.manualStock,
+      variantIds: p.variants.map((v) => v.id),
+    })),
+  );
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const sym = currency === "INR" ? "₹" : "$";
   const UNLIMITED = 1_000_000;
@@ -426,11 +446,13 @@ export async function announceCatalogue(
   const rows: string[] = [];
   let shown = 0;
   for (const p of products) {
-    const view = await getProductView(p.id, currency).catch(() => null);
-    const unlimited = view ? view.variants.some((v) => v.stock >= UNLIMITED) : false;
-    const units = view ? view.variants.reduce((n, v) => n + (v.stock >= UNLIMITED ? 0 : v.stock), 0) : 0;
+    const stocks = p.variants.map((v) => stockMap.get(v.id) ?? 0);
+    const unlimited = stocks.some((n) => n >= UNLIMITED);
+    const units = stocks.reduce((n, x) => n + (x >= UNLIMITED ? 0 : x), 0);
     if (opts.inStockOnly && !unlimited && units <= 0) continue;
-    const priced = (view?.variants ?? []).map((v) => v.priceMinor).filter((n): n is number => n !== null);
+    const priced = p.variants
+      .map((v) => (v.prices[0] ? effectivePriceMinor(v.prices[0].amountMinor, p) : null))
+      .filter((n): n is number => n !== null);
     const price = priced.length > 0 ? `${sym}${(Math.min(...priced) / 100).toFixed(2)}` : "—";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;

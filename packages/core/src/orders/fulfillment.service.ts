@@ -1,11 +1,12 @@
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
-import { encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
+import { encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
-import { costForVariant } from "../finance.service.js";
+import { accrueCommissionTx } from "./commission.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
+import { logWallet } from "../logs.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
@@ -141,6 +142,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
           continue;
         }
 
+        let deliveredThisItem = false;
         try {
           if (type === "LICENSE_KEY") {
             const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
@@ -150,7 +152,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
-                costMinor: await costForVariant(item.variantId, cost),
+                costMinor: cost ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
@@ -170,7 +172,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
-                costMinor: await costForVariant(item.variantId, creds.costMinor),
+                costMinor: creds.costMinor ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
@@ -178,29 +180,26 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             }
           }
-        } catch {
+          deliveredThisItem = true;
+        } catch (e) {
           // OUT_OF_STOCK for this item — paid order must never fail entirely.
           awaitingStock++;
+          // But only OUT_OF_STOCK is expected. Anything else was reported to the
+          // admin as "temporarily out of stock", so a systemic failure (bad
+          // master key, DB fault) looked like empty shelves with no log line.
+          if (!(isCoreError(e) && e.code === "OUT_OF_STOCK")) {
+            // eslint-disable-next-line no-console
+            console.error("fulfilment failed (not stock)", { orderItemId: item.id, error: String(e).slice(0, 300) });
+            void logWallet("fulfil.error", `Fulfilment failed for ${item.productNameSnap} — NOT a stock problem`, {
+              orderItemId: item.id, error: String(e).slice(0, 200),
+            });
+          }
         }
 
-        // Marketplace commission accrual with hold (PRD §6.6).
-        if (item.resellerIdSnap) {
-          const profile = await tx.resellerProfile.findUnique({ where: { id: item.resellerIdSnap } });
-          const bp = profile?.commissionPct ?? commissionBpDefault;
-          const commission = Math.floor((item.totalMinor * bp) / 10_000);
-          const holdDays = profile?.holdDays ?? 7;
-          await tx.commissionEntry.create({
-            data: {
-              orderItemId: item.id,
-              resellerId: item.resellerIdSnap,
-              grossMinor: item.totalMinor,
-              commissionMinor: commission,
-              netMinor: item.totalMinor - commission,
-              currency: order.currency,
-              holdUntil: new Date(Date.now() + holdDays * 86_400_000),
-            },
-          });
-        }
+        // Commission ONLY for an item that was actually delivered. The old code
+        // ran even when assignment threw, so a reseller was paid for goods the
+        // customer never received and later got refunded for.
+        if (deliveredThisItem) await accrueCommissionTx(tx, item, order.currency);
       }
 
       // Referral reward (tiered: first purchase vs repeat), held for anti-fraud.

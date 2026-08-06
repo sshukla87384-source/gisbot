@@ -225,9 +225,15 @@ export type ButtonLabelKey = (typeof BUTTON_LABEL_KEYS)[number];
 export interface ButtonOverride { label?: string; icon?: string }
 
 /** Admin overrides for main-menu buttons: custom label and/or premium-emoji icon (empty when unset). */
+/** Cached: this is read on every main-menu render but only changes when an admin edits a label. */
 export async function getButtonConfig(): Promise<Partial<Record<ButtonLabelKey, ButtonOverride>>> {
-  const row = await prisma.setting.findUnique({ where: { key: "ui.button_labels" } });
-  return (row?.value as Partial<Record<ButtonLabelKey, ButtonOverride>> | undefined) ?? {};
+  return cached("btncfg:all", 300, async () => {
+    const row = await prisma.setting.findUnique({ where: { key: "ui.button_labels" } });
+    return (row?.value as Partial<Record<ButtonLabelKey, ButtonOverride>> | undefined) ?? {};
+  }).catch(async () => {
+    const row = await prisma.setting.findUnique({ where: { key: "ui.button_labels" } });
+    return (row?.value as Partial<Record<ButtonLabelKey, ButtonOverride>> | undefined) ?? {};
+  });
 }
 
 /** Set a button's label and/or premium-emoji icon. Pass empty label + null icon to reset to default. */
@@ -242,6 +248,8 @@ export async function setButton(key: ButtonLabelKey, label: string, icon: string
     create: { key: "ui.button_labels", value: next as object },
     update: { value: next as object },
   });
+  // getButtonConfig is cached for 5 min — drop it so the edit shows immediately.
+  await invalidate("btncfg:*").catch(() => undefined);
 }
 
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
@@ -307,39 +315,73 @@ export async function listVariantsBrief(productId: string): Promise<VariantBrief
 export async function addLicenseKeys(variantId: string, rawKeys: string[]): Promise<{ added: number; skipped: number; relisted: number }> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   let added = 0, skipped = 0, relisted = 0;
+
+  // Batched: 4 queries instead of 1-3 per key. A 2,000-key upload was 4,000+
+  // sequential round trips, minutes of an admin watching nothing happen.
+  const seen = new Set<string>();
+  const incoming: Array<{ value: string; keyHash: string }> = [];
   for (const raw of rawKeys) {
     const value = raw.trim();
     if (!value) continue;
     const keyHash = sha256Hex(normalizeLicenseKey(value));
-    const exists = await prisma.licenseKey.findUnique({ where: { variantId_keyHash: { variantId, keyHash } } });
-    if (exists) {
-      // Already AVAILABLE → a true duplicate, skip. Already sold/disabled (e.g. a
-      // test delivery) → put it BACK on the shelf instead of silently skipping,
-      // and never create a second row for the same key.
-      if (exists.status === "AVAILABLE") { skipped++; continue; }
-      // NEVER resurrect a key that belongs to a live order — the buyer can still
-      // see it in My Orders, and nulling orderItemId would drop the unique
-      // constraint that prevents the same key being delivered twice.
-      if (exists.orderItemId) {
-        const oi = await prisma.orderItem.findUnique({
-          where: { id: exists.orderItemId },
-          select: { order: { select: { status: true } } },
-        });
-        const dead = !oi || ["CANCELLED", "EXPIRED", "REFUNDED"].includes(oi.order.status);
-        if (!dead) { skipped++; continue; } // still owned by a real customer
-      }
-      await prisma.licenseKey.update({
-        where: { id: exists.id },
-        data: { status: "AVAILABLE", orderItemId: null, soldAt: null, reservedUntil: null, deletedAt: null },
-      });
-      relisted++;
+    if (seen.has(keyHash)) { skipped++; continue; } // duplicate within the upload itself
+    seen.add(keyHash);
+    incoming.push({ value, keyHash });
+  }
+  if (incoming.length === 0) return { added, skipped, relisted };
+
+  const existing = await prisma.licenseKey.findMany({
+    where: { variantId, keyHash: { in: incoming.map((k) => k.keyHash) } },
+    select: { id: true, keyHash: true, status: true, orderItemId: true },
+  });
+  const byHash = new Map(existing.map((e) => [e.keyHash, e]));
+
+  // One lookup for every order that still holds one of these keys.
+  const heldOrderItemIds = existing.map((e) => e.orderItemId).filter((x): x is string => Boolean(x));
+  const heldItems = heldOrderItemIds.length > 0
+    ? await prisma.orderItem.findMany({
+        where: { id: { in: heldOrderItemIds } },
+        select: { id: true, order: { select: { status: true } } },
+      })
+    : [];
+  const orderStatusByItem = new Map(heldItems.map((i) => [i.id, i.order.status]));
+
+  const toCreate: Array<{ variantId: string; keyEncrypted: string; keyHash: string; supplier: string }> = [];
+  const toRelist: string[] = [];
+  for (const k of incoming) {
+    const ex = byHash.get(k.keyHash);
+    if (!ex) {
+      toCreate.push({ variantId, keyEncrypted: encryptSecret(k.value, masterKey), keyHash: k.keyHash, supplier: "bot-admin" });
       continue;
     }
-    await prisma.licenseKey.create({
-      data: { variantId, keyEncrypted: encryptSecret(value, masterKey), keyHash, supplier: "bot-admin" },
-    });
-    added++;
+    // Already AVAILABLE → a true duplicate, skip. Already sold/disabled (e.g. a
+    // test delivery) → put it BACK on the shelf instead of silently skipping,
+    // and never create a second row for the same key.
+    if (ex.status === "AVAILABLE") { skipped++; continue; }
+    // NEVER resurrect a key that belongs to a live order — the buyer can still
+    // see it in My Orders, and nulling orderItemId would drop the unique
+    // constraint that prevents the same key being delivered twice.
+    if (ex.orderItemId) {
+      const st = orderStatusByItem.get(ex.orderItemId);
+      const dead = st === undefined || ["CANCELLED", "EXPIRED", "REFUNDED"].includes(st);
+      if (!dead) { skipped++; continue; } // still owned by a real customer
+    }
+    toRelist.push(ex.id);
   }
+
+  if (toCreate.length > 0) {
+    const res = await prisma.licenseKey.createMany({ data: toCreate, skipDuplicates: true });
+    added += res.count;
+    skipped += toCreate.length - res.count; // lost a race with a concurrent upload
+  }
+  if (toRelist.length > 0) {
+    const res = await prisma.licenseKey.updateMany({
+      where: { id: { in: toRelist } },
+      data: { status: "AVAILABLE", orderItemId: null, soldAt: null, reservedUntil: null, deletedAt: null },
+    });
+    relisted += res.count;
+  }
+
   if (added + relisted > 0) {
     const v = await prisma.productVariant.findUnique({ where: { id: variantId }, select: { productId: true } });
     if (v) {
@@ -822,6 +864,8 @@ export async function setWebAdminPassword(email: string, password: string): Prom
     create: { userId: user.id, roleId: role.id },
     update: {},
   });
+  // withRoleNames caches for 120s — drop it so a new admin is recognised at once.
+  await invalidate("role:*").catch(() => undefined);
   return { ok: true };
 }
 

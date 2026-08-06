@@ -5,7 +5,7 @@ import { enqueueAdminAlert } from "../queues.js";
 import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { adjustWallet } from "./wallet.service.js";
 import { fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
-import { usdtRate } from "../fx.js";
+import { convertMinor, usdtRate } from "../fx.js";
 
 function toUsdt(amountMinor: number, currency: Currency): string {
   const cfg = loadConfig();
@@ -28,6 +28,8 @@ export async function createWalletTopup(userId: string, amountMinor: number): Pr
   const uid = cfg.BINANCE_PAY_UID;
   if (!uid) throw new CoreError("VALIDATION_FAILED", "Binance top-up is not configured");
   if (!Number.isFinite(amountMinor) || amountMinor < 100) throw new CoreError("VALIDATION_FAILED", "Minimum top-up is 1.");
+  amountMinor = Math.round(amountMinor);
+  if (amountMinor > 100_000_00) throw new CoreError("VALIDATION_FAILED", "That top-up is too large — please contact support.");
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const usdt = toUsdt(amountMinor, user.currency);
@@ -82,12 +84,23 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
   });
   if (claimed.count === 0) return { ok: false, reason: "NOT_PENDING" };
 
+  // The top-up is denominated in the USER's currency; the wallet has its OWN,
+  // and setUserCurrency never changed the wallet's. Crediting the raw number
+  // put 50000 INR-minor into a USD wallet as $500 for a 5 USDT payment.
+  // Convert exactly (no price surcharge — this is money received).
+  const wal = await prisma.wallet.findUnique({ where: { userId: topup.userId }, select: { currency: true } });
+  const creditMinor = wal && wal.currency !== topup.currency
+    ? convertMinor(topup.amountMinor, topup.currency as Currency, wal.currency as Currency)
+    : topup.amountMinor;
+
   const newBalanceMinor = await adjustWallet({
     userId: topup.userId,
-    amountMinor: BigInt(topup.amountMinor),
+    amountMinor: BigInt(creditMinor),
     type: "DEPOSIT",
     note: `Binance top-up (txn ${clean})`,
-    idempotencyKey: `topup:${topup.id}`,
+    // Keyed on the TRANSACTION, not the top-up row: the same Binance txn must
+    // never credit twice even via two different pending top-ups.
+    idempotencyKey: `topup-txn:${clean}`,
   });
   await prisma.walletTopup.update({ where: { id: topup.id }, data: { status: "CREDITED", creditedAt: new Date() } });
   const tu = await prisma.user.findUnique({ where: { id: topup.userId }, select: { telegramHandle: true, firstName: true, telegramId: true, currency: true } });

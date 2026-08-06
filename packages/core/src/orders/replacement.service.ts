@@ -181,10 +181,29 @@ export async function createReplacementTicket(opts: {
  * replacement outside the warranty. Same delivery path as an approved claim.
  */
 export async function issueReplacementFromTicket(ticketId: string): Promise<{ ok: boolean; reason?: string }> {
-  const t = await prisma.supportTicket.findUnique({ where: { id: ticketId }, select: { orderItemId: true, ticketNumber: true } });
+  const t = await prisma.supportTicket.findUnique({ where: { id: ticketId }, select: { orderItemId: true, ticketNumber: true, userId: true } });
   if (!t?.orderItemId) return { ok: false, reason: "This ticket is not linked to a delivered item." };
+
+  // Record the replacement, otherwise the item still evaluates as claimable and
+  // could be replaced again and again — each time burning a live unit of stock
+  // against a single sale.
+  const already = await prisma.replacementRequest.findFirst({
+    where: { orderItemId: t.orderItemId, status: "APPROVED" },
+    select: { id: true },
+  });
+  if (already) return { ok: false, reason: "This item has already been replaced once." };
+
   const res = await adminReplaceOrderItem(t.orderItemId);
   if (!res.ok) return { ok: false, reason: res.reason };
+  await prisma.replacementRequest.create({
+    data: {
+      orderItemId: t.orderItemId,
+      userId: t.userId,
+      reason: `Goodwill replacement issued by support on ticket ${t.ticketNumber}`,
+      status: "APPROVED",
+      reviewedAt: new Date(),
+    },
+  }).catch(() => undefined);
   await noteOnTicket(ticketId, "🔄 Replacement issued by support (goodwill — outside warranty).");
   await setTicketStatus(ticketId, "RESOLVED", false);
   return { ok: true };

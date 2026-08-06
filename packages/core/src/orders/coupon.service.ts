@@ -35,7 +35,19 @@ interface CouponRow {
   isActive: boolean; startsAt: Date | null; expiresAt: Date | null; deletedAt: Date | null;
 }
 
-async function evaluate(c: CouponRow | null, userId: string, currency: Currency, subtotalMinor: number): Promise<CouponResult> {
+/**
+ * `db` is the caller's client. Inside a checkout this MUST be the transaction:
+ * reading usage counts through the global client meant two concurrent checkouts
+ * each saw zero prior uses, so usageLimit and perUserLimit were both bypassed
+ * and a single-use coupon could be redeemed any number of times.
+ */
+async function evaluate(
+  c: CouponRow | null,
+  userId: string,
+  currency: Currency,
+  subtotalMinor: number,
+  db: Pick<typeof prisma, "couponUsage" | "user"> = prisma,
+): Promise<CouponResult> {
   if (!c || !c.isActive || c.deletedAt) return { ok: false, reason: "INVALID" };
   const now = new Date();
   if (c.startsAt && c.startsAt > now) return { ok: false, reason: "NOT_STARTED" };
@@ -44,10 +56,10 @@ async function evaluate(c: CouponRow | null, userId: string, currency: Currency,
   if (subtotalMinor <= 0) return { ok: false, reason: "EMPTY_CART" };
   if (subtotalMinor < c.minCartMinor) return { ok: false, reason: "MIN_CART" };
   if (c.usageLimit !== null && c.usedCount >= c.usageLimit) return { ok: false, reason: "USED_UP" };
-  const mine = await prisma.couponUsage.count({ where: { couponId: c.id, userId } });
+  const mine = await db.couponUsage.count({ where: { couponId: c.id, userId } });
   if (mine >= c.perUserLimit) return { ok: false, reason: "ALREADY_USED" };
   if (c.firstPurchaseOnly) {
-    const u = await prisma.user.findUnique({ where: { id: userId }, select: { firstPurchaseAt: true } });
+    const u = await db.user.findUnique({ where: { id: userId }, select: { firstPurchaseAt: true } });
     if (u?.firstPurchaseAt) return { ok: false, reason: "FIRST_ONLY" };
   }
   let discount = 0;
@@ -97,7 +109,15 @@ export async function getCartCoupon(userId: string, currency: Currency): Promise
 export async function resolveCartCouponTx(tx: Tx, userId: string, currency: Currency, subtotalMinor: number): Promise<{ couponId: string; discountMinor: number } | null> {
   const cart = await tx.cart.findUnique({ where: { userId }, include: { coupon: true } });
   if (!cart?.coupon) return null;
-  const res = await evaluate(cart.coupon as unknown as CouponRow, userId, currency, subtotalMinor);
+  // Lock the coupon row for the rest of the transaction, so a concurrent
+  // checkout serialises behind us instead of reading a stale usedCount.
+  const locked = await tx.$queryRaw<Array<{ usedCount: number; usageLimit: number | null }>>`
+    SELECT "usedCount", "usageLimit" FROM "Coupon" WHERE "id" = ${cart.coupon.id} FOR UPDATE`;
+  const live = locked[0];
+  if (live && live.usageLimit !== null && live.usedCount >= live.usageLimit) return null;
+  const row = { ...(cart.coupon as unknown as CouponRow), usedCount: live?.usedCount ?? cart.coupon.usedCount };
+  // Pass `tx` so per-user limits are counted inside this transaction.
+  const res = await evaluate(row, userId, currency, subtotalMinor, tx as unknown as Pick<typeof prisma, "couponUsage" | "user">);
   if (!res.ok || !res.discountMinor) return null;
   return { couponId: cart.coupon.id, discountMinor: res.discountMinor };
 }

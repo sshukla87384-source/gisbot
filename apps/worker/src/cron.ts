@@ -8,6 +8,8 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   reconcile,
   profitReport,
   sendResellerStatements,
+  pollBinancePayments,
+  convertMinor,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -95,13 +97,20 @@ async function releaseHolds(): Promise<void> {
     const profile = await prisma.resellerProfile.findUnique({ where: { id: entry.resellerId } });
     if (!profile) continue;
     const wallet = await prisma.wallet.findUnique({ where: { userId: profile.userId } });
-    if (!wallet || wallet.currency !== entry.currency) {
-      await enqueueAdminAlert(`⚠️ Commission ${entry.id}: wallet currency mismatch — manual settlement required`);
+    if (!wallet) {
+      await enqueueAdminAlert(`⚠️ Commission ${entry.id}: no wallet — manual settlement required`);
       continue;
     }
+    // Entries are created in the ORDER's currency, wallets are USD, and nothing
+    // syncs the two — so this used to `continue` WITHOUT setting releasedAt on
+    // every INR order: the reseller was never paid and the same entry re-alerted
+    // every 10 minutes forever. Convert exactly, like spin and referral do.
+    const commMinor = wallet.currency === entry.currency
+      ? entry.netMinor
+      : convertMinor(entry.netMinor, entry.currency, wallet.currency);
     await adjustWallet({
       userId: profile.userId,
-      amountMinor: BigInt(entry.netMinor),
+      amountMinor: BigInt(commMinor),
       type: "COMMISSION",
       note: `commission ${entry.orderItemId}`,
       idempotencyKey: `comm:${entry.id}`,
@@ -125,16 +134,22 @@ async function releaseHolds(): Promise<void> {
       continue;
     }
     const wallet = await prisma.wallet.findUnique({ where: { userId: reward.referrerId } });
-    if (!wallet || wallet.currency !== reward.currency) {
+    if (!wallet) {
       await prisma.referralReward.update({
         where: { id: reward.id },
-        data: { status: "WITHHELD", withheldReason: "wallet currency mismatch" },
+        data: { status: "WITHHELD", withheldReason: "no wallet" },
       });
       continue;
     }
+    // Rewards are created in the ORDER's currency; wallets are USD. Treating a
+    // mismatch as fraud meant the referral programme silently never paid out on
+    // a single INR order. Convert exactly instead.
+    const rewardMinor = wallet.currency === reward.currency
+      ? reward.amountMinor
+      : convertMinor(reward.amountMinor, reward.currency, wallet.currency);
     await adjustWallet({
       userId: reward.referrerId,
-      amountMinor: BigInt(reward.amountMinor),
+      amountMinor: BigInt(rewardMinor),
       type: "REFERRAL_REWARD",
       note: `referral reward (${reward.orderId})`,
       idempotencyKey: `refr:${reward.id}`,
@@ -239,6 +254,22 @@ async function dailyMoneySummary(): Promise<void> {
   ).catch(() => undefined);
 }
 
+/**
+ * Auto-confirm Binance payments (every 2 min).
+ *
+ * This existed but was never scheduled, so "Auto-confirms when payment arrives"
+ * was a lie: anyone who paid and waited had their order expire with their USDT
+ * gone unless they pasted a transaction id by hand.
+ */
+async function binancePoll(): Promise<void> {
+  const n = await pollBinancePayments();
+  if (n > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.binancePoll", entityType: "Order", after: { confirmed: n } },
+    }).catch(() => undefined);
+  }
+}
+
 /** Daily statement to every API user / reseller (once a day). */
 async function resellerStatements(): Promise<void> {
   const { sent, skipped } = await sendResellerStatements();
@@ -268,6 +299,7 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(3600, "lowstock", 3590, lowStockAlerts),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     every(86_400, "reconcile", 86_390, reconcileWallets),
+    every(120, "binancepoll", 110, binancePoll),
     every(300, "recovery", 290, recoverAbandonedCheckouts),
     every(21_600, "quality", 21_590, qualitySweep),
     every(86_400, "moneysummary", 86_390, dailyMoneySummary),

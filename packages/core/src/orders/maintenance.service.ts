@@ -72,7 +72,10 @@ export async function adminRefundOrder(orderId: string, adminId?: string): Promi
     include: { user: { select: { id: true, telegramId: true } } },
   });
   if (!order) return { ok: false, reason: "NOT_FOUND" };
-  if (["REFUNDED", "CANCELLED", "EXPIRED"].includes(order.status)) return { ok: false, reason: "ALREADY" };
+  // PARTIALLY_REFUNDED belongs here too: autoRefundStuckStock already credited
+  // part of this order under a DIFFERENT idempotency key, so a full refund on
+  // top of it pays out more than the order was ever worth.
+  if (["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED", "EXPIRED"].includes(order.status)) return { ok: false, reason: "ALREADY" };
   const paidMinor = order.walletUsedMinor + order.totalMinor; // exactly what was paid (net of discount)
   if (paidMinor > 0) {
     await adjustWallet({

@@ -103,6 +103,42 @@ export async function enqueueTelegramMessage(
   } satisfies OutboxJob, opts.delayMs && opts.delayMs > 0 ? { delay: Math.min(opts.delayMs, 7 * 24 * 3600_000) } : undefined);
 }
 
+/**
+ * Bulk enqueue for fan-out (broadcasts, catalogue posts).
+ *
+ * One pipelined addBulk per chunk instead of one round trip per recipient — a
+ * 10k broadcast was ~30-50k serialized Redis commands on the same connection the
+ * bot reads sessions from, so every button tap queued behind the blast.
+ *
+ * `priority` is set LOW (higher number = lower priority in BullMQ) so a marketing
+ * send can never delay a paid customer's license key on the shared outbox queue.
+ */
+export async function enqueueTelegramBulk(
+  jobs: Array<{ telegramId: bigint | string; text: string; opts?: OutboxOptions }>,
+  chunkSize = 500,
+): Promise<number> {
+  const q = getQueue(QUEUE_NAMES.outbox);
+  let queued = 0;
+  for (let i = 0; i < jobs.length; i += chunkSize) {
+    const slice = jobs.slice(i, i + chunkSize);
+    await q.addBulk(
+      slice.map((j) => ({
+        name: "send",
+        data: {
+          telegramId: j.telegramId.toString(),
+          text: j.text,
+          ...(j.opts?.photo ? { photo: j.opts.photo } : {}),
+          ...(j.opts?.buttons && j.opts.buttons.length > 0 ? { buttons: j.opts.buttons } : {}),
+          ...(j.opts?.pin ? { pin: true } : {}),
+        } satisfies OutboxJob,
+        opts: { priority: 10 },
+      })),
+    );
+    queued += slice.length;
+  }
+  return queued;
+}
+
 /** Send a text file (e.g. a large order's keys) as a Telegram document, with a caption. */
 export async function enqueueTelegramDocument(
   telegramId: bigint | string,

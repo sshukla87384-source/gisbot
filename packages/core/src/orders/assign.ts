@@ -31,6 +31,13 @@ export interface PricedLine {
   reusableStock: number | null;
   /** Optional sellable quantity for a MANUAL product; null = unlimited. */
   manualStock: number | null;
+  /**
+   * The variant's cost, carried through so delivery does NOT have to re-query it.
+   * costForVariant fired one query per unit INSIDE the checkout transaction, for
+   * a column priceCart already had in memory — pure round trips while holding
+   * inventory row locks.
+   */
+  defaultCostMinor: number | null;
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
@@ -87,6 +94,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       reusableSecret: v.product.reusableSecretEnc ? decryptSecret(v.product.reusableSecretEnc, masterKey) : null,
       reusableStock: v.product.reusableStock,
       manualStock: v.product.fulfillmentMode === "MANUAL" ? v.product.manualStock : null,
+      defaultCostMinor: v.defaultCostMinor ?? null,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
       unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),

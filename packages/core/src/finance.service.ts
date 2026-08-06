@@ -1,6 +1,6 @@
 import { prisma } from "@gis/database";
 import type { Currency } from "@gis/database";
-import { convertMinor } from "./fx.js";
+import { convertMinor, priceUsdFromInr } from "./fx.js";
 
 /**
  * Money truth for the operator.
@@ -82,13 +82,20 @@ export interface ProfitReport {
 export async function profitReport(days = 30): Promise<ProfitReport> {
   const since = new Date(Date.now() - days * 86_400_000);
   const items = await prisma.orderItem.findMany({
-    where: { fulfilledAt: { gte: since }, order: { status: { in: ["COMPLETED", "PAID", "PENDING_FULFILLMENT", "PARTIALLY_REFUNDED"] } } },
+    // Exclude replacement bookkeeping orders. They carry zero revenue, and the
+    // replacement's cost was ALREADY added to the original sale — counting them
+    // here charged every replacement twice and pushed good products into
+    // lossMakers.
+    where: {
+      fulfilledAt: { gte: since },
+      order: { status: { in: ["COMPLETED", "PAID", "PENDING_FULFILLMENT", "PARTIALLY_REFUNDED"] }, replacementOfOrderId: null },
+    },
     select: {
       quantity: true,
       totalMinor: true,
       costMinor: true,
       productNameSnap: true,
-      order: { select: { currency: true } },
+      order: { select: { currency: true, discountMinor: true, subtotalMinor: true } },
       variant: { select: { productId: true, defaultCostMinor: true } },
     },
     take: 20_000,
@@ -101,8 +108,15 @@ export async function profitReport(days = 30): Promise<ProfitReport> {
   let unpricedUnits = 0;
 
   for (const it of items) {
-    // Revenue converted exactly — this is money received, not a price to display.
-    const rev = convertMinor(it.totalMinor, it.order.currency as Currency, "USD");
+    // OrderItem.totalMinor is the pre-discount line price; a coupon lives on the
+    // ORDER. Without apportioning it, a Rs 400 coupon showed up as Rs 400 of
+    // phantom profit and lossMakers could never catch a coupon selling below
+    // cost. Split the discount across lines in proportion to their value.
+    const gross = it.totalMinor;
+    const sub = it.order.subtotalMinor;
+    const disc = it.order.discountMinor ?? 0;
+    const net = disc > 0 && sub > 0 ? Math.max(0, gross - Math.round((disc * gross) / sub)) : gross;
+    const rev = convertMinor(net, it.order.currency as Currency, "USD");
     // Prefer the snapshot; fall back to the variant's current cost for older rows
     // delivered before cost tracking existed, so history is not simply blank.
     const unit = it.costMinor ?? it.variant.defaultCostMinor ?? null;
@@ -189,7 +203,10 @@ export async function thinMarginProducts(): Promise<{ floorBp: number; rows: Thi
     if (v.defaultCostMinor === null || v.defaultCostMinor === undefined) { noCost++; continue; }
     // Compare against the CHEAPEST way a customer can buy it — the worst case.
     const usdPrices = v.prices
-      .map((p) => convertMinor(p.amountMinor, p.currency as Currency, "USD"))
+      // priceUsdFromInr removes the INR surcharge. convertMinor would leave it
+      // in, making every INR-priced product look ~5% healthier than it is and
+      // letting it slip past the floor.
+      .map((p) => (p.currency === "INR" ? priceUsdFromInr(p.amountMinor) : convertMinor(p.amountMinor, p.currency as Currency, "USD")))
       .filter((n) => n > 0);
     if (usdPrices.length === 0) continue;
     const priceMinor = Math.min(...usdPrices);
@@ -244,25 +261,28 @@ export interface Reconciliation {
 export async function reconcile(hours = 24): Promise<Reconciliation> {
   const since = new Date(Date.now() - hours * 3_600_000);
 
-  const wallets = await prisma.wallet.findMany({ select: { id: true, currency: true, balanceMinor: true } });
+  const wallets = await prisma.wallet.findMany({ select: { id: true, currency: true, balanceMinor: true }, take: 200_000 });
   let liability = 0;
   for (const w of wallets) liability += convertMinor(Number(w.balanceMinor), w.currency as Currency, "USD");
 
-  const txs = await prisma.walletTransaction.findMany({
+  // Aggregate in the DATABASE. Pulling up to 50_000 rows to sum them in JS also
+  // silently truncated: past 50k transactions in the window the totals were
+  // simply wrong with nothing to say so.
+  const grouped = await prisma.walletTransaction.groupBy({
+    by: ["type", "currency"],
     where: { createdAt: { gte: since } },
-    select: { type: true, amountMinor: true, currency: true },
-    take: 50_000,
+    _sum: { amountMinor: true },
   });
   let deposits = 0;
   let purchases = 0;
   let refunds = 0;
   let grants = 0;
-  for (const t of txs) {
-    const usd = convertMinor(Number(t.amountMinor), t.currency as Currency, "USD");
-    if (t.type === "DEPOSIT") deposits += usd;
-    else if (t.type === "PURCHASE") purchases += Math.abs(usd);
-    else if (t.type === "REFUND" || t.type === "REVERSAL") refunds += Math.abs(usd);
-    else if (t.type === "CASHBACK" || t.type === "REFERRAL_REWARD" || t.type === "ADJUSTMENT") grants += usd;
+  for (const g of grouped) {
+    const usd = convertMinor(Number(g._sum.amountMinor ?? 0), g.currency as Currency, "USD");
+    if (g.type === "DEPOSIT") deposits += usd;
+    else if (g.type === "PURCHASE") purchases += Math.abs(usd);
+    else if (g.type === "REFUND" || g.type === "REVERSAL") refunds += Math.abs(usd);
+    else if (g.type === "CASHBACK" || g.type === "REFERRAL_REWARD" || g.type === "ADJUSTMENT") grants += usd;
   }
 
   const pendingTopups = await prisma.walletTopup.findMany({
@@ -272,31 +292,39 @@ export async function reconcile(hours = 24): Promise<Reconciliation> {
   });
   const topupsPendingMinor = pendingTopups.reduce((n, t) => n + convertMinor(t.amountMinor, t.currency as Currency, "USD"), 0);
 
+  // A wallet-paid order stores totalMinor 0 with the money in walletUsedMinor,
+  // so valuing these by totalMinor alone reported "$0.00 owed" while real paid
+  // orders sat undelivered. Value = wallet + gateway.
   const unfulfilled = await prisma.order.findMany({
-    where: { status: { in: ["PAID", "PENDING_FULFILLMENT", "AWAITING_STOCK"] }, items: { some: { fulfilledAt: null } } },
-    select: { totalMinor: true, currency: true },
+    where: {
+      status: { in: ["PAID", "PENDING_FULFILLMENT", "AWAITING_STOCK"] },
+      items: { some: { fulfilledAt: null } },
+      replacementOfOrderId: null,
+    },
+    select: { totalMinor: true, walletUsedMinor: true, currency: true },
     take: 2_000,
   });
 
   const expired = await prisma.order.findMany({
     where: { status: { in: ["EXPIRED", "CANCELLED"] }, createdAt: { gte: since } },
-    select: { totalMinor: true, currency: true },
+    select: { totalMinor: true, walletUsedMinor: true, currency: true },
     take: 5_000,
   });
 
-  // Cached balance vs the ledger it is derived from.
-  const sums = await prisma.walletTransaction.groupBy({ by: ["walletId"], _sum: { amountMinor: true } });
-  const ledger = new Map(sums.map((s) => [s.walletId, Number(s._sum.amountMinor ?? 0)]));
-  let driftWallets = 0;
+  // Cached balance vs the ledger it is derived from — in ONE statement with
+  // HAVING, so only the mismatching rows cross the wire. The previous version
+  // aggregated the entire ledger with no WHERE clause and summed it in JS, which
+  // got slower every day forever.
+  const drift = await prisma.$queryRaw<Array<{ id: string; currency: string; diff: bigint }>>`
+    SELECT w."id", w."currency", (w."balanceMinor" - COALESCE(SUM(t."amountMinor"), 0)) AS "diff"
+    FROM "Wallet" w
+    LEFT JOIN "WalletTransaction" t ON t."walletId" = w."id"
+    GROUP BY w."id", w."currency", w."balanceMinor"
+    HAVING w."balanceMinor" <> COALESCE(SUM(t."amountMinor"), 0)
+    LIMIT 500`;
+  let driftWallets = drift.length;
   let driftMinor = 0;
-  for (const w of wallets) {
-    const expectedMinor = ledger.get(w.id) ?? 0;
-    const diff = Number(w.balanceMinor) - expectedMinor;
-    if (diff !== 0) {
-      driftWallets++;
-      driftMinor += convertMinor(diff, w.currency as Currency, "USD");
-    }
-  }
+  for (const d of drift) driftMinor += convertMinor(Number(d.diff), d.currency as Currency, "USD");
 
   return {
     walletLiabilityMinorUsd: liability,
@@ -308,9 +336,9 @@ export async function reconcile(hours = 24): Promise<Reconciliation> {
     topupsPendingMinor,
     topupsPendingCount: pendingTopups.length,
     unfulfilledPaidOrders: unfulfilled.length,
-    unfulfilledPaidValueMinor: unfulfilled.reduce((n, o) => n + convertMinor(o.totalMinor, o.currency as Currency, "USD"), 0),
+    unfulfilledPaidValueMinor: unfulfilled.reduce((n, o) => n + convertMinor(o.totalMinor + o.walletUsedMinor, o.currency as Currency, "USD"), 0),
     expiredOrders: expired.length,
-    expiredValueMinor: expired.reduce((n, o) => n + convertMinor(o.totalMinor, o.currency as Currency, "USD"), 0),
+    expiredValueMinor: expired.reduce((n, o) => n + convertMinor(o.totalMinor + o.walletUsedMinor, o.currency as Currency, "USD"), 0),
     driftWallets,
     driftMinor,
     hours,
@@ -376,7 +404,9 @@ export async function qualityReport(): Promise<{ cfg: QualityConfig; rows: Quali
   const since = new Date(Date.now() - cfg.days * 86_400_000);
 
   const delivered = await prisma.orderItem.findMany({
-    where: { fulfilledAt: { gte: since } },
+    // Shadow replacement items would count as extra clean deliveries and dilute
+    // the very failure rate this report exists to surface.
+    where: { fulfilledAt: { gte: since }, order: { replacementOfOrderId: null } },
     select: { id: true, productNameSnap: true, variant: { select: { productId: true, product: { select: { supplierId: true, status: true, name: true } } } } },
     take: 20_000,
   });
