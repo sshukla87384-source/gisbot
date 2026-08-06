@@ -767,6 +767,14 @@ model OrderItem {
   /// Cost of the unit actually delivered, snapshotted at delivery in USD minor
   /// units. Snapshotted because supplier costs change and history must not.
   costMinor       Int?
+  /// Set when this unit was replaced. The original payload below is NOT cleared —
+  /// the customer must always be able to see what they were originally given.
+  replacedAt      DateTime?
+  /// The unit that superseded this one (lives on the replacement order).
+  replacedByItemId String?  @unique
+  replacedBy      OrderItem? @relation("UnitReplacement", fields: [replacedByItemId], references: [id])
+  /// The faulty unit this one replaces. Exactly one of these two is ever set.
+  replaces        OrderItem? @relation("UnitReplacement")
   deliveryPayloadEncrypted String? // what was sent (key/credentials JSON), AES-GCM
   licenseKey      LicenseKey?
   accountAssignment AccountAssignment?
@@ -1257,6 +1265,14 @@ model ReplacementRequest {
   proofFileId String? // Telegram file_id of the screenshot the buyer submitted
   status      ReplacementStatus @default(PENDING)
   adminNote   String?
+  /// Was this covered by warranty, or a goodwill replacement outside it?
+  warrantyCovered Boolean @default(true)
+  /// The ticket this came through, when it was raised out of warranty.
+  ticketId    String?
+  /// The replacement OrderItem that was delivered for this request.
+  replacementOrderItemId String? @unique
+  /// Who approved it (admin Telegram id or user id), for the audit trail.
+  approvedBy  String?
   reviewedAt  DateTime?
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt

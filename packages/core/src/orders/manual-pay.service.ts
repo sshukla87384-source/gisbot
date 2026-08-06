@@ -7,6 +7,7 @@ import { scheduleFollowup } from "../followup.service.js";
 import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { accrueCommission, accrueCommissionTx } from "./commission.js";
+import type { DeliveryPayload } from "./assign.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
@@ -541,155 +542,271 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
 }
 
-export interface ReplaceResult { ok: boolean; reason?: string }
+export interface ReplaceResult {
+  ok: boolean;
+  reason?: string;
+  /** Everything a caller needs to describe the outcome — in chat, in a ticket, anywhere. */
+  detail?: ReplacementDetail;
+}
+
+export interface ReplacementDetail {
+  originalOrderNumber: string;
+  replacementOrderNumber: string | null;
+  productName: string;
+  variantName: string;
+  /** Original value, preserved. Shown struck through. */
+  oldText: string | null;
+  /** Last 4 characters of the original, for identifying a unit among many. */
+  oldTail: string | null;
+  newText: string;
+  newTail: string;
+  warrantyCovered: boolean;
+  at: Date;
+  originalOrderId: string;
+  replacementOrderId: string | null;
+  originalItemId: string;
+  replacementItemId: string | null;
+}
+
+/** First line of a payload, for display and for the "…1111" unit tail. */
+export function payloadLabel(p: { kind?: string; key?: string; username?: string }): string {
+  if (p.key) return p.key.split(/\r?\n/)[0] ?? "";
+  return p.username ?? "";
+}
+
+export function tailOf(text: string | null | undefined, n = 4): string | null {
+  if (!text) return null;
+  const t = text.trim();
+  return t.length <= n ? t : t.slice(-n);
+}
 
 /**
- * Admin action: replace a delivered AUTOMATIC item with a fresh unit from stock.
- * Detaches the faulty key/account, assigns a new AVAILABLE one, and delivers it.
- * Atomic — if there's no stock, nothing changes.
+ * Admin action: replace a delivered AUTOMATIC unit with a fresh one from stock.
+ *
+ * The important property, and the one the previous version got wrong: the
+ * ORIGINAL delivered value is never overwritten. It used to be replaced in place,
+ * so the customer permanently lost sight of what they had been given and could
+ * not tell which of five identical keys had been swapped. Now:
+ *
+ *   original OrderItem  — keeps its payload, gains replacedAt + replacedByItemId
+ *   replacement OrderItem — on its own order, holds the NEW key, replaces → original
+ *
+ * so the mapping is a real relation in both directions and history is intact.
+ * All of it in ONE transaction: a crash cannot leave a retired key with no
+ * replacement, or a replacement with no link back.
  */
-export async function adminReplaceOrderItem(orderItemId: string): Promise<ReplaceResult> {
+export async function adminReplaceOrderItem(
+  orderItemId: string,
+  opts: { warrantyCovered?: boolean; approvedBy?: string; ticketId?: string; reason?: string } = {},
+): Promise<ReplaceResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   const item = await prisma.orderItem.findUnique({
     where: { id: orderItemId },
     include: { order: { include: { user: { select: { telegramId: true } } } }, variant: { include: { product: true } } },
   });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
-  // Decrypt what was delivered previously, so the replacement message can show it.
+  if (item.replacedAt) return { ok: false, reason: "ALREADY_REPLACED" };
+  const type = item.variant.product.type;
+  if (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT") return { ok: false, reason: "NOT_AUTOMATIC" };
+
+  // Decrypt what was delivered, so the message can show old vs new. Kept, not moved.
   let oldPayload: { kind?: string; key?: string; username?: string; password?: string; twofa?: string } | null = null;
   if (item.deliveryPayloadEncrypted) {
     try { oldPayload = JSON.parse(decryptSecret(item.deliveryPayloadEncrypted, masterKey)); } catch { oldPayload = null; }
   }
-  const type = item.variant.product.type;
-  if (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT") return { ok: false, reason: "NOT_AUTOMATIC" };
 
   try {
-    let replacementCostMinor: number | null = null;
-    // Keep the ORIGINAL delivery date as the warranty start — a replacement must
-    // not hand out a fresh window. 5-day warranty replaced on day 4 leaves 1 day.
+    // The warranty window continues from the FIRST delivery — a replacement does
+    // not hand out a fresh one. 5-day warranty replaced on day 4 leaves 1 day.
     const warrantyStart = item.warrantyStartAt ?? item.fulfilledAt ?? new Date();
-    const assignReplacement = async (tx: TxM) => {
-      if (type === "LICENSE_KEY") {
-        // Detach + permanently retire the faulty key, then assign a DIFFERENT one.
-        const bad = await tx.licenseKey.findMany({ where: { orderItemId: item.id }, select: { id: true } });
-        await tx.licenseKey.updateMany({ where: { orderItemId: item.id }, data: { orderItemId: null, status: "DISABLED" } });
-        const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, false, bad.map((b) => b.id));
-        replacementCostMinor = cost;
-        return { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
-      }
-      // DIGITAL_ACCOUNT: free the old slot(s), then assign a fresh account.
-      const olds = await tx.accountAssignment.findMany({ where: { orderItemId: item.id } });
-      const badAccountIds: string[] = [];
-      for (const a of olds) {
-        badAccountIds.push(a.accountId);
-        await tx.accountAssignment.delete({ where: { id: a.id } });
-        // Retire the faulty account instead of returning it to the pool, or it
-        // would just be handed straight back out as the "replacement".
-        await tx.digitalAccount.updateMany({ where: { id: a.accountId }, data: { usedSlots: { decrement: 1 }, status: "DISABLED" } });
-      }
-      const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, false, badAccountIds);
-      replacementCostMinor = creds.costMinor;
-      return { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
-    }
+    const now = new Date();
 
-    const payload = await prisma.$transaction(async (tx) => {
-      const p = await assignReplacement(tx);
-      // Store the new payload IN THE SAME TRANSACTION as the assignment. Doing it
-      // afterwards meant a crash in between left the faulty key DISABLED, a fresh
-      // key SOLD to this item, and the customer's vault still showing the dead
-      // value — with the new one unrecoverable.
+    const out = await prisma.$transaction(async (tx) => {
+      // 0) CLAIM THE UNIT FIRST, conditionally. The check above runs outside the
+      //    transaction, and @unique on replacedByItemId cannot save us because two
+      //    concurrent calls mint DIFFERENT cuids — so both would succeed, burn two
+      //    keys for one claim and orphan the first replacement. Telegram redelivers
+      //    webhooks on timeout, so this is reachable, not theoretical.
+      const claimed = await tx.orderItem.updateMany({
+        where: { id: item.id, replacedAt: null },
+        data: { replacedAt: now },
+      });
+      if (claimed.count === 0) throw new CoreError("VALIDATION_FAILED", "ALREADY_REPLACED");
+
+      // 1) The replacement's own order + unit, created after the claim so the new
+      //    stock can be bound to it rather than to the faulty unit.
+      const repNumber = await nextOrderNumber(tx);
+      const repOrder = await tx.order.create({
+        data: {
+          orderNumber: repNumber,
+          userId: item.order.userId,
+          status: "COMPLETED",
+          currency: item.order.currency,
+          subtotalMinor: 0,
+          discountMinor: 0,
+          totalMinor: 0,
+          walletUsedMinor: 0,
+          paidAt: now,
+          completedAt: now,
+          replacementOfOrderId: item.orderId,
+        },
+      });
+      const repItem = await tx.orderItem.create({
+        data: {
+          orderId: repOrder.id,
+          variantId: item.variantId,
+          productNameSnap: item.productNameSnap,
+          variantNameSnap: item.variantNameSnap,
+          quantity: 1,
+          unitPriceMinor: 0,
+          totalMinor: 0,
+          fulfillmentMode: item.fulfillmentMode,
+          fulfilledAt: now,
+          warrantyStartAt: warrantyStart,
+          replacedByItemId: null,
+        },
+      });
+
+      // 2) Retire the faulty unit and assign a fresh one TO THE REPLACEMENT ITEM.
+      let payload: Record<string, unknown>;
+      let replacementCostMinor: number | null = null;
+      if (type === "LICENSE_KEY") {
+        const bad = await tx.licenseKey.findMany({ where: { orderItemId: item.id }, select: { id: true } });
+        // Detach and permanently retire it. The original payload above keeps the
+        // value for history, so nothing is lost by unbinding the stock row.
+        await tx.licenseKey.updateMany({ where: { orderItemId: item.id }, data: { orderItemId: null, status: "DISABLED" } });
+        const { key, expiresAt, costMinor } = await assignLicenseKey(tx, item.variantId, repItem.id, masterKey, false, bad.map((b) => b.id));
+        replacementCostMinor = costMinor;
+        payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
+      } else {
+        const olds = await tx.accountAssignment.findMany({ where: { orderItemId: item.id } });
+        const badAccountIds: string[] = [];
+        for (const a of olds) {
+          badAccountIds.push(a.accountId);
+          await tx.accountAssignment.delete({ where: { id: a.id } });
+          // Retire rather than return to the pool, or it would be handed straight
+          // back out as the "replacement". But only DISABLE a shared account when
+          // this was its last live slot — blanket-disabling withdrew the other
+          // buyers' unsold slots from sale too. Clamp the decrement at 0 so a
+          // drifted counter can't go negative.
+          const acct = await tx.digitalAccount.findUnique({ where: { id: a.accountId }, select: { usedSlots: true } });
+          const used = Math.max(0, (acct?.usedSlots ?? 1) - 1);
+          await tx.digitalAccount.update({
+            where: { id: a.accountId },
+            data: { usedSlots: used, ...(used === 0 ? { status: "DISABLED" as const } : {}) },
+          });
+        }
+        const creds = await assignAccountSlot(tx, item.variantId, repItem.id, masterKey, false, badAccountIds);
+        replacementCostMinor = creds.costMinor;
+        payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, ...(creds.twofa ? { twofa: creds.twofa } : {}), expiresAt: creds.expiresAt?.toISOString() };
+      }
+
+      // 3) The new value goes on the REPLACEMENT unit.
+      await tx.orderItem.update({
+        where: { id: repItem.id },
+        data: { deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey) },
+      });
+
+      // 4) The original keeps its payload and gains the link + the second unit's
+      //    cost (a replacement really does burn another unit, and that belongs to
+      //    this sale's margin). `increment` so concurrent replacements can't lose one.
       const extraCost = replacementCostMinor ?? item.variant.defaultCostMinor;
       await tx.orderItem.update({
         where: { id: item.id },
         data: {
-          fulfilledAt: new Date(),
+          replacedByItemId: repItem.id,
           warrantyStartAt: warrantyStart,
-          // A replacement burns a SECOND unit of stock. Adding its cost to the
-          // sale is what makes the profit report honest, and makes a faulty batch
-          // visible as a margin problem rather than only a support problem.
-          // `increment` so two concurrent replacements cannot lose one.
-          ...(extraCost !== null ? { costMinor: { increment: extraCost } } : {}),
-          deliveryPayloadEncrypted: encryptSecret(JSON.stringify(p), masterKey),
+          // Plain addition, not `increment`: costMinor is nullable and in Postgres
+          // NULL + x is NULL, which silently DROPPED the replacement's cost for any
+          // unit with no recorded cost. Safe from races because step 0 serialises
+          // this row for the whole transaction.
+          ...(extraCost !== null ? { costMinor: (item.costMinor ?? 0) + extraCost } : {}),
         },
       });
-      return p;
+
+      return { payload, repNumber, repOrderId: repOrder.id, repItemId: repItem.id };
     });
 
-    // A separate order record for the replacement, with its own number, linked
-    // back to the original so opening it explains what it is.
-    let replacementNumber: string | null = null;
-    try {
-      const rep = await prisma.$transaction(async (tx) => {
-        const num = await nextOrderNumber(tx);
-        const o = await tx.order.create({
-          data: {
-            orderNumber: num,
-            userId: item.order.userId,
-            status: "COMPLETED",
-            currency: item.order.currency,
-            subtotalMinor: 0,
-            discountMinor: 0,
-            totalMinor: 0,
-            walletUsedMinor: 0,
-            paidAt: new Date(),
-            completedAt: new Date(),
-            replacementOfOrderId: item.orderId,
-          },
-        });
-        await tx.orderItem.create({
-          data: {
-            orderId: o.id,
-            variantId: item.variantId,
-            productNameSnap: item.productNameSnap,
-            variantNameSnap: item.variantNameSnap,
-            quantity: 1,
-            unitPriceMinor: 0,
-            totalMinor: 0,
-            fulfillmentMode: item.fulfillmentMode,
-            fulfilledAt: new Date(),
-            warrantyStartAt: warrantyStart,
-            deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
-          },
-        });
-        return num;
-      });
-      replacementNumber = rep;
-    } catch {
-      // The replacement itself already succeeded — a bookkeeping row is optional.
-    }
-    if (item.order.user.telegramId !== null) {
-      // Show what they HAD alongside what they now have, so there is no doubt
-      // which value is dead and which one to use.
-      const oldLines: string[] = [];
-      if (oldPayload) {
-        const fixed = repairAccountPair(oldPayload.username, oldPayload.password);
-        const oId = fixed?.id ?? oldPayload.username;
-        const oPw = fixed?.pw ?? oldPayload.password;
-        const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        if (oldPayload.key) oldLines.push(`🔑 <s>${esc(oldPayload.key.split(/\r?\n/)[0] ?? "")}</s>`);
-        if (oId) oldLines.push(`👤 <s>${esc(oId)}</s>`);
-        if (oPw) oldLines.push(`🔐 <s>${esc(oPw)}</s>`);
-      }
-      const header = [
-        "🔄 <b>Replacement delivered</b>",
-        "",
-        ...(oldLines.length
-          ? ["❌ <b>Previous</b> — no longer works:", ...oldLines, "", "✅ <b>Replacement</b> — use this one:", ""]
-          : []),
-        ...(replacementNumber ? [`🧾 Saved as order <b>${replacementNumber}</b>`, ""] : []),
-      ].join("\n");
-      await enqueueTelegramMessage(
-        item.order.user.telegramId,
-        `${header}\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
-        { buttons: deliveryButtons(credsOf(payload)) },
-      );
-    }
-    return { ok: true };
+    const oldLabel = oldPayload ? payloadLabel(oldPayload) : null;
+    const newLabel = payloadLabel(out.payload as { key?: string; username?: string });
+    const detail: ReplacementDetail = {
+      originalOrderNumber: item.order.orderNumber,
+      replacementOrderNumber: out.repNumber,
+      productName: item.productNameSnap,
+      variantName: item.variantNameSnap,
+      oldText: oldLabel,
+      oldTail: tailOf(oldLabel),
+      newText: newLabel,
+      newTail: tailOf(newLabel) ?? "",
+      warrantyCovered: opts.warrantyCovered ?? true,
+      at: now,
+      originalOrderId: item.orderId,
+      replacementOrderId: out.repOrderId,
+      originalItemId: item.id,
+      replacementItemId: out.repItemId,
+    };
+
+    // NOTE: everything below is AFTER the commit. It is deliberately outside the
+    // try/catch that returns FAILED — a Redis blip while enqueuing used to report
+    // a completed replacement as failed, which left the claim PENDING forever
+    // (every retry then returned ALREADY_REPLACED) and the customer untold.
+    void notifyReplacementToBuyer(item, oldPayload, out.payload as never, out.repNumber, opts.warrantyCovered !== false);
+    return { ok: true, detail };
   } catch (err) {
     const code = err instanceof CoreError ? err.code : "";
     void logError("replaceOrderItem", err, { orderItemId });
+    if (err instanceof CoreError && err.message === "ALREADY_REPLACED") return { ok: false, reason: "ALREADY_REPLACED" };
     if (code === "OUT_OF_STOCK") return { ok: false, reason: "NO_STOCK" };
     return { ok: false, reason: "FAILED" };
+  }
+}
+
+/** Post-commit delivery message. Never throws into the caller's result. */
+async function notifyReplacementToBuyer(
+  item: { order: { user: { telegramId: bigint | null }; orderNumber: string }; productNameSnap: string; variantNameSnap: string; orderId: string; variant: { product: { activationGuide: string | null; allowPasswordChange: boolean } } },
+  oldPayload: { kind?: string; key?: string; username?: string; password?: string; twofa?: string } | null,
+  payload: DeliveryPayload,
+  repNumber: string,
+  warrantyCovered: boolean,
+): Promise<void> {
+  try {
+    if (item.order.user.telegramId === null) return;
+    // Show what they HAD alongside what they now have, so there is no doubt
+    // which value is dead and which one to use.
+    const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const oldLines: string[] = [];
+    if (oldPayload) {
+      const fixed = repairAccountPair(oldPayload.username, oldPayload.password);
+      const oId = fixed?.id ?? oldPayload.username;
+      const oPw = fixed?.pw ?? oldPayload.password;
+      if (oldPayload.key) oldLines.push(`🔑 <s>${esc(oldPayload.key.split(/\r?\n/)[0] ?? "")}</s>`);
+      if (oId) oldLines.push(`👤 <s>${esc(oId)}</s>`);
+      if (oPw) oldLines.push(`🔐 <s>${esc(oPw)}</s>`);
+    }
+    const header = [
+      "🔄 <b>Replacement delivered</b>",
+      `🧾 Original order: <b>${esc(item.order.orderNumber)}</b>`,
+      `🛡 ${warrantyCovered ? "Covered by warranty" : "Goodwill replacement (outside warranty)"}`,
+      "",
+      ...(oldLines.length
+        ? ["❌ <b>Previous</b> — no longer works:", ...oldLines, "", "✅ <b>Replacement</b> — use this one:", ""]
+        : []),
+      `🧾 Saved as order <b>${esc(repNumber)}</b>`,
+      "",
+    ].join("\n");
+    await enqueueTelegramMessage(
+      item.order.user.telegramId,
+      `${header}\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
+      {
+        buttons: [
+          ...deliveryButtons(credsOf(payload)),
+          { text: "📦 View updated order", callbackData: `ord:view:${item.orderId}`, style: "primary" as const },
+        ],
+      },
+    );
+  } catch (e) {
+    // The replacement itself is already committed and recoverable from the order.
+    void logError("replaceNotify", e, { orderId: item.orderId });
   }
 }
 

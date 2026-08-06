@@ -135,7 +135,7 @@ export async function openTicket(opts: {
       `🆔 <code>${u?.telegramId ?? "—"}</code>`,
       ...(opts.alertLines ?? []),
       "",
-      `💬 ${esc(body).slice(0, 700)}`,
+      `💬 ${esc(body.slice(0, 700))}`,
       opts.proofFileId ? "\n📷 Screenshot attached." : "",
     ]
       .filter((l) => l !== "")
@@ -155,8 +155,13 @@ export async function openTicket(opts: {
   };
 }
 
-function esc(s: string): string {
+/** HTML-escape for Telegram parse_mode: HTML. Exported so every alert site uses it. */
+export function escHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function esc(s: string): string {
+  return escHtml(s);
 }
 
 async function threadOf(where: { id: string; userId?: string }): Promise<TicketThread | null> {
@@ -287,7 +292,7 @@ export async function customerReplyTicket(userId: string, ticketId: string, body
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { telegramHandle: true, firstName: true } }).catch(() => null);
   const who = u?.telegramHandle ? `@${u.telegramHandle}` : (u?.firstName ?? "customer");
   void enqueueAdminAlert(
-    [`💬 <b>Reply on ${t.ticketNumber}</b>`, `👤 ${esc(who)}`, "", esc(text).slice(0, 700)].join("\n"),
+    [`💬 <b>Reply on ${escHtml(t.ticketNumber)}</b>`, `👤 ${esc(who)}`, "", esc(text.slice(0, 700))].join("\n"),
     [{ text: "📂 Open ticket", callbackData: `adm:tk:${t.id}`, style: "primary" as const }],
   ).catch(() => undefined);
   return { ok: true, ticketNumber: t.ticketNumber };

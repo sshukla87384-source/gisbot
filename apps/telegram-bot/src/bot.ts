@@ -50,8 +50,9 @@ import {
   logError,
   grantAllScopesToOwner,
   getInrPerUsdt,
-  createReplacementRequest,
+  createReplacementBatch,
   createReplacementTicket,
+  listUnitsForOrder,
   customerReplyTicket,
   getReplaceableItem,
   getProductIdBySlug,
@@ -83,6 +84,8 @@ import type { Currency } from "@gis/database";
 import {
   PRODUCT_DEEPLINK_PREFIX,
   cb,
+  decryptSecret,
+  encryptSecret,
   intArg,
   isCoreError,
   parseCb,
@@ -99,6 +102,20 @@ import { vipAnimation, successCard, num } from "./premium.js";
 import * as views from "./views.js";
 import type { View } from "./views.js";
 
+/** Decrypt the session-held TOTP secret. Never stored or logged in the clear. */
+function otpSecretOf(ctx: Ctx): string | null {
+  const enc = ctx.session.otpSecret;
+  if (!enc) return null;
+  try {
+    return decryptSecret(enc, loadConfig().ENCRYPTION_MASTER_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Per-user serialization chain — see the middleware in createBot. */
+const userLocks = new Map<string, Promise<void>>();
+
 const SPAM_WINDOW_SEC = 10;
 const SPAM_MAX_ACTIONS = 20;
 
@@ -112,9 +129,45 @@ async function submitReplaceOrTicket(ctx: Ctx, proofFileId: string | undefined):
   const orderItemId = ctx.session.replaceItemId ?? "";
   const reason = ctx.session.replaceReason ?? "(no reason given)";
   const viaTicket = ctx.session.replaceViaTicket === true;
+  const batch = ctx.session.replaceBatch ?? [];
   ctx.session.replaceItemId = undefined;
   ctx.session.replaceReason = undefined;
   ctx.session.replaceViaTicket = undefined;
+  ctx.session.replaceBatch = undefined;
+  ctx.session.replaceSelected = [];
+
+  // Multi-unit selection: each id is re-validated server-side, and the customer is
+  // told exactly which units were accepted and which were not.
+  if (batch.length > 0) {
+    const r = await createReplacementBatch({ userId: ctx.user.id, orderItemIds: batch, reason, proofFileId });
+    if (!r.ok) {
+      await ctx.reply(`⚠️ ${r.reason ?? "None of the selected items can be replaced."}`, {
+        reply_markup: new InlineKeyboard().text("🔄 Try again", cb("rep", "home")).text("🏠 Menu", "mnu:home"),
+      });
+      return;
+    }
+    const lines = [
+      "✅ <b>Request submitted</b>",
+      "",
+      `📦 <b>${r.accepted.length} item(s)</b> sent to our team:`,
+      ...r.accepted.map((a) => `• ${escapeHtml(a.label)} — unit ${a.unitNumber}${a.tail ? ` (…${escapeHtml(a.tail)})` : ""}`),
+    ];
+    if (r.claimIds.length > 0) {
+      lines.push("", `🛡 ${r.claimIds.length} covered by warranty — being reviewed now, your replacement arrives here once approved.`);
+    }
+    if (r.ticketNumber) {
+      lines.push("", `🎫 Out-of-warranty items opened ticket <b>${escapeHtml(r.ticketNumber)}</b> — a person will reply right here.`);
+    }
+    if (r.rejected.length > 0) {
+      lines.push("", "⚠️ <b>Not included:</b>", ...r.rejected.map((x) => `• ${escapeHtml(x.label)}${x.unitNumber ? ` unit ${x.unitNumber}` : ""} — ${escapeHtml(x.reason)}`));
+    }
+    lines.push("", "🙏 Thank you for your patience.");
+    await ctx.reply(lines.join("\n"), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🎫 My tickets", "sup:home"),
+    });
+    return;
+  }
 
   if (viaTicket) {
     const r = await createReplacementTicket({ userId: ctx.user.id, orderItemId, reason, proofFileId });
@@ -133,12 +186,24 @@ async function submitReplaceOrTicket(ctx: Ctx, proofFileId: string | undefined):
     return;
   }
 
-  const r = await createReplacementRequest({ userId: ctx.user.id, orderItemId, reason, proofFileId });
+  // A single unit is just a batch of one — same validation, same code path, so the
+  // two can never drift apart.
+  const r = await createReplacementBatch({ userId: ctx.user.id, orderItemIds: [orderItemId], reason, proofFileId });
+  if (!r.ok) {
+    await ctx.reply(`⚠️ ${r.reason ?? r.rejected[0]?.reason ?? "Not eligible for replacement."}`);
+    return;
+  }
   await ctx.reply(
-    r.ok
-      ? `✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing it${proofFileId ? " and your screenshot" : ""} now — your replacement arrives here as soon as it is approved. Thank you for your patience. 🙏`
-      : `⚠️ ${r.reason}`,
-    { parse_mode: "HTML" },
+    r.ticketNumber
+      ? [
+          `🎫 <b>Ticket ${escapeHtml(r.ticketNumber)} raised</b>`,
+          "",
+          "Our support team has your message and will reply right here.",
+          "",
+          "<i>This item is outside its warranty, so we can't promise a replacement — but a real person will look at it and do what they can. 🙏</i>",
+        ].join("\n")
+      : `✅ <b>Replacement request submitted!</b>\n\nOur team is reviewing it${proofFileId ? " and your screenshot" : ""} now — your replacement arrives here as soon as it is approved. Thank you for your patience. 🙏`,
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🎫 My tickets", "sup:home") },
   );
 }
 
@@ -147,6 +212,31 @@ export function createBot(): Bot<Ctx> {
   const bot = new Bot<Ctx>(config.BOT_TOKEN);
 
   bot.use(session({ initial: (): Ctx["session"] => ({}), storage: redisSessionStorage() }));
+  // Serialize updates per user. Webhook mode handles POSTs concurrently and
+  // Telegram redelivers on timeout, so without this a double-tap ran the same
+  // handler twice against the SAME session snapshot — producing duplicate
+  // replacement requests that could never be approved. A per-user promise chain
+  // is enough here and avoids pulling in @grammyjs/runner.
+  bot.use(async (ctx, next) => {
+    const uid = ctx.from?.id;
+    if (uid === undefined) return next();
+    const key = String(uid);
+    const prev = userLocks.get(key) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const mine = new Promise<void>((res) => { release = res; });
+    // Keep a reference to the exact chained promise we stored, so the cleanup
+    // below can tell whether anyone queued behind us.
+    const chained = prev.then(() => mine);
+    userLocks.set(key, chained);
+    await prev.catch(() => undefined);
+    try {
+      await next();
+    } finally {
+      release();
+      // Only the last waiter clears the entry, so the map cannot grow unbounded.
+      if (userLocks.get(key) === chained) userLocks.delete(key);
+    }
+  });
 
   // ── Anti-spam: per-user token bucket (Bot UX doc §14) ──
   bot.use(async (ctx, next) => {
@@ -227,15 +317,20 @@ export function createBot(): Bot<Ctx> {
         if (e instanceof GrammyError && e.description.includes("CUSTOM_EMOJI")) {
           try { await ctx.replyWithPhoto(view.photo, { caption: cap(stripEmoji(view.text)), parse_mode: "HTML", reply_markup: view.kb }); return; } catch { /* fall through */ }
         }
-        await ctx.reply(stripEmoji(view.text), opts).catch(() => ctx.reply(view.text.replace(/<[^>]+>/g, "")));
+        await ctx.reply(cap(stripEmoji(view.text)), opts).catch(() => ctx.reply(cap(view.text.replace(/<[^>]+>/g, ""))).catch(() => undefined));
         return;
       }
     }
+    // Telegram hard-caps a text message at 4096 chars. Views that list one row per
+    // delivered unit could exceed it, and the failure mode was the user getting
+    // NOTHING at all — the last fallback below had no catch either.
+    const TG_MAX = 4096;
+    const fit = (t: string) => (t.length > TG_MAX ? `${t.slice(0, TG_MAX - 40)}\n\n<i>…truncated</i>` : t);
     const send = async (text: string): Promise<void> => {
       if (edit && ctx.callbackQuery?.message) {
-        await ctx.editMessageText(text, opts);
+        await ctx.editMessageText(fit(text), opts);
       } else {
-        await ctx.reply(text, opts);
+        await ctx.reply(fit(text), opts);
       }
     };
     try {
@@ -490,6 +585,37 @@ export function createBot(): Bot<Ctx> {
           : "📷 <b>Step 2 of 2 — send a screenshot</b>\n\nPlease send a photo showing the problem (error message, login screen, etc.). This helps our team approve your replacement fast.\n\n<i>No screenshot? Tap Submit without one.</i>",
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text(viaTicket ? "📨 Send without screenshot" : "📨 Submit without screenshot", "rep:nopic").text("✖️ Cancel", "rep:home") },
       );
+    }
+    if (awaiting === "otp_secret") {
+      // Delete the message holding the secret immediately — chat history is the
+      // one place we genuinely cannot control, so don't leave it sitting there.
+      const raw = ctx.message.text;
+      await ctx.deleteMessage().catch(() => undefined);
+      const clean = raw.replace(/[\s-]/g, "").toUpperCase();
+      if (!clean) {
+        ctx.session.awaiting = "otp_secret";
+        return ctx.reply("That looked empty — paste the Base32 secret key.", {
+          reply_markup: new InlineKeyboard().text("✖️ Cancel", cb("otp", "tool")),
+        });
+      }
+      if (!looksLikeTotpSecret(clean) || generateTotp(clean) === null) {
+        ctx.session.awaiting = "otp_secret";
+        return ctx.reply(
+          [
+            "⚠️ <b>That isn't a valid 2FA secret.</b>",
+            "",
+            "It should be Base32 — letters A–Z and digits 2–7 only, usually 16 or 32 characters.",
+            "If you copied a whole URL by mistake, send just the <code>secret=</code> part.",
+          ].join("\n"),
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", cb("otp", "tool")) },
+        );
+      }
+      // Encrypted before it touches the session store. The session is persisted in
+      // Redis as JSON, so "never saved" was not true of a plaintext field — and
+      // Redis is the same instance BullMQ uses, i.e. likely persisted to disk.
+      ctx.session.otpSecret = encryptSecret(clean, loadConfig().ENCRYPTION_MASTER_KEY);
+      ctx.session.otpReveal = false;
+      return render(ctx, views.otpToolView(clean, false), false);
     }
     if (awaiting === "ticket_reply") {
       const id = ctx.session.ticketId ?? "";
@@ -1331,6 +1457,53 @@ export function createBot(): Bot<Ctx> {
         case "lic:list":
           await render(ctx, await views.vaultView(user, intArg(args, 0, 1)), true);
           break;
+        // Standalone 2FA/OTP generator — paste any secret, get the live code.
+        case "otp:tool": {
+          await ctx.answerCallbackQuery();
+          await render(ctx, views.otpToolView(otpSecretOf(ctx), ctx.session.otpReveal === true), true);
+          break;
+        }
+        case "otp:ask": {
+          ctx.session.awaiting = "otp_secret";
+          await ctx.answerCallbackQuery();
+          await ctx.reply(
+            [
+              "🔐 <b>Send your 2FA secret key</b>",
+              "",
+              "Paste the Base32 setup key — the one an app would scan as a QR code.",
+              "Spaces and lower case are fine; I'll tidy it up.",
+              "",
+              "<i>🔒 I delete your message straight after reading it, and the secret is never written to our database or any log. It is held encrypted for this session only so I can refresh the code — 🗑 Clear removes it immediately.</i>",
+            ].join("\n"),
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", cb("otp", "tool")) },
+          );
+          break;
+        }
+        case "otp:gen": {
+          const secret = otpSecretOf(ctx);
+          const t = secret ? generateTotp(secret) : null;
+          if (!t) {
+            await ctx.answerCallbackQuery({ text: "That secret is not valid — send it again", show_alert: true });
+            break;
+          }
+          await ctx.answerCallbackQuery({ text: `Code ${t.code} · ${t.secondsLeft}s left` });
+          await render(ctx, views.otpToolView(secret, ctx.session.otpReveal === true), true);
+          break;
+        }
+        case "otp:eye": {
+          ctx.session.otpReveal = !(ctx.session.otpReveal === true);
+          await ctx.answerCallbackQuery();
+          await render(ctx, views.otpToolView(otpSecretOf(ctx), ctx.session.otpReveal === true), true);
+          break;
+        }
+        case "otp:clr": {
+          // Wipe it from the session — the only place it ever lived.
+          ctx.session.otpSecret = undefined;
+          ctx.session.otpReveal = undefined;
+          await ctx.answerCallbackQuery({ text: "Cleared" });
+          await render(ctx, views.otpToolView(null, false), true);
+          break;
+        }
         case "otp:get": {
           await ctx.answerCallbackQuery();
           try {
@@ -1373,8 +1546,25 @@ export function createBot(): Bot<Ctx> {
         case "ord:reveal": {
           await ctx.answerCallbackQuery({ text: "Fetching your keys…" });
           const all = await revealOrderDeliveries(user.id, args[0] ?? "");
-          const ds = all.map((r) => ({ orderItemId: "", productName: r.productName, variantName: r.variantName, kind: (r.payload.kind === "DIGITAL_ACCOUNT" ? "DIGITAL_ACCOUNT" : "LICENSE_KEY") as "LICENSE_KEY" | "DIGITAL_ACCOUNT", secret: { key: r.payload.key, username: r.payload.username, password: r.payload.password, expiresAt: r.payload.expiresAt }, activationGuide: null }));
+          // Mark superseded units. For orders over 10 items this is the only way
+          // the customer sees their keys, so a retired one must never be handed
+          // back silently among the live ones.
+          const ds = all.map((r) => ({
+            orderItemId: "",
+            productName: r.replaced ? `${r.productName} — ⚠️ REPLACED, no longer works` : r.productName,
+            variantName: r.variantName,
+            kind: (r.payload.kind === "DIGITAL_ACCOUNT" ? "DIGITAL_ACCOUNT" : "LICENSE_KEY") as "LICENSE_KEY" | "DIGITAL_ACCOUNT",
+            secret: { key: r.payload.key, username: r.payload.username, password: r.payload.password, expiresAt: r.payload.expiresAt },
+            activationGuide: null,
+          }));
           if (ds.length === 0) { await ctx.reply("No delivered keys found for this order."); break; }
+          const deadCount = all.filter((r) => r.replaced).length;
+          if (deadCount > 0) {
+            await ctx.reply(
+              `ℹ️ <b>${deadCount} of these was replaced.</b> The old value is kept for your records but no longer works — it's marked <b>REPLACED</b> below, and the working one came in your replacement order.`,
+              { parse_mode: "HTML" },
+            );
+          }
           await deliverAll(ctx, ds, args[0] ?? "");
           break;
         }
@@ -1658,6 +1848,61 @@ export function createBot(): Bot<Ctx> {
           ctx.session.replaceViaTicket = false;
           ctx.session.awaiting = "replace_reason";
           await render(ctx, views.replaceAskReasonView(it.label, false), true);
+          break;
+        }
+        // Per-order unit picker: choose exactly which delivered unit(s) to claim on.
+        case "rep:ord": {
+          const oid = args[0] ?? "";
+          if (ctx.session.replaceOrderId !== oid) { ctx.session.replaceSelected = []; ctx.session.replacePage = 1; }
+          ctx.session.replaceOrderId = oid;
+          await ctx.answerCallbackQuery();
+          await render(ctx, await views.replaceSelectView(user, oid, ctx.session.replaceSelected ?? []), true);
+          break;
+        }
+        case "rep:tog": {
+          const id = args[0] ?? "";
+          const oid = ctx.session.replaceOrderId ?? "";
+          const cur = new Set(ctx.session.replaceSelected ?? []);
+          const adding = !cur.has(id);
+          if (adding && cur.size >= 25) {
+            // Say so rather than silently dropping the tap.
+            await ctx.answerCallbackQuery({ text: "That's the maximum of 25 items in one request.", show_alert: true });
+            break;
+          }
+          if (adding) cur.add(id); else cur.delete(id);
+          ctx.session.replaceSelected = [...cur];
+          await ctx.answerCallbackQuery({ text: adding ? "Selected" : "Removed" });
+          await render(ctx, await views.replaceSelectView(user, oid, ctx.session.replaceSelected, ctx.session.replacePage ?? 1), true);
+          break;
+        }
+        case "rep:pg": {
+          const oid = args[0] ?? ctx.session.replaceOrderId ?? "";
+          ctx.session.replacePage = Math.max(1, Number.parseInt(args[1] ?? "1", 10) || 1);
+          await ctx.answerCallbackQuery();
+          await render(ctx, await views.replaceSelectView(user, oid, ctx.session.replaceSelected ?? [], ctx.session.replacePage), true);
+          break;
+        }
+        case "rep:all": {
+          const oid = args[0] ?? "";
+          const units = await listUnitsForOrder(user.id, oid);
+          const eligible = units.filter((u) => u.route === "claim" || u.route === "ticket").map((u) => u.orderItemId);
+          const cur = ctx.session.replaceSelected ?? [];
+          // Toggle: a full selection clears, anything else selects all eligible.
+          const capped = Math.min(eligible.length, 25);
+          ctx.session.replaceSelected = cur.length >= capped ? [] : eligible.slice(0, 25);
+          await ctx.answerCallbackQuery({ text: eligible.length > 25 ? "Selected the first 25 eligible items" : undefined });
+          await render(ctx, await views.replaceSelectView(user, oid, ctx.session.replaceSelected, ctx.session.replacePage ?? 1), true);
+          break;
+        }
+        case "rep:go": {
+          const sel = ctx.session.replaceSelected ?? [];
+          if (sel.length === 0) { await ctx.answerCallbackQuery({ text: "Pick at least one item first", show_alert: true }); break; }
+          ctx.session.replaceBatch = sel;
+          ctx.session.replaceItemId = undefined;
+          ctx.session.replaceViaTicket = undefined;
+          ctx.session.awaiting = "replace_reason";
+          await ctx.answerCallbackQuery();
+          await render(ctx, views.replaceBatchAskReasonView(sel.length), true);
           break;
         }
         case "rep:tkt": {

@@ -16,6 +16,8 @@ import {
   listApiKeysByOwner,
   listTickets,
   getMyTicket,
+  listUnitsForOrder,
+  generateTotp,
   type ReplaceableItem,
   listVault,
   listReplaceableItems,
@@ -38,7 +40,7 @@ import {
 import { prisma, type Currency } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { PROVIDER_LABELS, listEnabledProviders } from "@gis/payments";
-import { cb } from "@gis/shared";
+import { cb, decryptSecret } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { backToMenuRow, navRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
@@ -418,7 +420,7 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
   const kb = new InlineKeyboard();
   for (const o of result.items) {
     kb.text(
-      `${statusEmoji[o.status] ?? "•"} ${o.orderNumber} · ${fmt(o.totalPaidMinor, o.currency)}`,
+      `${o.isReplacement ? "🔄" : (statusEmoji[o.status] ?? "•")} ${o.orderNumber} · ${o.isReplacement ? "Replacement" : fmt(o.totalPaidMinor, o.currency)}`,
       cb("ord", "view", o.id),
     ).row();
   }
@@ -557,6 +559,7 @@ export async function profileView(user: BotUser): Promise<View> {
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
     .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
     .add(sbtn("🔔 My Watchlist", cb("wch", "list"), "primary"), sbtn("🔑 Find my keys", cb("lic", "find"), "primary")).row()
+    .add(sbtn("🔐 2FA Code Generator", cb("otp", "tool"), "primary")).row()
     .add(sbtn("🏆 My Tier", cb("prf", "tier"), "success"), sbtn("🎡 Spin & Win", cb("spn", "home"), "success")).row()
     .add(sbtn("🎯 Missions", cb("msn", "home"), "primary")).row()
     .add(sbtn("🎁 Refer & earn", cb("ref", "view"), "success")).row();
@@ -720,7 +723,8 @@ export async function recentOrdersView(user: BotUser): Promise<View> {
     st === "COMPLETED" ? "✅" : st === "PENDING_PAYMENT" ? "⌛" : st === "CANCELLED" || st === "EXPIRED" ? "🚫" : "🕐";
   const kb = new InlineKeyboard();
   for (const o of items) {
-    kb.text(`${icon(o.status)} ${o.orderNumber} · ${fmt(o.totalPaidMinor, o.currency)}`, cb("ord", "view", o.id)).row();
+    // Label replacements rather than showing a bare 0.00 with no explanation.
+    kb.text(`${o.isReplacement ? "🔄" : icon(o.status)} ${o.orderNumber} · ${o.isReplacement ? "Replacement" : fmt(o.totalPaidMinor, o.currency)}`, cb("ord", "view", o.id)).row();
   }
   if (items[0]) kb.add(sbtn(`⚡ Buy again — ${items[0].orderNumber}`, cb("ord", "again", items[0].id), "success")).row();
   if (res.pages > 1) kb.add(sbtn("🗂 All orders", cb("ord", "list", 1), "primary")).row();
@@ -803,53 +807,179 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
   // Independent reads, so fetch them together.
   const [items, meta] = await Promise.all([
     listOrderItems(user.id, orderId),
-    // Explain a replacement-only order rather than leaving a mystery 0.00 entry.
     prisma.order.findFirst({
       where: { id: orderId, userId: user.id },
-      select: { replacementOfOrderId: true },
+      select: { replacementOfOrderId: true, orderNumber: true },
     }).catch(() => null),
   ]);
-  const origNumber = meta?.replacementOfOrderId
-    ? (await prisma.order.findUnique({ where: { id: meta.replacementOfOrderId }, select: { orderNumber: true } }).catch(() => null))?.orderNumber ?? null
-    : null;
   const kb = new InlineKeyboard();
   if (items.length === 0) {
     kb.text("◀️ Orders", cb("ord", "list", 1));
     backToMenuRow(kb);
     return { text: "No delivered items in this order yet.", kb };
   }
-  // Group identical products so a 15× order isn't 15 buttons.
-  const groups = new Map<string, { name: string; count: number; firstId: string }>();
-  for (const it of items) {
-    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
-    const label = `${it.productName}${vn}`;
-    const g = groups.get(label);
-    if (g) g.count++;
-    else groups.set(label, { name: label, count: 1, firstId: it.orderItemId });
+
+  // If this IS a replacement order, name the order it replaces and the unit.
+  let origNumber: string | null = null;
+  let replacedTail: string | null = null;
+  if (meta?.replacementOfOrderId) {
+    const [orig, prev] = await Promise.all([
+      prisma.order.findUnique({ where: { id: meta.replacementOfOrderId }, select: { orderNumber: true } }).catch(() => null),
+      // The unit this replacement superseded, so the mapping is visible from both ends.
+      (async () => {
+        const repItemIds = items.map((i) => i.orderItemId);
+        const prior = await prisma.orderItem.findFirst({
+          where: { replacedByItemId: { in: repItemIds } },
+          select: { deliveryPayloadEncrypted: true },
+        }).catch(() => null);
+        return prior;
+      })(),
+    ]);
+    origNumber = orig?.orderNumber ?? null;
+    if (prev?.deliveryPayloadEncrypted) {
+      try {
+        const pl = JSON.parse(decryptSecret(prev.deliveryPayloadEncrypted, loadConfig().ENCRYPTION_MASTER_KEY)) as { key?: string; username?: string };
+        const lbl = (pl.key ? (pl.key.split(/\r?\n/)[0] ?? "") : (pl.username ?? "")).trim();
+        replacedTail = lbl.length > 4 ? lbl.slice(-4) : lbl || null;
+      } catch { replacedTail = null; }
+    }
   }
-  const lines = origNumber
+
+  const lines: string[] = origNumber
     ? [
         "🔄 <b>Replacement issued</b>",
         `This order holds the replacement for <b>${escapeHtml(origNumber)}</b>.`,
+        ...(replacedTail ? [`↩️ Replaced the unit ending <code>…${escapeHtml(replacedTail)}</code>`] : []),
         "🛡 <i>Your warranty still runs from the original purchase date — a replacement does not extend it.</i>",
         "",
         "📦 <b>Replacement item</b>",
         "",
       ]
-    : ["📦 <b>Order items</b>", ""];
-  for (const g of groups.values()) lines.push(`🔑 ${escapeHtml(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`);
+    : [`📦 <b>Delivered items</b>${meta?.orderNumber ? ` · ${escapeHtml(meta.orderNumber)}` : ""}`, ""];
+
+  // EVERY unit on its own line — these used to be collapsed into "Licence Key ×5"
+  // with one button. But Telegram caps a message at 4096 chars and each unit costs
+  // ~95, so a 50-unit order would overflow and the send would fail outright.
+  // Show the first 25 and summarise the rest.
+  const MAX_LISTED = 25;
+  const shown = items.slice(0, MAX_LISTED);
+  let anyReplaceable = items.some((i) => !i.replaced);
+  for (const it of shown) {
+    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
+    const unit = (it.unitTotal ?? 1) > 1 ? ` — unit ${it.unitNumber}/${it.unitTotal}` : "";
+    const tail = it.tail ? ` <code>…${escapeHtml(it.tail)}</code>` : "";
+    let state = "✅ Active";
+    if (it.replaced) state = "🔄 Replaced — see the replacement order";
+    else if (it.isReplacementFor) state = "🆕 Replacement unit";
+    else if (it.warranty === false) state = "🏷 As-is (no warranty)";
+    else if (it.warrantyDaysLeft !== null && it.warrantyDaysLeft !== undefined) {
+      state = it.warrantyDaysLeft > 0 ? `🛡 ${it.warrantyDaysLeft}d warranty left` : "⌛ Warranty expired";
+    }
+    lines.push(`🔑 <b>${escapeHtml(it.productName)}${escapeHtml(vn)}</b>${unit}${tail}`);
+    lines.push(`   ${state}`);
+  }
+  if (items.length > MAX_LISTED) {
+    lines.push("", `➕ <i>and ${items.length - MAX_LISTED} more — tap 📄 Get all keys for the full list.</i>`);
+  }
+
   if (items.length > 10) {
     kb.add(sbtn(`📄 Get all ${items.length} keys`, cb("ord", "reveal", orderId), "success")).row();
   } else {
-    for (const g of groups.values()) kb.text(`🔑 View ${g.name.slice(0, 26)}${g.count > 1 ? ` (×${g.count})` : ""}`, cb("lic", "view", g.firstId)).row();
+    // One button per UNIT, labelled so it is obvious which one it opens.
+    for (const it of shown) {
+      const unit = (it.unitTotal ?? 1) > 1 ? ` ${it.unitNumber}/${it.unitTotal}` : "";
+      const tail = it.tail ? ` …${it.tail}` : "";
+      const mark = it.replaced ? "🔄" : "🔑";
+      kb.text(`${mark} View${unit}${tail || ` ${it.productName.slice(0, 14)}`}`, cb("lic", "view", it.orderItemId)).row();
+    }
     if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
   }
   kb.add(sbtn("⚡ Buy this again", cb("ord", "again", orderId), "success")).row();
   kb.add(sbtn("⭐ Rate this order", cb("rev", "new", orderId), "primary")).row();
-  kb.text("🔄 Request a replacement", cb("rep", "home")).row();
+  // Per-ORDER replacement entry: pick exactly which unit(s) from THIS order.
+  if (anyReplaceable) {
+    kb.add(sbtn("🔄 Replace an item from this order", cb("rep", "ord", orderId), "danger")).row();
+  }
   kb.text("◀️ Orders", cb("ord", "list", 1));
   backToMenuRow(kb);
   return { text: lines.join("\n"), kb };
+}
+
+/**
+ * Pick which delivered unit(s) of ONE order to claim on.
+ *
+ * Checkbox-style multi-select: tapping a unit toggles it, so a customer with five
+ * keys can select #2 and #4 only. Selection lives in the session and is
+ * re-validated server-side on submit — it is a request, not a fact.
+ */
+export async function replaceSelectView(user: BotUser, orderId: string, selected: string[], page = 1): Promise<View> {
+  const all = await listUnitsForOrder(user.id, orderId);
+  const kb = new InlineKeyboard();
+  if (all.length === 0) {
+    kb.text("◀️ Back", cb("ord", "view", orderId));
+    return { text: "Nothing delivered on this order yet.", kb };
+  }
+  const sel = new Set(selected);
+  const pickable = all.filter((u) => u.route === "claim" || u.route === "ticket");
+  // Paged: one row and ~100 characters per unit would blow both the 4096-char
+  // message limit and any sane keyboard past about 38 units.
+  const PER_PAGE = 20;
+  const pages = Math.max(1, Math.ceil(all.length / PER_PAGE));
+  const p = Math.min(Math.max(1, page), pages);
+  const units = all.slice((p - 1) * PER_PAGE, p * PER_PAGE);
+
+  for (const u of units) {
+    const unit = u.unitTotal > 1 ? ` ${u.unitNumber}/${u.unitTotal}` : "";
+    const tail = u.tail ? ` …${u.tail}` : "";
+    if (u.route === "claim" || u.route === "ticket") {
+      const box = sel.has(u.orderItemId) ? "☑️" : "⬜";
+      const cover = u.route === "claim" ? "🛡" : "🏷";
+      kb.text(`${box} ${cover} Unit${unit}${tail}`, cb("rep", "tog", u.orderItemId)).row();
+    } else {
+      // Not selectable, but still shown — silence would look like a missing key.
+      kb.text(`🚫 Unit${unit}${tail} — ${(u.reason ?? "not eligible").slice(0, 22)}`, cb("mnu", "noop")).row();
+    }
+  }
+  if (pages > 1) {
+    if (p > 1) kb.text("◀️", cb("rep", "pg", orderId, String(p - 1)));
+    kb.text(`${p}/${pages}`, cb("mnu", "noop"));
+    if (p < pages) kb.text("▶️", cb("rep", "pg", orderId, String(p + 1)));
+    kb.row();
+  }
+  if (sel.size > 0) {
+    kb.add(sbtn(`📨 Continue with ${sel.size} item(s)`, cb("rep", "go", orderId), "success")).row();
+  }
+  if (pickable.length > 1) {
+    // Compare against the cap, not the raw count, or the toggle can never clear.
+    const capped = Math.min(pickable.length, 25);
+    kb.text(sel.size >= capped ? "✖️ Clear selection" : "☑️ Select all eligible", cb("rep", "all", orderId)).row();
+  }
+  kb.text("◀️ Back to order", cb("ord", "view", orderId)).row();
+  backToMenuRow(kb);
+
+  const first = all[0] as ReplaceableItem;
+  return {
+    text: [
+      header(`🔄 ${bold("Which item needs replacing?")}`),
+      `🧾 ${escapeHtml(first.orderNumber)}${pages > 1 ? ` · page ${p}/${pages}` : ""}`,
+      "",
+      "Tap the exact unit(s) you're having trouble with — you can pick one, several, or all of them.",
+      "",
+      ...units.map((u) => {
+        const unit = u.unitTotal > 1 ? ` — unit ${u.unitNumber}/${u.unitTotal}` : "";
+        const tail = u.tail ? ` <code>…${escapeHtml(u.tail)}</code>` : "";
+        const st = u.route === "claim"
+          ? `🛡 In warranty${u.daysLeft !== null ? ` · ${u.daysLeft}d left` : ""} — replacement claim`
+          : u.route === "ticket"
+            ? `🏷 ${escapeHtml(u.reason ?? "Out of warranty")} — support ticket`
+            : `🚫 ${escapeHtml(u.reason ?? "Not eligible")}`;
+        return `${sel.has(u.orderItemId) ? "☑️" : u.route === "blocked" ? "🚫" : "⬜"} <b>${escapeHtml(u.label)}</b>${unit}${tail}\n   ${st}`;
+      }),
+      "",
+      "<i>🛡 items are covered and go straight to review. 🏷 items are outside warranty, so they open a support ticket instead — a person decides those.</i>",
+    ].join("\n"),
+    kb,
+  };
 }
 
 export function quantityPickerView(variantId: string, stock: number, productId?: string): View {
@@ -890,6 +1020,94 @@ export async function replaceListView(user: BotUser): Promise<View> {
           "<i>Covered items get a replacement claim our team reviews. For ⏳ and 🚫 items you can raise a support ticket instead, and a real person will help.</i>",
         ].join("\n")
       : `${header(`🔄 ${bold("Request a Replacement")}`)}\n\nYou have no delivered items yet.`,
+    kb,
+  };
+}
+
+/**
+ * The 2FA code generator — a 2fa.live equivalent, inside the bot.
+ *
+ * Renders the live code, the seconds remaining, and the NEXT code when the window
+ * is nearly up, so someone who is mid-login is never handed a code that expires as
+ * they paste it. The secret is masked unless they ask to see it.
+ *
+ * Privacy: the secret lives only in the session, is never written to the database
+ * or a log, and 🗑 Clear removes it. The message the customer pasted it in is
+ * deleted as soon as it is read.
+ */
+export function otpToolView(secret: string | null, reveal: boolean): View {
+  const kb = new InlineKeyboard();
+  if (!secret) {
+    kb.add(sbtn("🔐 Paste 2FA secret", cb("otp", "ask"), "success")).row();
+    kb.text("◀️ My Account", cb("prf", "view")).row();
+    backToMenuRow(kb);
+    return {
+      text: [
+        header(`🔐 ${bold("2FA Code Generator")}`),
+        "",
+        "Paste a 2FA secret key and I'll give you the current 6-digit code — the same thing an authenticator app does.",
+        "",
+        "<b>How to use it</b>",
+        "1. Tap 🔐 Paste 2FA secret",
+        "2. Send the Base32 key (spaces and lower case are fine)",
+        "3. Copy the code — it refreshes every 30 seconds",
+        "",
+        "<i>🔒 I delete the message you paste it in, and your secret is never written to our database or any log. It is held encrypted for this session only so the code can refresh — 🗑 Clear removes it immediately.</i>",
+      ].join("\n"),
+      kb,
+    };
+  }
+
+  const t = generateTotp(secret);
+  if (!t) {
+    kb.add(sbtn("🔐 Send a different secret", cb("otp", "ask"), "success")).row();
+    kb.add(sbtn("🗑 Clear", cb("otp", "clr"), "danger")).row();
+    kb.text("◀️ My Account", cb("prf", "view")).row();
+    return { text: `${header(`🔐 ${bold("2FA Code Generator")}`)}\n\n⚠️ That secret isn't valid Base32, so no code can be made from it.`, kb };
+  }
+
+  // Codes are 6 digits WITH leading zeroes preserved — "005924" is not "5924".
+  const pretty = `${t.code.slice(0, 3)} ${t.code.slice(3)}`;
+  const bars = Math.max(1, Math.round((t.secondsLeft / 30) * 10));
+  const masked = secret.length <= 8 ? "••••" : `${secret.slice(0, 4)}${"•".repeat(Math.min(16, secret.length - 8))}${secret.slice(-4)}`;
+
+  kb.copyText(`📋 Copy ${t.code}`, t.code).row();
+  kb.add(sbtn("🔄 Generate / refresh", cb("otp", "gen"), "success")).row();
+  kb.text(reveal ? "🙈 Hide secret" : "👁 Show secret", cb("otp", "eye")).row();
+  kb.add(sbtn("🔐 Use another secret", cb("otp", "ask"), "primary"), sbtn("🗑 Clear", cb("otp", "clr"), "danger")).row();
+  kb.text("◀️ My Account", cb("prf", "view")).row();
+  backToMenuRow(kb);
+
+  return {
+    text: [
+      header(`🔐 ${bold("2FA Code Generator")}`),
+      "",
+      `<code>${pretty}</code>`,
+      "",
+      `⏳ ${"█".repeat(bars)}${"░".repeat(10 - bars)} <b>${t.secondsLeft}s</b> left`,
+      ...(t.secondsLeft <= 8 ? [`⏭ Expiring — next code: <code>${t.nextCode}</code>`] : []),
+      "",
+      `🔑 Secret: <code>${escapeHtml(reveal ? secret : masked)}</code>`,
+      "",
+      "<i>Tap the code to copy it. Codes change every 30 seconds — tap 🔄 for a fresh one.</i>",
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** Reason prompt for a multi-unit claim. */
+export function replaceBatchAskReasonView(count: number): View {
+  const kb = new InlineKeyboard().text("✖️ Cancel", cb("rep", "home"));
+  return {
+    text: [
+      header(`🔄 ${bold("What went wrong?")}`),
+      "",
+      `📦 <b>${count} item(s)</b> selected.`,
+      "",
+      "Step 1 of 2 — describe the problem in one message (e.g. <i>key already used</i>, <i>password not working</i>).",
+      "",
+      "<i>If some of the items are outside their warranty, those will open a support ticket instead of an automatic claim — we'll tell you which.</i>",
+    ].join("\n"),
     kb,
   };
 }

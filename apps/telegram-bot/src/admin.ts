@@ -26,6 +26,7 @@ import {
   listReplacementRequests,
   getReplacementRequest,
   approveReplacement,
+  approveReplacementsForOrder,
   rejectReplacement,
   adminListTickets,
   adminGetTicket,
@@ -1794,7 +1795,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "twofa": return twoFaView(ctx);
     case "twofaon": {
-      const { secret, uri } = await beginAdminTotp();
+      const started = await beginAdminTotp();
+      if ("error" in started) {
+        await ctx.answerCallbackQuery({ text: "2FA is already on — turn it off with a code first.", show_alert: true }).catch(() => undefined);
+        return twoFaView(ctx);
+      }
+      const { secret, uri } = started;
       await ctx.answerCallbackQuery().catch(() => undefined);
       const png = await QRCode.toBuffer(uri, { width: 340, margin: 1 });
       ctx.session.awaiting = "admin_totp_confirm";
@@ -1876,11 +1882,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "tkrepl": {
       // Goodwill replacement from inside a ticket — a human decision, out of warranty.
-      const res = await issueReplacementFromTicket(id);
+      const res = await issueReplacementFromTicket(id, { approvedBy: String(ctx.from?.id ?? "admin") });
       await ctx.reply(
         res.ok
-          ? "✅ Replacement issued — a different unit was delivered to the customer and the ticket is marked resolved."
-          : `❌ ${res.reason === "NO_STOCK" ? "No spare stock left to replace with. Add stock, then try again." : res.reason === "NOT_AUTOMATIC" ? "This product is not auto-deliverable — deliver manually from the order." : res.reason ?? "Could not replace."}`,
+          ? [
+              "✅ <b>Replacement issued.</b>",
+              "",
+              `The customer has the new details, the full result is on the ticket thread, and the ticket is now RESOLVED.`,
+              res.detail?.replacementOrderNumber ? `🧾 Replacement order: <b>${res.detail.replacementOrderNumber}</b>` : "",
+              res.detail?.oldTail ? `❌ Replaced unit ending …${res.detail.oldTail}` : "",
+              res.detail ? `✅ New unit ending …${res.detail.newTail}` : "",
+            ].filter(Boolean).join("\n")
+          // The ticket is deliberately LEFT OPEN on failure, so it can be retried.
+          : `❌ ${res.reason === "NO_STOCK" ? "No spare stock left to replace with. Add stock, then try again." : res.reason === "NOT_AUTOMATIC" ? "This product is not auto-deliverable — deliver manually from the order." : res.reason ?? "Could not replace."}\n\n<i>The ticket is still open so you can retry — nothing was closed.</i>`,
+        { parse_mode: "HTML" },
       );
       return ticketDetailView(ctx, id);
     }
@@ -1888,8 +1903,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       // Shortcut straight off the alert: `id` is the ORDER ITEM, not the ticket.
       const tid = await findTicketByOrderItem(id);
       if (!tid) { await ctx.reply("Ticket not found for that item."); return; }
-      const res = await issueReplacementFromTicket(tid);
-      await ctx.reply(res.ok ? "✅ Replacement issued and the ticket marked resolved." : `❌ ${res.reason ?? "Could not replace."}`);
+      const res = await issueReplacementFromTicket(tid, { approvedBy: String(ctx.from?.id ?? "admin"), orderItemId: id });
+      await ctx.reply(
+        res.ok
+          ? `✅ Replacement issued, details posted to the ticket, ticket resolved.${res.detail?.replacementOrderNumber ? `\n🧾 ${res.detail.replacementOrderNumber}` : ""}`
+          : `❌ ${res.reason ?? "Could not replace."} — the ticket is still open, so you can retry.`,
+      );
       return ticketDetailView(ctx, tid);
     }
     case "reps": return replacementsListView(ctx);
@@ -1900,8 +1919,17 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.replyWithPhoto(r.proofFileId, { caption: `📷 Proof — ${escapeHtml(r.label)} (${r.orderNumber})` });
       return;
     }
+    case "rrall": {
+      const res = await approveReplacementsForOrder(id, String(ctx.from?.id ?? "admin"));
+      await ctx.reply(
+        res.failed.length === 0
+          ? `✅ ${res.done} replacement(s) issued and sent to the customer.`
+          : `✅ ${res.done} issued · ⚠️ ${res.failed.length} failed (${res.failed.map((f) => f.reason).join(", ")}). The failed ones are still pending — add stock and retry.`,
+      );
+      return replacementsListView(ctx);
+    }
     case "rrok": {
-      const res = await approveReplacement(id);
+      const res = await approveReplacement(id, String(ctx.from?.id ?? "admin"));
       if (res.ok) await ctx.reply("✅ Replacement approved — a different unit was issued and sent to the customer.");
       else await ctx.reply(res.reason === "NO_STOCK" ? "❌ No spare stock left to replace with. Add stock keys, then approve again." : res.reason === "ALREADY_REVIEWED" ? "This request was already reviewed." : res.reason === "NOT_AUTOMATIC" ? "❌ This product is not auto-deliverable — deliver a replacement manually from the order." : res.reason === "FAILED" ? "❌ Replacement failed (not a stock problem) — check the worker logs." : "❌ Could not replace.");
       return replacementsListView(ctx);

@@ -7,6 +7,7 @@ export interface SessionData {
     | "search"
     | "ticket"
     | "ticket_reply"
+    | "otp_secret"
     | "admin_ticket_reply"
     | "devtopup"
     | "admin_passcode"
@@ -154,6 +155,20 @@ export interface SessionData {
   replaceItemId?: string;
   /** Reason text captured before the screenshot step. */
   replaceReason?: string;
+  /** Order whose units the customer is picking from. */
+  replaceOrderId?: string;
+  /** Units ticked in the replacement picker (order item ids). */
+  replaceSelected?: string[];
+  /** Page of the unit picker. */
+  replacePage?: number;
+  /** The set submitted for a batch claim. */
+  replaceBatch?: string[];
+  /**
+   * A pasted TOTP secret for the OTP tool. Session-only and wiped by 🗑 Clear —
+   * deliberately never written to the database, a log, or a URL.
+   */
+  otpSecret?: string;
+  otpReveal?: boolean;
   /** True when the replacement form is raising a support ticket instead of a claim. */
   replaceViaTicket?: boolean;
   /** Ticket the customer is replying to, or the admin is answering. */

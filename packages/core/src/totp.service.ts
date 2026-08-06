@@ -116,7 +116,12 @@ function timingSafeEqualStr(a: string, b: string): boolean {
  * proves one code works — enabling it unverified is how people lock themselves
  * out of their own store.
  */
-export async function beginAdminTotp(): Promise<{ secret: string; uri: string }> {
+export async function beginAdminTotp(): Promise<{ secret: string; uri: string } | { error: "ALREADY_ENABLED" }> {
+  // Refuse while 2FA is ON. This upserts `enabled: false`, so any holder of an
+  // admin session (which never expires) could send adm:twofaon and silently
+  // downgrade the panel to single-factor. Switching off requires a code, so
+  // starting again must too.
+  if ((await readAdminTotp()).enabled) return { error: "ALREADY_ENABLED" };
   const secret = newTotpSecret();
   const store = loadConfig().STORE_NAME || "Store";
   await prisma.setting.upsert({
