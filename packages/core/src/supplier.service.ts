@@ -65,7 +65,82 @@ export async function listSuppliers(): Promise<Array<{ id: string; name: string;
   const rows = await prisma.supplier.findMany({ orderBy: { createdAt: "asc" } });
   return rows.map((r) => ({ id: r.id, name: r.name, markupBp: r.markupBp, active: r.active, baseUrl: r.baseUrl }));
 }
-export async function removeSupplier(id: string): Promise<void> { await prisma.supplier.delete({ where: { id } }).catch(() => undefined); }
+/**
+ * Do newly synced products go straight into the shop, or arrive hidden?
+ *
+ * Default HIDDEN. Auto-sync imports everything a supplier offers, and a vendor
+ * with 2,000 SKUs would otherwise flood the shop and broadcast all of it to every
+ * customer the moment they were connected. Hidden-by-default means the sync is
+ * still automatic but you decide what appears, in bulk.
+ */
+const NEWVIS = (id: string) => `supplier.newvisible.${id}`;
+
+export async function getSupplierNewVisible(supplierId: string): Promise<boolean> {
+  const row = await prisma.setting.findUnique({ where: { key: NEWVIS(supplierId) } }).catch(() => null);
+  const v = row?.value as { on?: boolean } | null;
+  return v?.on === true;
+}
+
+export async function setSupplierNewVisible(supplierId: string, on: boolean): Promise<void> {
+  await prisma.setting.upsert({
+    where: { key: NEWVIS(supplierId) },
+    create: { key: NEWVIS(supplierId), value: { on } as never },
+    update: { value: { on } as never },
+  });
+}
+
+export type RemoveSupplierMode = "keep" | "hide" | "delete";
+
+/** How many shop products came from this supplier (for the delete confirmation). */
+export async function countSupplierProducts(supplierId: string): Promise<{ total: number; visible: number }> {
+  const [total, visible] = await Promise.all([
+    prisma.product.count({ where: { supplierId, deletedAt: null } }),
+    prisma.product.count({ where: { supplierId, deletedAt: null, status: "ACTIVE" } }),
+  ]);
+  return { total, visible };
+}
+
+/**
+ * Remove a vendor, and decide what happens to the products they brought in.
+ *
+ * Product.supplierId has no foreign key, so deleting the supplier row used to
+ * leave their products in the shop forever, pointing at a vendor that no longer
+ * exists and impossible to fulfil — a customer could still buy one.
+ *
+ *   "delete" — soft-delete them (default; recoverable, history intact)
+ *   "hide"   — keep the rows but pull them from the shop
+ *   "keep"   — leave them listed, unlinked from any supplier
+ */
+export async function removeSupplier(id: string, mode: RemoveSupplierMode = "delete"): Promise<{ affected: number }> {
+  const now = new Date();
+  let affected = 0;
+  if (mode === "delete") {
+    // Soft delete: never destroy a product row that orders may reference.
+    const r = await prisma.product.updateMany({
+      where: { supplierId: id, deletedAt: null },
+      data: { deletedAt: now, status: "ARCHIVED", supplierId: null, supplierRef: null },
+    });
+    affected = r.count;
+  } else if (mode === "hide") {
+    const r = await prisma.product.updateMany({
+      where: { supplierId: id, deletedAt: null },
+      // Unlink too, or a later sync from a re-added vendor could resurrect them.
+      data: { status: "PAUSED", supplierId: null, supplierRef: null },
+    });
+    affected = r.count;
+  } else {
+    // Keep them on sale but detach — they become ordinary manual products.
+    const r = await prisma.product.updateMany({
+      where: { supplierId: id, deletedAt: null },
+      data: { supplierId: null, supplierRef: null, fulfillmentMode: "MANUAL" },
+    });
+    affected = r.count;
+  }
+  await prisma.supplier.delete({ where: { id } }).catch(() => undefined);
+  await prisma.setting.delete({ where: { key: NEWVIS(id) } }).catch(() => undefined);
+  await invalidate("cat:*");
+  return { affected };
+}
 export async function setSupplierMarkup(id: string, pct: number): Promise<void> { await prisma.supplier.update({ where: { id }, data: { markupBp: Math.max(0, Math.round(pct * 100)) } }); }
 
 // ── HTTP (tolerant to common REST shapes) ──
@@ -475,6 +550,9 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
   const rate = usdtRate("INR");
   let cat = await prisma.category.findFirst({ where: { slug: "uncategorized" } });
   if (!cat) cat = await prisma.category.create({ data: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 } });
+  // Auto-sync imports everything, but new items are HIDDEN unless the operator
+  // opted in — see getSupplierNewVisible.
+  const goLive = await getSupplierNewVisible(supplierId);
   let added = 0, updated = 0;
   const newIds: string[] = [];
   for (const p of prods) {
@@ -487,8 +565,27 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
       include: { variants: true },
     });
     if (existing) {
-      // Visibility follows supplier stock: shown when >0, hidden when 0.
-      await prisma.product.update({ where: { id: existing.id }, data: { name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null, activationGuide: p.note.slice(0, 2000) || null, supplierStock: p.stock, status: inStock ? "ACTIVE" : "PAUSED" } });
+      // Stock drives visibility ONLY for products the operator has already
+      // published. A hidden product must stay hidden — sync bringing it back into
+      // the shop on the next stock change would undo every bulk hide.
+      const nextStatus = existing.status === "ARCHIVED" || existing.status === "DRAFT"
+        ? existing.status
+        : existing.status === "PAUSED" && !existing.supplierStockDrivenPause
+          ? "PAUSED"
+          : inStock ? "ACTIVE" : "PAUSED";
+      await prisma.product.update({
+        where: { id: existing.id },
+        data: {
+          name: p.name.slice(0, 200),
+          description: p.description.slice(0, 4000) || null,
+          activationGuide: p.note.slice(0, 2000) || null,
+          supplierStock: p.stock,
+          status: nextStatus,
+          // Remember WHY it is paused, so the rule above can tell an out-of-stock
+          // pause (sync may unpause) from a manual hide (sync must not).
+          supplierStockDrivenPause: nextStatus === "PAUSED" ? !inStock : false,
+        },
+      });
       const v = existing.variants[0];
       if (v && !existing.priceLocked) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
         await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
@@ -501,7 +598,7 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
         data: {
           slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
           activationGuide: p.note.slice(0, 2000) || null,
-          type: "MANUAL_SERVICE", status: "ACTIVE", fulfillmentMode: "MANUAL", categoryId: cat.id,
+          type: "MANUAL_SERVICE", status: goLive ? "ACTIVE" : "PAUSED", fulfillmentMode: "MANUAL", categoryId: cat.id,
           supplierId: s.id, supplierRef: p.variantRef ? `${p.ref}|${p.variantRef}` : p.ref, supplierStock: p.stock,
           variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
         },
@@ -511,8 +608,9 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
     }
   }
   await invalidate("cat:*");
-  // Notify customers about new products: announce individually if few, else one summary.
-  if (newIds.length > 0) {
+  // Only announce what customers can actually see. Broadcasting products that are
+  // hidden would advertise things nobody can buy.
+  if (newIds.length > 0 && goLive) {
     if (newIds.length <= 3) {
       for (const pid of newIds) await announceProduct(pid, { createdById: "supplier-sync", force: true }).catch(() => undefined);
     } else {
@@ -531,14 +629,118 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
   return { added, updated };
 }
 
-/** List a supplier's imported products (for the show/hide picker). */
-export async function listSupplierProducts(supplierId: string, limit = 30): Promise<Array<{ id: string; name: string; visible: boolean; priceMinor: number; stock: number | null }>> {
+export interface SupplierProductRow {
+  id: string;
+  name: string;
+  visible: boolean;
+  priceMinor: number;
+  stock: number | null;
+}
+
+/**
+ * One page of a supplier's products, for the bulk picker.
+ *
+ * Paged because a vendor can easily have thousands: the old version took the first
+ * 30 with no paging, so everything beyond that was unreachable — you could not hide
+ * a product you could not see.
+ */
+export async function listSupplierProducts(
+  supplierId: string,
+  opts: { page?: number; pageSize?: number; search?: string; only?: "all" | "visible" | "hidden" } = {},
+): Promise<{ items: SupplierProductRow[]; page: number; pages: number; total: number; visibleTotal: number }> {
+  const pageSize = Math.min(50, Math.max(5, opts.pageSize ?? 12));
+  const only = opts.only ?? "all";
+  const where = {
+    supplierId,
+    deletedAt: null,
+    ...(only === "visible" ? { status: "ACTIVE" as const } : {}),
+    ...(only === "hidden" ? { status: { not: "ACTIVE" as const } } : {}),
+    ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
+  };
+  const [total, visibleTotal] = await Promise.all([
+    prisma.product.count({ where }),
+    prisma.product.count({ where: { supplierId, deletedAt: null, status: "ACTIVE" } }),
+  ]);
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, opts.page ?? 1), pages);
   const rows = await prisma.product.findMany({
-    where: { supplierId, deletedAt: null },
-    orderBy: { name: "asc" }, take: limit,
+    where,
+    orderBy: { name: "asc" },
+    skip: (page - 1) * pageSize,
+    take: pageSize,
     include: { variants: { include: { prices: { where: { currency: "USD", tier: { name: "RETAIL" } } } } } },
   });
-  return rows.map((p) => ({ id: p.id, name: p.name, visible: p.status === "ACTIVE", priceMinor: p.variants[0]?.prices[0]?.amountMinor ?? 0, stock: p.supplierStock }));
+  return {
+    items: rows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      visible: p.status === "ACTIVE",
+      priceMinor: p.variants[0]?.prices[0]?.amountMinor ?? 0,
+      stock: p.supplierStock,
+    })),
+    page,
+    pages,
+    total,
+    visibleTotal,
+  };
+}
+
+/** Ids on one page — so "select all on page" doesn't need the client to know them. */
+export async function supplierProductIdsOnPage(
+  supplierId: string,
+  opts: { page?: number; pageSize?: number; only?: "all" | "visible" | "hidden" } = {},
+): Promise<string[]> {
+  const r = await listSupplierProducts(supplierId, opts);
+  return r.items.map((i) => i.id);
+}
+
+/** Every id matching the current filter — for "select all N". */
+export async function supplierProductIdsAll(
+  supplierId: string,
+  only: "all" | "visible" | "hidden" = "all",
+  cap = 500,
+): Promise<string[]> {
+  const rows = await prisma.product.findMany({
+    where: {
+      supplierId,
+      deletedAt: null,
+      ...(only === "visible" ? { status: "ACTIVE" as const } : {}),
+      ...(only === "hidden" ? { status: { not: "ACTIVE" as const } } : {}),
+    },
+    orderBy: { name: "asc" },
+    take: cap,
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Bulk show / hide / delete, scoped to ONE supplier.
+ *
+ * The supplierId in the where clause is not decoration: it stops a stale or
+ * tampered selection from touching another vendor's products.
+ */
+export async function bulkSupplierProducts(
+  supplierId: string,
+  productIds: string[],
+  action: "show" | "hide" | "delete",
+): Promise<number> {
+  const ids = [...new Set(productIds)].slice(0, 500);
+  if (ids.length === 0) return 0;
+  const where = { id: { in: ids }, supplierId, deletedAt: null };
+  let count = 0;
+  if (action === "show") {
+    ({ count } = await prisma.product.updateMany({ where, data: { status: "ACTIVE", supplierStockDrivenPause: false } }));
+  } else if (action === "hide") {
+    // supplierStockDrivenPause false marks this as a MANUAL hide, so the next sync
+    // will not helpfully put it back in the shop.
+    ({ count } = await prisma.product.updateMany({ where, data: { status: "PAUSED", supplierStockDrivenPause: false } }));
+  } else {
+    // Soft delete — orders reference these rows, so they are never destroyed.
+    ({ count } = await prisma.product.updateMany({ where, data: { deletedAt: new Date(), status: "ARCHIVED" } }));
+  }
+  await invalidate("cat:*");
+  return count;
 }
 
 /** Show/hide a supplier product in the shop. */

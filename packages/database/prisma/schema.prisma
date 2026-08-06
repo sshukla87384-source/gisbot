@@ -504,6 +504,9 @@ model Product {
   buyButtonText   String? // custom Buy button label for this product
   buttonStyle     String? // button colour: success | primary | danger (list + buy)
   priceLocked     Boolean @default(false) // admin set a custom price — sync won't overwrite it
+  /// True when a PAUSED status came from the supplier being out of stock, rather
+  /// than from the operator hiding it. Sync may unpause the former, never the latter.
+  supplierStockDrivenPause Boolean @default(false)
   reusableSecretEnc String? // one value delivered to EVERY buyer (shared redemption link) — AES-GCM
   reusableStock     Int?     // how many times it may still be sold; null = unlimited
   manualStock       Int?     // optional sellable quantity for MANUAL products; null = unlimited

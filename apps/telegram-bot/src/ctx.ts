@@ -126,6 +126,10 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** Bulk supplier-product picker state. */
+  supSelected?: string[];
+  supPage?: number;
+  supFilter?: "all" | "visible" | "hidden";
   /** Supplier being configured from its docs. */
   supTarget?: string;
   /** Failed payment-verify attempts, so the paste state cannot stick forever. */

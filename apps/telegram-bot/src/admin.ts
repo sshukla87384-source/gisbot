@@ -120,8 +120,12 @@ import {
   syncSupplierProducts,
   fulfillFromSupplier,
   listSupplierProducts,
-  setSupplierProductVisible,
-  setAllSupplierProductsVisible,
+  supplierProductIdsOnPage,
+  supplierProductIdsAll,
+  bulkSupplierProducts,
+  countSupplierProducts,
+  getSupplierNewVisible,
+  setSupplierNewVisible,
   listRecentUsers,
   getUserSummary,
   setUserBanned,
@@ -804,13 +808,20 @@ async function suppliersView(ctx: Ctx): Promise<void> {
   const sups = await listSuppliers();
   const kb = new InlineKeyboard().add(sbtn("➕ Add supplier", cb("adm", "supadd"), "success")).row();
   for (const su of sups) {
-    kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text("📂 Products", cb("adm", "supprods", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
+    kb.text(`🔄 Sync`, cb("adm", "supsync", su.id)).text("📂 Products (bulk)", cb("adm", "supprods", su.id)).text("🗑", cb("adm", "suprm", su.id)).row();
     kb.text(`🧪 Test connection — ${su.name.slice(0, 18)}`, cb("adm", "suptest", su.id)).row();
     kb.text(`📄 Read API docs — ${su.name.slice(0, 18)}`, cb("adm", "supdocs", su.id)).row();
     kb.add(sbtn(`🔎 Auto-find docs — ${su.name.slice(0, 14)}`, cb("adm", "supauto", su.id), "success")).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
-  const lines = ["🏭 <b>Suppliers</b>", "", "Connect an external supplier API — sync their catalog into your shop with your markup; buyers pay your price and the key is bought from the supplier and delivered automatically.", ""];
+  const lines = [
+    "🏭 <b>Suppliers</b>",
+    "",
+    "Connect an external supplier API — sync their catalog into your shop with your markup; buyers pay your price and the key is bought from the supplier and delivered automatically.",
+    "",
+    "🔄 Sync imports <b>everything</b> they offer. New items arrive <b>hidden</b> by default, so a big vendor can't flood your shop — open 📂 <b>Products (bulk)</b> to tick what goes on sale.",
+    "",
+  ];
   if (sups.length === 0) lines.push("No suppliers yet. Tap ➕ Add supplier.");
   for (const su of sups) lines.push(`• <b>${escapeHtml(su.name)}</b> — +${Math.round(su.markupBp / 100)}% markup ${su.active ? "🟢" : "⚪️"}\n  <code>${escapeHtml(su.baseUrl)}</code>`);
   await show(ctx, lines.join("\n"), kb, true);
@@ -1226,18 +1237,71 @@ async function replacementDetailView(ctx: Ctx, id: string): Promise<void> {
   ].join("\n"), kb, true);
 }
 
+/**
+ * Bulk picker for a supplier's products.
+ *
+ * Paged and multi-select. The old screen listed the first 30 with no paging and no
+ * selection, so a vendor's 200th product was simply unreachable — you could not
+ * hide what you could not see.
+ */
 async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void> {
-  const prods = await listSupplierProducts(supplierId, 30);
+  const only = (ctx.session.supFilter ?? "all") as "all" | "visible" | "hidden";
+  const page = ctx.session.supPage ?? 1;
+  const sel = new Set(ctx.session.supSelected ?? []);
+  const r = await listSupplierProducts(supplierId, { page, pageSize: 12, only });
   const kb = new InlineKeyboard();
-  kb.add(sbtn("👁 Show all", cb("adm", "spall", `${supplierId}~1`), "success"), sbtn("🙈 Hide all", cb("adm", "spall", `${supplierId}~0`), "danger")).row();
-  for (const p of prods) {
-    kb.text(`${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 30)} · $${(p.priceMinor / 100).toFixed(2)} · ${p.stock === null ? "∞" : p.stock} left`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
+
+  // Filter row
+  const f = (label: string, key: "all" | "visible" | "hidden") =>
+    kb.text(only === key ? `• ${label} •` : label, cb("adm", "spfil", `${supplierId}~${key}`));
+  f("All", "all"); f("👁 Shown", "visible"); f("🙈 Hidden", "hidden");
+  kb.row();
+
+  for (const p of r.items) {
+    const box = sel.has(p.id) ? "☑️" : "⬜";
+    const eye = p.visible ? "👁" : "🙈";
+    kb.text(`${box} ${eye} ${p.name.slice(0, 26)} · $${(p.priceMinor / 100).toFixed(2)}`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
   }
+
+  if (r.pages > 1) {
+    if (r.page > 1) kb.text("◀️", cb("adm", "sppg", `${supplierId}~${r.page - 1}`));
+    kb.text(`${r.page}/${r.pages}`, cb("adm", "supprods", supplierId));
+    if (r.page < r.pages) kb.text("▶️", cb("adm", "sppg", `${supplierId}~${r.page + 1}`));
+    kb.row();
+  }
+
+  // Selection helpers
+  kb.text("☑️ This page", cb("adm", "sppage", supplierId)).text(`☑️ All ${r.total}`, cb("adm", "spallsel", supplierId));
+  if (sel.size > 0) kb.text("✖️ Clear", cb("adm", "spclr", supplierId));
+  kb.row();
+
+  if (sel.size > 0) {
+    kb.add(
+      sbtn(`👁 Show ${sel.size}`, cb("adm", "spdo", `${supplierId}~show`), "success"),
+      sbtn(`🙈 Hide ${sel.size}`, cb("adm", "spdo", `${supplierId}~hide`), "primary"),
+    ).row();
+    kb.add(sbtn(`🗑 Delete ${sel.size}`, cb("adm", "spdo", `${supplierId}~delete`), "danger")).row();
+  }
+
+  // Whole-catalogue shortcuts
+  kb.add(sbtn("👁 Show every product", cb("adm", "spall", `${supplierId}~1`), "primary"), sbtn("🙈 Hide every product", cb("adm", "spall", `${supplierId}~0`), "danger")).row();
+  const newVis = await getSupplierNewVisible(supplierId);
+  kb.add(sbtn(`🆕 New products arrive: ${newVis ? "👁 visible" : "🙈 hidden"}`, cb("adm", "spnewvis", supplierId), newVis ? "success" : "primary")).row();
   kb.text("◀️ Back", cb("adm", "sups"));
-  const shown = prods.filter((p) => p.visible).length;
-  await show(ctx, prods.length
-    ? `📂 <b>Supplier products</b> (${shown}/${prods.length} shown)\nTap to show 👁 / hide 🙈 in your shop. New synced products start hidden.`
-    : "No products synced yet — tap 🔄 Sync on the supplier first.", kb, true);
+
+  await show(ctx, r.total === 0
+    ? "No products synced yet — tap 🔄 Sync on the supplier first."
+    : [
+        `📂 <b>Supplier products</b>`,
+        `👁 ${r.visibleTotal} shown of ${r.total} total${only !== "all" ? ` · filtered: ${only}` : ""}`,
+        sel.size > 0 ? `☑️ <b>${sel.size} selected</b>` : "",
+        "",
+        "Tap products to tick them, then choose an action. Ticks survive paging and filtering.",
+        "",
+        newVis
+          ? "🆕 New synced products go <b>straight into the shop</b>."
+          : "🆕 New synced products arrive <b>hidden</b>, so a big vendor can't flood your shop. Sync still imports everything.",
+      ].filter(Boolean).join("\n"), kb, true);
 }
 
 function saleTargetKb(): InlineKeyboard {
@@ -1544,18 +1608,82 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_sup_name";
       await askStep(ctx, "🏭 <b>Add supplier</b>\nStep 1/4 — send a <b>name</b> for this supplier:");
       return;
-    case "supprods": return supplierProductsView(ctx, id);
+    case "supprods":
+      // A fresh open starts with a clean selection.
+      if (ctx.session.supTarget !== id) { ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "all"; }
+      ctx.session.supTarget = id;
+      return supplierProductsView(ctx, id);
+    case "spfil": {
+      const [supId, key] = id.split("~");
+      if (supId) { ctx.session.supFilter = (key === "visible" || key === "hidden" ? key : "all"); ctx.session.supPage = 1; await supplierProductsView(ctx, supId); }
+      return;
+    }
+    case "sppg": {
+      const [supId, pg] = id.split("~");
+      if (supId) { ctx.session.supPage = Math.max(1, Number.parseInt(pg ?? "1", 10) || 1); await supplierProductsView(ctx, supId); }
+      return;
+    }
+    case "sppage": {
+      // Tick everything on the current page, keeping earlier ticks.
+      const ids = await supplierProductIdsOnPage(id, { page: ctx.session.supPage ?? 1, pageSize: 12, only: (ctx.session.supFilter ?? "all") as "all" | "visible" | "hidden" });
+      const cur = new Set(ctx.session.supSelected ?? []);
+      const allOn = ids.every((x) => cur.has(x));
+      for (const x of ids) { if (allOn) cur.delete(x); else cur.add(x); }
+      ctx.session.supSelected = [...cur].slice(0, 500);
+      await ctx.answerCallbackQuery({ text: allOn ? "Page cleared" : `Page selected (${ids.length})` }).catch(() => undefined);
+      return supplierProductsView(ctx, id);
+    }
+    case "spallsel": {
+      const ids = await supplierProductIdsAll(id, (ctx.session.supFilter ?? "all") as "all" | "visible" | "hidden");
+      const cur = ctx.session.supSelected ?? [];
+      ctx.session.supSelected = cur.length >= ids.length ? [] : ids;
+      await ctx.answerCallbackQuery({ text: cur.length >= ids.length ? "Cleared" : `Selected ${ids.length}` }).catch(() => undefined);
+      return supplierProductsView(ctx, id);
+    }
+    case "spclr":
+      ctx.session.supSelected = [];
+      await ctx.answerCallbackQuery({ text: "Selection cleared" }).catch(() => undefined);
+      return supplierProductsView(ctx, id);
+    case "spdo": {
+      const [supId, action] = id.split("~");
+      const act = action === "show" || action === "hide" || action === "delete" ? action : null;
+      if (!supId || !act) return;
+      const ids = ctx.session.supSelected ?? [];
+      if (ids.length === 0) { await ctx.answerCallbackQuery({ text: "Nothing selected" }).catch(() => undefined); return; }
+      const n = await bulkSupplierProducts(supId, ids, act);
+      ctx.session.supSelected = [];
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      await ctx.reply(
+        act === "show" ? `👁 ${n} product(s) are now in the shop.`
+        : act === "hide" ? `🙈 ${n} product(s) hidden. Sync won't put them back.`
+        : `🗑 ${n} product(s) removed from the shop. Existing orders keep their history.`,
+      );
+      return supplierProductsView(ctx, supId);
+    }
+    case "spnewvis": {
+      const next = !(await getSupplierNewVisible(id));
+      await setSupplierNewVisible(id, next);
+      await ctx.answerCallbackQuery({ text: next ? "New products will be visible" : "New products will arrive hidden" }).catch(() => undefined);
+      return supplierProductsView(ctx, id);
+    }
     case "spall": {
       const [supId, on] = id.split("~");
-      if (supId) { const n = await setAllSupplierProductsVisible(supId, on === "1"); await ctx.reply(`${on === "1" ? "👁 Showing" : "🙈 Hidden"} ${n} product(s).`); await supplierProductsView(ctx, supId); }
+      if (supId) {
+        const ids = await supplierProductIdsAll(supId, "all");
+        const n = await bulkSupplierProducts(supId, ids, on === "1" ? "show" : "hide");
+        await ctx.reply(`${on === "1" ? "👁 Showing" : "🙈 Hidden"} ${n} product(s).`);
+        await supplierProductsView(ctx, supId);
+      }
       return;
     }
     case "sptog": {
       const [supId, prodId] = id.split("~");
       if (supId && prodId) {
-        const prods = await listSupplierProducts(supId, 200);
-        const cur = prods.find((x) => x.id === prodId)?.visible ?? false;
-        await setSupplierProductVisible(prodId, !cur);
+        // Ticks a checkbox now — it does not flip visibility on its own.
+        const cur = new Set(ctx.session.supSelected ?? []);
+        if (cur.has(prodId)) cur.delete(prodId); else cur.add(prodId);
+        ctx.session.supSelected = [...cur].slice(0, 500);
+        await ctx.answerCallbackQuery().catch(() => undefined);
         await supplierProductsView(ctx, supId);
       }
       return;
@@ -1599,10 +1727,51 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ ${escapeHtml(r.detail)}`);
       return;
     }
-    case "suprm":
-      await removeSupplier(id);
-      await ctx.reply("🗑 Supplier removed (its imported products remain).");
+    case "suprm": {
+      // Ask what happens to their products FIRST — deleting the vendor silently
+      // used to leave them on sale, unfulfillable, pointing at a dead supplier.
+      const c = await countSupplierProducts(id);
+      const kb = new InlineKeyboard();
+      if (c.total > 0) {
+        kb.add(sbtn(`🗑 Remove vendor + delete ${c.total} product(s)`, cb("adm", "suprmx", `${id}~delete`), "danger")).row();
+        kb.add(sbtn(`🙈 Remove vendor + hide ${c.total} product(s)`, cb("adm", "suprmx", `${id}~hide`), "primary")).row();
+        kb.add(sbtn("📦 Remove vendor, keep products on sale", cb("adm", "suprmx", `${id}~keep`), "primary")).row();
+      } else {
+        kb.add(sbtn("🗑 Remove vendor", cb("adm", "suprmx", `${id}~delete`), "danger")).row();
+      }
+      kb.text("✖️ Cancel", cb("adm", "sups"));
+      await show(ctx, [
+        "🗑 <b>Remove this vendor?</b>",
+        "",
+        c.total > 0
+          ? `They brought in <b>${c.total} product(s)</b>, <b>${c.visible}</b> currently on sale.`
+          : "They have no products in your shop.",
+        "",
+        c.total > 0
+          ? [
+              "Pick what happens to them:",
+              "",
+              "🗑 <b>Delete</b> — removed from the shop. Existing orders keep their full history, so nothing is lost.",
+              "🙈 <b>Hide</b> — kept but pulled from sale, in case you re-add the vendor.",
+              "📦 <b>Keep on sale</b> — they stay listed as manual products. <i>You will have to fulfil them by hand, because the supplier link is gone.</i>",
+            ].join("\n")
+          : "",
+      ].filter(Boolean).join("\n"), kb, true);
+      return;
+    }
+    case "suprmx": {
+      const [supId, mode] = id.split("~");
+      const m = mode === "hide" || mode === "keep" || mode === "delete" ? mode : "delete";
+      if (!supId) return;
+      const r = await removeSupplier(supId, m);
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      await ctx.reply(
+        m === "delete" ? `🗑 Vendor removed and ${r.affected} product(s) taken out of the shop.`
+        : m === "hide" ? `🗑 Vendor removed. ${r.affected} product(s) hidden and unlinked.`
+        : `🗑 Vendor removed. ${r.affected} product(s) stay on sale as manual products — you fulfil those by hand now.`,
+      );
       return suppliersView(ctx);
+    }
     case "supbuy": {
       const r = await fulfillFromSupplier(id);
       await ctx.reply(r.ok ? "🤖 Bought from supplier and delivered to the customer. ✅" : `❌ Supplier fulfilment failed (${r.reason ?? "error"}). Deliver manually or check the supplier.`);
