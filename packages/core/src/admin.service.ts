@@ -219,7 +219,7 @@ export async function setProductActivationGuide(productId: string, guide: string
 
 // ───────────── Customisable button labels ─────────────
 
-export const BUTTON_LABEL_KEYS = ["shop", "orders", "wallet", "support", "referral", "currency", "language", "developer"] as const;
+export const BUTTON_LABEL_KEYS = ["shop", "categories", "orders", "wallet", "account", "support", "referral", "currency", "language", "developer"] as const;
 export type ButtonLabelKey = (typeof BUTTON_LABEL_KEYS)[number];
 
 export interface ButtonOverride { label?: string; icon?: string }
@@ -1122,4 +1122,146 @@ export async function getProductReusableSecret(productId: string): Promise<strin
   const p = await prisma.product.findUnique({ where: { id: productId }, select: { reusableSecretEnc: true } });
   if (!p?.reusableSecretEnc) return null;
   try { return decryptSecret(p.reusableSecretEnc, loadConfig().ENCRYPTION_MASTER_KEY); } catch { return null; }
+}
+
+// ───────────── Bulk categorisation ─────────────
+
+export interface CatAdminRow {
+  id: string;
+  name: string;
+  emoji: string | null;
+  productCount: number;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+/** Categories with their live product counts, for the admin manager. */
+export async function listCategoriesAdmin(): Promise<CatAdminRow[]> {
+  const rows = await prisma.category.findMany({
+    where: { deletedAt: null },
+    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    include: { _count: { select: { products: { where: { deletedAt: null } } } } },
+  });
+  return rows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    emoji: c.emoji,
+    productCount: c._count.products,
+    isActive: c.isActive,
+    sortOrder: c.sortOrder,
+  }));
+}
+
+export interface ProductPickRow {
+  id: string;
+  name: string;
+  categoryId: string | null;
+  categoryName: string | null;
+  visible: boolean;
+}
+
+/**
+ * One page of products for the bulk categoriser. Paged and searchable, because a
+ * shop with a synced supplier catalogue has far too many to scroll.
+ */
+export async function listProductsForCategorising(opts: {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  /** "none" = only uncategorised, or a category id to see what's already in it. */
+  filter?: string;
+} = {}): Promise<{ items: ProductPickRow[]; page: number; pages: number; total: number }> {
+  const pageSize = Math.min(50, Math.max(5, opts.pageSize ?? 12));
+  const where = {
+    deletedAt: null,
+    ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
+    // categoryId is required on Product, so "uncategorised" means the
+    // Uncategorized bucket rather than a null.
+    ...(opts.filter === "none"
+      ? { category: { slug: "uncategorized" } }
+      : opts.filter && opts.filter !== "all"
+        ? { categoryId: opts.filter }
+        : {}),
+  };
+  const total = await prisma.product.count({ where });
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, opts.page ?? 1), pages);
+  const rows = await prisma.product.findMany({
+    where,
+    orderBy: { name: "asc" },
+    skip: (page - 1) * pageSize,
+    take: pageSize,
+    select: { id: true, name: true, categoryId: true, status: true, category: { select: { name: true } } },
+  });
+  return {
+    items: rows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      categoryId: p.categoryId,
+      categoryName: p.category?.name ?? null,
+      visible: p.status === "ACTIVE",
+    })),
+    page,
+    pages,
+    total,
+  };
+}
+
+/** Ids matching the current filter, for "select all". */
+export async function productIdsForCategorising(filter?: string, search?: string, cap = 500): Promise<string[]> {
+  const rows = await prisma.product.findMany({
+    where: {
+      deletedAt: null,
+      ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
+      ...(filter === "none" ? { category: { slug: "uncategorized" } } : filter && filter !== "all" ? { categoryId: filter } : {}),
+    },
+    orderBy: { name: "asc" },
+    take: cap,
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+/** Move many products into one category in a single statement. */
+export async function bulkSetCategory(productIds: string[], categoryId: string): Promise<number> {
+  const ids = [...new Set(productIds)].slice(0, 500);
+  if (ids.length === 0) return 0;
+  const cat = await prisma.category.findFirst({ where: { id: categoryId, deletedAt: null }, select: { id: true } });
+  if (!cat) return 0;
+  const r = await prisma.product.updateMany({ where: { id: { in: ids }, deletedAt: null }, data: { categoryId } });
+  await invalidate("cat:*");
+  return r.count;
+}
+
+/** Set a category's emoji — it becomes the tile icon in the customer grid. */
+export async function setCategoryEmoji(categoryId: string, emoji: string | null): Promise<void> {
+  await prisma.category.update({ where: { id: categoryId }, data: { emoji: emoji?.slice(0, 8) ?? null } });
+  await invalidate("cat:*");
+}
+
+export async function renameCategory(categoryId: string, name: string): Promise<void> {
+  await prisma.category.update({ where: { id: categoryId }, data: { name: name.slice(0, 120) } });
+  await invalidate("cat:*");
+}
+
+/**
+ * Hide or show a whole category. Its products keep their own status — this only
+ * removes the tile from the grid, so nothing is silently unpublished.
+ */
+export async function setCategoryActive(categoryId: string, isActive: boolean): Promise<void> {
+  await prisma.category.update({ where: { id: categoryId }, data: { isActive } });
+  await invalidate("cat:*");
+}
+
+/**
+ * Delete a category. Its products are moved to Uncategorized rather than deleted —
+ * losing a category must never take the products with it.
+ */
+export async function deleteCategory(categoryId: string): Promise<{ moved: number }> {
+  const fallback = await ensureUncategorized();
+  if (fallback === categoryId) return { moved: 0 };
+  const r = await prisma.product.updateMany({ where: { categoryId }, data: { categoryId: fallback } });
+  await prisma.category.update({ where: { id: categoryId }, data: { deletedAt: new Date(), isActive: false } });
+  await invalidate("cat:*");
+  return { moved: r.count };
 }

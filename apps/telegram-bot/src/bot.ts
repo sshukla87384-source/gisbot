@@ -353,6 +353,7 @@ export function createBot(): Bot<Ctx> {
     // Deep links so an announcement button can open ANY section of the bot.
     switch (payload) {
       case "shop": return render(ctx, await views.shopHomeView(ctx.user, 1), false);
+      case "categories": return render(ctx, await views.categoryGridView(ctx.user), false);
       case "deals": return render(ctx, await views.dealsView(ctx.user), false);
       case "refer": return render(ctx, await views.referralView(ctx.user, ctx.me.username), false);
       case "spin": return render(ctx, await views.spinView(ctx.user), false);
@@ -989,6 +990,16 @@ export function createBot(): Bot<Ctx> {
         case "shp:prod":
           ctx.session.buyProductId = args[0] ?? "";
           await render(ctx, await views.productView(user, args[0] ?? ""), true);
+          break;
+
+        // Shop by category — the brand-tile grid.
+        case "cat:home":
+          await ctx.answerCallbackQuery().catch(() => undefined);
+          await render(ctx, await views.categoryGridView(user), true);
+          break;
+        case "cat:open":
+          await ctx.answerCallbackQuery().catch(() => undefined);
+          await render(ctx, await views.categoryProductsView(user, args[0] ?? "", intArg(args, 1, 1)), true);
           break;
 
         case "shp:find":

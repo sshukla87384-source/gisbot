@@ -17,6 +17,8 @@ import {
   listTickets,
   getMyTicket,
   listUnitsForOrder,
+  listCategoryTiles,
+  categoryIdsUnder,
   generateTotp,
   type ReplaceableItem,
   listVault,
@@ -546,6 +548,84 @@ export async function supportHomeView(user: BotUser): Promise<View> {
   };
 }
 
+/**
+ * Shop by category — a 3-across grid of tiles.
+ *
+ * 🔥 marks a category with a featured product; sold-out categories are styled
+ * differently rather than hidden, because a customer looking for a brand we do
+ * stock (just not today) needs to see that it exists.
+ */
+export async function categoryGridView(user: BotUser): Promise<View> {
+  const tiles = await listCategoryTiles();
+  const kb = new InlineKeyboard();
+  if (tiles.length === 0) {
+    kb.add(sbtn("🛍 Browse everything", cb("shp", "home", 1), "success")).row();
+    backToMenuRow(kb);
+    return {
+      text: [header(`🗂 ${bold("Shop by Category")}`), "", "No categories yet — tap below to browse the whole shop."].join("\n"),
+      kb,
+    };
+  }
+  // Three per row, matching the tile layout.
+  for (let i = 0; i < tiles.length; i += 3) {
+    for (const t of tiles.slice(i, i + 3)) {
+      const label = `${t.hot ? "🔥 " : ""}${t.emoji ? `${t.emoji} ` : ""}${t.name}`.slice(0, 24);
+      // Sold-out tiles are styled danger so they read differently at a glance.
+      kb.add(sbtn(label, cb("cat", "open", t.id), t.inStock ? "success" : "danger"));
+    }
+    kb.row();
+  }
+  kb.add(sbtn("🛍 Browse everything", cb("shp", "home", 1), "primary")).row();
+  backToMenuRow(kb);
+  const soldOut = tiles.filter((t) => !t.inStock).length;
+  return {
+    text: [
+      header(`🗂 ${bold("Shop by Category")}`),
+      "",
+      `Pick a category — <b>${tiles.length}</b> to choose from.`,
+      "",
+      "🔥 = has something featured" + (soldOut > 0 ? `   ·   🔴 = ${soldOut} currently sold out` : ""),
+    ].join("\n"),
+    kb,
+  };
+}
+
+/** Products inside one category tile, including any sub-categories under it. */
+export async function categoryProductsView(user: BotUser, categoryId: string, page: number): Promise<View> {
+  const [ids, tiles] = await Promise.all([categoryIdsUnder(categoryId), listCategoryTiles()]);
+  const tile = tiles.find((t) => t.id === categoryId);
+  const result = await listProducts({
+    currency: user.currency as Currency,
+    page,
+    pageSize: 20,
+    userId: user.id,
+    locale: user.locale,
+    categoryIds: ids,
+  });
+  const kb = new InlineKeyboard();
+  for (const p of result.items) {
+    const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
+    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    const sale = p.onSale ? "🔥 " : "";
+    kb.add(sbtn(
+      `${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`,
+      cb("shp", "prod", p.id),
+      p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger",
+      p.iconCustomEmojiId ?? undefined,
+    )).row();
+  }
+  paginationRow(kb, "cat", "open", result.page, result.pages, categoryId);
+  kb.row().text("🗂 All categories", cb("cat", "home"));
+  backToMenuRow(kb);
+  const title = `${tile?.emoji ? `${tile.emoji} ` : "🗂 "}${tile?.name ?? "Category"}`;
+  return {
+    text: result.items.length > 0
+      ? `${header(bold(title))}\n<i>Tap a product → choose quantity → pay from your 💰 wallet.</i>`
+      : `${header(bold(title))}\n\nNothing available here right now — it's being restocked. Tap 🔔 Notify me on a product to hear first.`,
+    kb,
+  };
+}
+
 export async function profileView(user: BotUser): Promise<View> {
   const [wallet, orders, bnpl, ref] = await Promise.all([
     getWallet(user.id),
@@ -557,7 +637,10 @@ export async function profileView(user: BotUser): Promise<View> {
   const done = orders.items.filter((o) => o.status === "COMPLETED").length;
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
-    .add(sbtn("📦 Recent orders", cb("prf", "orders"), "primary"), sbtn("🔄 Replacement", cb("rep", "home"), "primary")).row()
+    // My Orders (the full list), not a truncated "recent" view. Replacement lives
+    // on each order now — you pick the exact unit there — so a separate button
+    // would just be a second, vaguer way in.
+    .add(sbtn("📦 My Orders", cb("ord", "list", 1), "primary")).row()
     .add(sbtn("🔔 My Watchlist", cb("wch", "list"), "primary"), sbtn("🔑 Find my keys", cb("lic", "find"), "primary")).row()
     .add(sbtn("🔐 2FA Code Generator", cb("otp", "tool"), "primary")).row()
     .add(sbtn("🏆 My Tier", cb("prf", "tier"), "success"), sbtn("🎡 Spin & Win", cb("spn", "home"), "success")).row()

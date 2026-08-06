@@ -87,6 +87,14 @@ import {
   clearFlashSale,
   confirmManualPayment,
   createCategoryQuick,
+  listCategoriesAdmin,
+  listProductsForCategorising,
+  productIdsForCategorising,
+  bulkSetCategory,
+  setCategoryEmoji,
+  renameCategory,
+  setCategoryActive,
+  deleteCategory,
   createProductFull,
   getAdminOrder,
   getAdminStats,
@@ -336,6 +344,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_prod: { title: "🛍 <b>Products Management</b>", subtitle: "Add and manage your catalog", rows: [
       [["➕ Add Product", cb("adm", "addp"), "success"]],
       [["📦 All Products", cb("adm", "prods"), "primary"]],
+      [["🗂 Categories &amp; grouping", cb("adm", "cats"), "success"]],
       [["🔔 Waiting Lists", cb("adm", "wait"), "success"]],
       [["🧰 Repair account stock", cb("adm", "fixacc"), "primary"]],
     ] },
@@ -1150,6 +1159,73 @@ async function recoveryView(ctx: Ctx): Promise<void> {
     kb,
     true,
   );
+}
+
+async function categoriesAdminView(ctx: Ctx): Promise<void> {
+  const cats = await listCategoriesAdmin();
+  const kb = new InlineKeyboard().add(sbtn("➕ New category", cb("adm", "catnew"), "success")).row();
+  for (const c of cats) {
+    kb.text(`${c.emoji ?? "🗂"} ${c.name.slice(0, 18)} · ${c.productCount}`, cb("adm", "catpick", c.id)).row();
+    kb.text("😀", cb("adm", "catemoji", c.id))
+      .text("✏️", cb("adm", "catren", c.id))
+      .text(c.isActive ? "👁" : "🙈", cb("adm", "cattgl", c.id))
+      .text("🗑", cb("adm", "catdel", c.id))
+      .row();
+  }
+  kb.text("◀️ Back", cb("adm", "m_prod"));
+  await show(ctx, [
+    "🗂 <b>Categories &amp; grouping</b>",
+    "",
+    "Customers see these as a grid of tiles under <b>🗂 Shop by Category</b>.",
+    "",
+    "Tap a category to <b>bulk-assign products</b> to it. Per row: 😀 tile emoji · ✏️ rename · 👁/🙈 show or hide the tile · 🗑 delete.",
+    "",
+    cats.length === 0 ? "None yet — tap ➕ New category." : `<i>${cats.length} categories. Deleting one moves its products to Uncategorized, never deletes them.</i>`,
+  ].join("\n"), kb, true);
+}
+
+/** Bulk categoriser: tick products, then move them all into the target category. */
+async function categoriseView(ctx: Ctx): Promise<void> {
+  const target = ctx.session.catTarget ?? "";
+  const cats = await listCategoriesAdmin();
+  const cat = cats.find((c) => c.id === target);
+  const filter = ctx.session.catFilter ?? "none";
+  const r = await listProductsForCategorising({ page: ctx.session.catPage ?? 1, pageSize: 12, filter, search: ctx.session.catSearch });
+  const sel = new Set(ctx.session.catSelected ?? []);
+  const kb = new InlineKeyboard();
+
+  kb.text(filter === "none" ? "• Uncategorised •" : "Uncategorised", cb("adm", "catfil", "none"))
+    .text(filter === "all" ? "• All •" : "All", cb("adm", "catfil", "all"))
+    .text(filter === target ? "• In this one •" : "In this one", cb("adm", "catfil", target))
+    .row();
+
+  for (const p of r.items) {
+    const box = sel.has(p.id) ? "☑️" : "⬜";
+    const where = p.categoryName ? ` · ${p.categoryName.slice(0, 10)}` : "";
+    kb.text(`${box} ${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 24)}${where}`, cb("adm", "cattog", p.id)).row();
+  }
+  if (r.pages > 1) {
+    if (r.page > 1) kb.text("◀️", cb("adm", "catpg", String(r.page - 1)));
+    kb.text(`${r.page}/${r.pages}`, cb("mnu", "noop"));
+    if (r.page < r.pages) kb.text("▶️", cb("adm", "catpg", String(r.page + 1)));
+    kb.row();
+  }
+  kb.text("☑️ This page", cb("adm", "catpage")).text(`☑️ All ${r.total}`, cb("adm", "catall"));
+  if (sel.size > 0) kb.text("✖️ Clear", cb("adm", "catclr"));
+  kb.row();
+  kb.text("🔍 Search", cb("adm", "catsearch")).row();
+  if (sel.size > 0) {
+    kb.add(sbtn(`🗂 Move ${sel.size} into “${(cat?.name ?? "").slice(0, 14)}”`, cb("adm", "catmove"), "success")).row();
+  }
+  kb.text("◀️ Categories", cb("adm", "cats"));
+
+  await show(ctx, [
+    `🗂 <b>Add products to “${escapeHtml(cat?.name ?? "?")}”</b>`,
+    `${r.total} product(s) in this view${ctx.session.catSearch ? ` · search: “${escapeHtml(ctx.session.catSearch)}”` : ""}`,
+    sel.size > 0 ? `☑️ <b>${sel.size} selected</b>` : "",
+    "",
+    "Tick products, then tap Move. Ticks survive paging, filtering and searching.",
+  ].filter(Boolean).join("\n"), kb, true);
 }
 
 async function ticketsListView(ctx: Ctx): Promise<void> {
@@ -2026,6 +2102,92 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_variant_cost";
       await askStep(ctx, "💰 Send what <b>you pay</b> per unit in <b>USD</b> (e.g. <code>1.80</code>), or <code>-</code> to clear it:");
       return;
+    case "cats": return categoriesAdminView(ctx);
+    case "catnew":
+      ctx.session.awaiting = "admin_cat_new";
+      await askStep(ctx, "🗂 Send the <b>category name</b> (e.g. <code>Streaming</code>, <code>AI Tools</code>):");
+      return;
+    case "catpick": {
+      // Open the bulk categoriser targeting this category.
+      ctx.session.catTarget = id;
+      ctx.session.catSelected = [];
+      ctx.session.catPage = 1;
+      ctx.session.catFilter = "none";
+      return categoriseView(ctx);
+    }
+    case "catfil": {
+      ctx.session.catFilter = id || "all";
+      ctx.session.catPage = 1;
+      return categoriseView(ctx);
+    }
+    case "catpg":
+      ctx.session.catPage = Math.max(1, Number.parseInt(id || "1", 10) || 1);
+      return categoriseView(ctx);
+    case "cattog": {
+      const cur = new Set(ctx.session.catSelected ?? []);
+      if (cur.has(id)) cur.delete(id); else cur.add(id);
+      ctx.session.catSelected = [...cur].slice(0, 500);
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      return categoriseView(ctx);
+    }
+    case "catpage": {
+      const r = await listProductsForCategorising({ page: ctx.session.catPage ?? 1, pageSize: 12, filter: ctx.session.catFilter, search: ctx.session.catSearch });
+      const ids = r.items.map((i) => i.id);
+      const cur = new Set(ctx.session.catSelected ?? []);
+      const allOn = ids.every((x) => cur.has(x));
+      for (const x of ids) { if (allOn) cur.delete(x); else cur.add(x); }
+      ctx.session.catSelected = [...cur].slice(0, 500);
+      await ctx.answerCallbackQuery({ text: allOn ? "Page cleared" : `Selected ${ids.length}` }).catch(() => undefined);
+      return categoriseView(ctx);
+    }
+    case "catall": {
+      const ids = await productIdsForCategorising(ctx.session.catFilter, ctx.session.catSearch);
+      const cur = ctx.session.catSelected ?? [];
+      ctx.session.catSelected = cur.length >= ids.length ? [] : ids;
+      await ctx.answerCallbackQuery({ text: cur.length >= ids.length ? "Cleared" : `Selected ${ids.length}` }).catch(() => undefined);
+      return categoriseView(ctx);
+    }
+    case "catclr":
+      ctx.session.catSelected = [];
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      return categoriseView(ctx);
+    case "catsearch":
+      ctx.session.awaiting = "admin_cat_search";
+      await askStep(ctx, "🔍 Send part of a product name to filter the list (or <code>-</code> to clear):");
+      return;
+    case "catmove": {
+      const target = ctx.session.catTarget ?? "";
+      const ids = ctx.session.catSelected ?? [];
+      if (!target || ids.length === 0) { await ctx.answerCallbackQuery({ text: "Nothing selected" }).catch(() => undefined); return; }
+      const n = await bulkSetCategory(ids, target);
+      ctx.session.catSelected = [];
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      await ctx.reply(`🗂 Moved <b>${n}</b> product(s) into this category. They now appear under its tile in Shop by Category.`, { parse_mode: "HTML" });
+      return categoriseView(ctx);
+    }
+    case "catemoji":
+      ctx.session.catTarget = id;
+      ctx.session.awaiting = "admin_cat_emoji";
+      await askStep(ctx, "😀 Send ONE emoji to use as this category's tile icon (or <code>-</code> to remove it):");
+      return;
+    case "catren":
+      ctx.session.catTarget = id;
+      ctx.session.awaiting = "admin_cat_rename";
+      await askStep(ctx, "✏️ Send the new <b>category name</b>:");
+      return;
+    case "cattgl": {
+      const cats = await listCategoriesAdmin();
+      const c = cats.find((x) => x.id === id);
+      await setCategoryActive(id, !(c?.isActive ?? true));
+      await ctx.answerCallbackQuery({ text: c?.isActive ? "Hidden from the grid" : "Shown in the grid" }).catch(() => undefined);
+      return categoriesAdminView(ctx);
+    }
+    case "catdel": {
+      const r = await deleteCategory(id);
+      await ctx.answerCallbackQuery().catch(() => undefined);
+      await ctx.reply(`🗑 Category deleted. ${r.moved} product(s) moved to Uncategorized — nothing was lost.`);
+      return categoriesAdminView(ctx);
+    }
     case "tks": return ticketsListView(ctx);
     case "tk": return ticketDetailView(ctx, id);
     case "tkpic": {
@@ -3794,6 +3956,35 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     await ctx.reply("🔓 Two-factor login is OFF. Your passcode is now the only protection on the panel.");
     await twoFaView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_cat_new") {
+    const c = await createCategoryQuick(text.slice(0, 120));
+    await ctx.reply(`✅ Category “${escapeHtml(c.name)}” created. Now pick the products that belong in it.`, { parse_mode: "HTML" });
+    ctx.session.catTarget = c.id;
+    ctx.session.catSelected = [];
+    ctx.session.catPage = 1;
+    ctx.session.catFilter = "none";
+    await categoriseView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_cat_emoji") {
+    const id = ctx.session.catTarget ?? "";
+    await setCategoryEmoji(id, text.trim() === "-" ? null : text.trim());
+    await ctx.reply(text.trim() === "-" ? "😀 Emoji removed." : `😀 Tile emoji set to ${escapeHtml(text.trim().slice(0, 8))}`, { parse_mode: "HTML" });
+    await categoriesAdminView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_cat_rename") {
+    await renameCategory(ctx.session.catTarget ?? "", text);
+    await ctx.reply("✏️ Renamed.");
+    await categoriesAdminView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_cat_search") {
+    ctx.session.catSearch = text.trim() === "-" ? undefined : text.trim().slice(0, 40);
+    ctx.session.catPage = 1;
+    await categoriseView(ctx);
     return true;
   }
   if (awaiting === "admin_margin_floor") {

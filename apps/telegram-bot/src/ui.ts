@@ -34,6 +34,8 @@ export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: st
   const kb = new InlineKeyboard()
     .add(sbtn(L("shop", t(loc, "b_shopnow")), cb("shp", "home", 1), "success", I("shop")))
     .row()
+    .add(sbtn(L("categories", "🗂 Shop by Category"), cb("cat", "home"), "success", I("categories")))
+    .row()
     .add(sbtn(L("orders", t(loc, "b_orders")), cb("ord", "list", 1), "primary", I("orders")), sbtn(L("wallet", t(loc, "b_wallet")), cb("wal", "view"), "primary", I("wallet")))
     .row()
     .add(sbtn("🎯 Today’s Deals", cb("dls", "home"), "danger")).row()

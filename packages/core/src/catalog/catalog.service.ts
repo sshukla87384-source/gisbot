@@ -188,8 +188,11 @@ export async function listProducts(opts: {
   userId?: string;
   channel?: "DIRECT" | "API";
   locale?: string;
+  /** Several categories at once — a parent tile includes its children. */
+  categoryIds?: string[];
 }): Promise<Paged<ProductListItem>> {
   const { categoryId, search, featuredOnly, currency, page, userId, channel = "DIRECT" } = opts;
+  const categoryIds = opts.categoryIds && opts.categoryIds.length > 0 ? opts.categoryIds : null;
   const locale = opts.locale ?? "en";
   const size = opts.pageSize ?? PAGE_SIZE;
   // Only the VIP price override is user-dependent, and overrides are rare. Keying
@@ -205,12 +208,12 @@ export async function listProducts(opts: {
   const userPart = hasOverrides ? (userId ?? "-") : "-";
   // Hash the search term so an attacker cannot grow the keyspace with long strings.
   const searchPart = search ? `s${sha256Hex(search).slice(0, 12)}` : "";
-  const cacheKey = `cat:prods:${categoryId ?? "all"}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}`;
+  const cacheKey = `cat:prods:${categoryIds ? `m${sha256Hex(categoryIds.slice().sort().join(",")).slice(0, 10)}` : (categoryId ?? "all")}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
       deletedAt: null,
-      ...(categoryId ? { categoryId } : {}),
+      ...(categoryIds ? { categoryId: { in: categoryIds } } : categoryId ? { categoryId } : {}),
       ...(featuredOnly ? { isFeatured: true } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
     };
@@ -405,4 +408,112 @@ export async function getProductIdBySlug(slug: string): Promise<string | null> {
     select: { id: true },
   });
   return p?.id ?? null;
+}
+
+// ───────────────────────── Shop by category (brand grid) ─────────────────────────
+
+export interface CategoryTile {
+  id: string;
+  name: string;
+  emoji: string | null;
+  /** Live products in this category (and its children). */
+  count: number;
+  /** Anything actually purchasable right now? Drives the "sold out" styling. */
+  inStock: boolean;
+  /** Featured/hot — shown with a 🔥. */
+  hot: boolean;
+}
+
+/**
+ * Categories as a grid of tiles, for the "Shop by category" screen.
+ *
+ * Counts and stock are resolved in 3 queries for the whole grid rather than one
+ * per tile, and a category with nothing live in it is dropped — an empty tile is
+ * just a dead end for the customer.
+ */
+export async function listCategoryTiles(): Promise<CategoryTile[]> {
+  return cached("cat:tiles", CACHE_TTL, async () => {
+    const cats = await prisma.category.findMany({
+      where: { isActive: true, deletedAt: null },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      select: { id: true, name: true, emoji: true, parentId: true },
+    });
+    if (cats.length === 0) return [];
+
+    // Roll child categories up into their parent, so the grid stays one level.
+    const parentOf = new Map(cats.map((c) => [c.id, c.parentId]));
+    const rootOf = (id: string): string => {
+      let cur = id;
+      for (let i = 0; i < 10; i++) {
+        const p = parentOf.get(cur);
+        if (!p) break;
+        cur = p;
+      }
+      return cur;
+    };
+
+    const products = await prisma.product.findMany({
+      where: { status: "ACTIVE", deletedAt: null },
+      select: {
+        id: true, categoryId: true, isFeatured: true, type: true, supplierId: true,
+        supplierStock: true, reusableSecretEnc: true, reusableStock: true,
+        fulfillmentMode: true, manualStock: true,
+        variants: { where: { isActive: true, deletedAt: null }, select: { id: true } },
+      },
+      take: 5_000,
+    });
+    if (products.length === 0) return [];
+
+    const stock = await stockMapFor(
+      products.map((p) => ({
+        id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock,
+        reusable: p.reusableSecretEnc !== null, reusableStock: p.reusableStock,
+        manual: p.fulfillmentMode === "MANUAL", manualStock: p.manualStock,
+        variantIds: p.variants.map((v) => v.id),
+      })),
+    );
+
+    const agg = new Map<string, { count: number; inStock: boolean; hot: boolean }>();
+    for (const p of products) {
+      if (!p.categoryId) continue;
+      const root = rootOf(p.categoryId);
+      const live = p.variants.some((v) => (stock.get(v.id) ?? 0) > 0);
+      const cur = agg.get(root) ?? { count: 0, inStock: false, hot: false };
+      cur.count++;
+      if (live) cur.inStock = true;
+      if (p.isFeatured) cur.hot = true;
+      agg.set(root, cur);
+    }
+
+    const byId = new Map(cats.map((c) => [c.id, c]));
+    return [...agg.entries()]
+      .map(([id, a]) => {
+        const c = byId.get(id);
+        return c ? { id, name: c.name, emoji: c.emoji, count: a.count, inStock: a.inStock, hot: a.hot } : null;
+      })
+      .filter((x): x is CategoryTile => x !== null)
+      // In-stock first, then the biggest catalogues, then alphabetically.
+      .sort((a, b) => Number(b.inStock) - Number(a.inStock) || b.count - a.count || a.name.localeCompare(b.name));
+  });
+}
+
+/** Every descendant category id, so a parent tile shows its children's products. */
+export async function categoryIdsUnder(categoryId: string): Promise<string[]> {
+  const cats = await prisma.category.findMany({
+    where: { isActive: true, deletedAt: null },
+    select: { id: true, parentId: true },
+  });
+  const kids = new Map<string, string[]>();
+  for (const c of cats) {
+    if (!c.parentId) continue;
+    kids.set(c.parentId, [...(kids.get(c.parentId) ?? []), c.id]);
+  }
+  const out: string[] = [];
+  const walk = (id: string, depth = 0) => {
+    if (depth > 10 || out.includes(id)) return;
+    out.push(id);
+    for (const k of kids.get(id) ?? []) walk(k, depth + 1);
+  };
+  walk(categoryId);
+  return out;
 }

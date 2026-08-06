@@ -33,6 +33,10 @@ export interface SessionData {
     | "admin_pin"
     | "admin_pubprice_usd"
     | "admin_pubprice_inr"
+    | "admin_cat_new"
+    | "admin_cat_emoji"
+    | "admin_cat_rename"
+    | "admin_cat_search"
     | "admin_margin_floor"
     | "admin_qual_threshold"
     | "admin_recov_minutes"
@@ -130,6 +134,12 @@ export interface SessionData {
   supSelected?: string[];
   supPage?: number;
   supFilter?: "all" | "visible" | "hidden";
+  /** Bulk categoriser state. */
+  catTarget?: string;
+  catSelected?: string[];
+  catPage?: number;
+  catFilter?: string;
+  catSearch?: string;
   /** Supplier being configured from its docs. */
   supTarget?: string;
   /** Failed payment-verify attempts, so the paste state cannot stick forever. */
