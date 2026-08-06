@@ -111,7 +111,7 @@ export async function countSupplierProducts(supplierId: string): Promise<{ total
  *   "hide"   — keep the rows but pull them from the shop
  *   "keep"   — leave them listed, unlinked from any supplier
  */
-export async function removeSupplier(id: string, mode: RemoveSupplierMode = "delete"): Promise<{ affected: number }> {
+export async function removeSupplier(id: string, mode: RemoveSupplierMode = "delete"): Promise<{ affected: number; removed: boolean; error?: string }> {
   const now = new Date();
   let affected = 0;
   if (mode === "delete") {
@@ -136,10 +136,32 @@ export async function removeSupplier(id: string, mode: RemoveSupplierMode = "del
     });
     affected = r.count;
   }
-  await prisma.supplier.delete({ where: { id } }).catch(() => undefined);
+  // Products that were ALREADY soft-deleted kept pointing at this supplier,
+  // and nothing here cleared them. Once the supplier row was gone, any
+  // still-unfulfilled order item on one of those products failed forever with
+  // NO_SUPPLIER. Unlink every product of this vendor, deleted or not.
+  await prisma.product.updateMany({
+    where: { supplierId: id },
+    data: { supplierId: null, supplierRef: null },
+  });
+
+  // The delete used to be `.catch(() => undefined)`, so a failure was invisible:
+  // the products were unlinked, the panel said "Vendor removed", and the vendor
+  // was still in the list. Report it instead of lying.
+  let removed = true;
+  let error: string | undefined;
+  try {
+    await prisma.supplier.delete({ where: { id } });
+  } catch (e) {
+    removed = false;
+    error = String(e instanceof Error ? e.message : e).slice(0, 200);
+    // eslint-disable-next-line no-console
+    console.error("supplier delete failed", { supplierId: id, error });
+  }
+
   await prisma.setting.delete({ where: { key: NEWVIS(id) } }).catch(() => undefined);
   await invalidate("cat:*");
-  return { affected };
+  return { affected, removed, error };
 }
 export async function setSupplierMarkup(id: string, pct: number): Promise<void> { await prisma.supplier.update({ where: { id }, data: { markupBp: Math.max(0, Math.round(pct * 100)) } }); }
 
@@ -737,7 +759,13 @@ export async function bulkSupplierProducts(
     ({ count } = await prisma.product.updateMany({ where, data: { status: "PAUSED", supplierStockDrivenPause: false } }));
   } else {
     // Soft delete — orders reference these rows, so they are never destroyed.
-    ({ count } = await prisma.product.updateMany({ where, data: { deletedAt: new Date(), status: "ARCHIVED" } }));
+    // Unlink from the supplier at the same time: a deleted product that still
+    // carries a supplierId becomes an orphan the moment that vendor is removed,
+    // and its pending order items then retry against a supplier that is gone.
+    ({ count } = await prisma.product.updateMany({
+      where,
+      data: { deletedAt: new Date(), status: "ARCHIVED", supplierId: null, supplierRef: null },
+    }));
   }
   await invalidate("cat:*");
   return count;
@@ -756,24 +784,151 @@ export async function setAllSupplierProductsVisible(supplierId: string, visible:
   return r.count;
 }
 
+/* ── Auto-fulfilment failure handling ──────────────────────────────────────────
+ * The retry sweep runs every 60 s. Without a cap it re-attempts a permanently
+ * broken item forever and fires a fresh admin alert on every pass — which is
+ * how one mis-configured product produced an identical "Supplier charged but no
+ * key parsed" message every single minute, all night.
+ */
+const MAX_SUPPLIER_ATTEMPTS = 5;
+
+/** Reasons where the request never left this server, so no money can have moved. */
+const NEVER_SENT = new Set(["NO_SUPPLIER", "NOT_SUPPLIER", "SUPPLIER_INACTIVE", "NO_REF"]);
+
+async function bumpAttempts(orderItemId: string): Promise<number> {
+  try {
+    const r = getRedis();
+    const key = `sup:attempt:${orderItemId}`;
+    const n = await r.incr(key);
+    if (n === 1) await r.expire(key, 86_400);
+    return n;
+  } catch {
+    return 1; // Redis down — behave as before rather than blocking delivery
+  }
+}
+
+async function clearAttempts(orderItemId: string): Promise<void> {
+  try { await getRedis().del(`sup:attempt:${orderItemId}`); } catch { /* ignore */ }
+}
+
+/** True the FIRST time this key is seen within `ttl` — used to alert once, not 1 440 times a day. */
+async function alertOnce(key: string, ttl = 86_400): Promise<boolean> {
+  try {
+    return (await getRedis().set(`sup:alerted:${key}`, "1", "EX", ttl, "NX")) !== null;
+  } catch {
+    return true;
+  }
+}
+
+/** Has this item exhausted its retries? The sweep skips it; a human must act. */
+export async function isSupplierItemGivenUp(orderItemId: string): Promise<boolean> {
+  try {
+    const n = Number(await getRedis().get(`sup:attempt:${orderItemId}`));
+    return Number.isFinite(n) && n >= MAX_SUPPLIER_ATTEMPTS;
+  } catch {
+    return false;
+  }
+}
+
+/** Admin action: clear the circuit breaker so the sweep will try this item again. */
+export async function resetSupplierItemAttempts(orderItemId: string): Promise<void> {
+  await clearAttempts(orderItemId);
+  try { await getRedis().del(`sup:alerted:item:${orderItemId}`); } catch { /* ignore */ }
+}
+
 /** Fulfill an order item by buying from its linked supplier and delivering the key. */
 export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: boolean; reason?: string }> {
   const item = await prisma.orderItem.findUnique({ where: { id: orderItemId }, include: { variant: { include: { product: true } } } });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
+  if (item.fulfilledAt) return { ok: true }; // already delivered — never buy twice
   const { supplierId, supplierRef } = item.variant.product;
   if (!supplierId || !supplierRef) return { ok: false, reason: "NOT_SUPPLIER" };
+
+  // The supplier row this product points at may have been deleted. Detect that
+  // HERE, before any network call, so the failure is reported as the
+  // configuration problem it is instead of as a possible double-charge.
+  const supplier = await prisma.supplier.findUnique({ where: { id: supplierId }, select: { id: true, name: true, active: true } });
+  if (!supplier) {
+    await handleDeadSupplierLink(item, supplierId);
+    return { ok: false, reason: "NO_SUPPLIER" };
+  }
+  if (!supplier.active) return { ok: false, reason: "SUPPLIER_INACTIVE" };
+
   // Stable per-order-line id → the supplier de-dupes retries instead of double-charging.
   const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity, `oi-${orderItemId}`);
   if (r.ok && r.keys.length > 0) {
     await manualFulfillItem(orderItemId, r.keys.join("\n"));
+    await clearAttempts(orderItemId);
     return { ok: true };
   }
-  // A charge may have gone through but we couldn't read the key — never drop it silently.
-  void logWallet("supplier.fulfil", `Supplier charged but no key parsed: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
-  await enqueueAdminAlert(
-    `⚠️ <b>Supplier charged but no key parsed</b>\nProduct: ${item.productNameSnap}\nReason: ${r.reason ?? "unknown"}\nDeliver this order manually. Raw supplier response (send to support to fix mapping):\n<code>${(r.raw ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 400)}</code>`,
-  ).catch(() => undefined);
-  return { ok: false, reason: r.reason ?? "NO_KEY" };
+
+  const reason = r.reason ?? "NO_KEY";
+  const attempts = await bumpAttempts(orderItemId);
+  const sent = !NEVER_SENT.has(reason);
+  const givingUp = attempts >= MAX_SUPPLIER_ATTEMPTS;
+
+  void logWallet("supplier.fulfil", `Supplier fulfilment failed: ${item.productNameSnap}`, {
+    orderItemId, reason, attempts, mayHaveCharged: sent,
+  });
+
+  // One alert per item per day, and only when we are actually giving up or the
+  // money may genuinely have moved. Silence while the retries are still running
+  // is the point: the sweep is expected to recover most of these on its own.
+  if ((givingUp || sent) && (await alertOnce(`item:${orderItemId}`))) {
+    const head = sent
+      ? "⚠️ <b>Supplier may have been charged but no key was parsed</b>"
+      : "⚠️ <b>Auto-fulfilment failed — supplier was NOT contacted, no money moved</b>";
+    await enqueueAdminAlert(
+      [
+        head,
+        `Product: ${item.productNameSnap}`,
+        `Reason: ${reason} (attempt ${attempts}/${MAX_SUPPLIER_ATTEMPTS})`,
+        givingUp ? "Auto-retry has STOPPED. Deliver this order manually." : "Auto-retry continues in the background.",
+        r.raw ? `Raw supplier response (send to support to fix mapping):\n<code>${escapeForHtml(r.raw)}</code>` : "",
+      ].filter(Boolean).join("\n"),
+      [{ text: "📦 Deliver manually", callbackData: `adm:deliver:${item.orderId}`, style: "primary" as const }],
+    ).catch(() => undefined);
+  }
+
+  return { ok: false, reason };
+}
+
+function escapeForHtml(raw: string): string {
+  return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 400);
+}
+
+/**
+ * A product pointing at a supplier row that no longer exists can never be
+ * fulfilled automatically. Pause it so nobody else can buy an item the shop
+ * cannot deliver, and tell the admin once.
+ */
+async function handleDeadSupplierLink(
+  item: { id: string; orderId: string; productNameSnap: string; variant: { productId: string } },
+  supplierId: string,
+): Promise<void> {
+  await bumpAttempts(item.id);
+  try {
+    await prisma.product.updateMany({
+      where: { id: item.variant.productId, status: "ACTIVE" },
+      data: { status: "PAUSED", supplierStockDrivenPause: false },
+    });
+    await invalidate("cat:*");
+  } catch { /* pausing is best-effort */ }
+
+  if (await alertOnce(`deadsupplier:${supplierId}`, 21_600)) {
+    await enqueueAdminAlert(
+      [
+        "🛑 <b>Broken supplier link — auto-fulfilment disabled for this product</b>",
+        `Product: ${item.productNameSnap}`,
+        `It is linked to supplier <code>${supplierId}</code>, which no longer exists.`,
+        "",
+        "No supplier was contacted and <b>no money was charged</b> — the earlier wording was wrong.",
+        "The product has been PAUSED. Re-link it to a live supplier (or set it to manual) and un-pause it.",
+        "Pending orders for it must be delivered by hand.",
+      ].join("\n"),
+      [{ text: "📦 Deliver manually", callbackData: `adm:deliver:${item.orderId}`, style: "primary" as const }],
+    ).catch(() => undefined);
+  }
 }
 
 /** Auto-buy + deliver every supplier-linked, still-unfulfilled item in an order. Returns count delivered. */
@@ -1004,12 +1159,17 @@ export async function retryPendingSupplierFulfilment(maxOrders = 20): Promise<{ 
     select: { id: true },
   });
   let delivered = 0;
+  let skipped = 0;
   for (const it of items) {
+    // Permanently-failing items are dropped from the sweep instead of being
+    // retried (and re-alerted) every 60 s forever. An admin clears the breaker
+    // with resetSupplierItemAttempts once the cause is fixed.
+    if (await isSupplierItemGivenUp(it.id)) { skipped++; continue; }
     const r = await fulfillFromSupplier(it.id).catch(() => ({ ok: false }));
     if (r.ok) delivered++;
   }
   if (delivered > 0) {
-    await logWallet("supplier.retry", `Recovered ${delivered} undelivered supplier item(s)`, { scanned: items.length });
+    await logWallet("supplier.retry", `Recovered ${delivered} undelivered supplier item(s)`, { scanned: items.length, skipped });
   }
   return { scanned: items.length, delivered };
 }
