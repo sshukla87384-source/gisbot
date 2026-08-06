@@ -12,10 +12,19 @@ export function cb(...parts: Array<string | number>): string {
   return data;
 }
 
+/**
+ * `~` is the sub-separator used inside a single argument (e.g. `<supplierId>~hide`),
+ * because `:` is already the top-level field separator.
+ *
+ * It was missing from this character class, so EVERY callback that used it —
+ * the whole supplier bulk picker, the vendor-removal modes, BNPL, review
+ * rejection, product button colours — failed validation and the admin just got
+ * "Menu expired". The buttons rendered fine; nothing behind them could ever run.
+ */
 export const callbackSchema = z
   .string()
   .max(64)
-  .regex(/^[a-z0-9_:\-.]+$/i, "malformed callback data");
+  .regex(/^[a-z0-9_:~\-.]+$/i, "malformed callback data");
 
 export interface ParsedCallback {
   ns: string;

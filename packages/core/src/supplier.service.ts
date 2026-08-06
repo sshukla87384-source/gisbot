@@ -2,7 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { encryptSecret, decryptSecret } from "@gis/shared";
 import { invalidate, getRedis } from "./redis.js";
-import { logWallet } from "./logs.service.js";
+import { logWallet, logEvent } from "./logs.service.js";
 import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
 import { announceProduct, sendBroadcast } from "./broadcast.service.js";
@@ -528,13 +528,21 @@ export async function normalizeSupplierBase(supplierId: string): Promise<{ chang
   };
 }
 
+export interface SyncResult {
+  added: number;
+  updated: number;
+  /** Matched a product the operator had deleted — deliberately left alone. */
+  skipped: number;
+  /** Threw while importing. One bad row must not abort the whole catalogue. */
+  failed: number;
+  busy?: boolean;
+}
+
 /** One sync at a time per supplier — repeated 🔄 taps used to stack probe storms. */
-export async function syncSupplierProducts(
-  supplierId: string,
-): Promise<{ added: number; updated: number; busy?: boolean }> {
+export async function syncSupplierProducts(supplierId: string): Promise<SyncResult> {
   const lockKey = `suplock:${supplierId}`;
   const got = await getRedis().set(lockKey, "1", "EX", 120, "NX").catch(() => "OK");
-  if (got !== "OK") return { added: 0, updated: 0, busy: true };
+  if (got !== "OK") return { added: 0, updated: 0, skipped: 0, failed: 0, busy: true };
   try {
     return await syncSupplierProductsInner(supplierId);
   } finally {
@@ -542,9 +550,9 @@ export async function syncSupplierProducts(
   }
 }
 
-async function syncSupplierProductsInner(supplierId: string): Promise<{ added: number; updated: number }> {
+async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
-  if (!s) return { added: 0, updated: 0 };
+  if (!s) return { added: 0, updated: 0, skipped: 0, failed: 0 };
   const prods = await fetchSupplierProducts(s);
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
   const rate = usdtRate("INR");
@@ -553,17 +561,26 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
   // Auto-sync imports everything, but new items are HIDDEN unless the operator
   // opted in — see getSupplierNewVisible.
   const goLive = await getSupplierNewVisible(supplierId);
-  let added = 0, updated = 0;
+  let added = 0, updated = 0, skipped = 0, failed = 0;
   const newIds: string[] = [];
   for (const p of prods) {
+    try {
     const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
     const inrMinor = Math.round(priceMinor * rate);
     const inStock = p.stock === null || p.stock > 0; // null = API doesn't report stock → treat as available
     const refKey = p.variantRef ? `${p.ref}|${p.variantRef}` : p.ref;
+    // Soft-deleted rows are included on purpose: finding one tells us the operator
+    // already rejected this product, so we skip it instead of re-creating it.
     const existing = await prisma.product.findFirst({
       where: { supplierId: s.id, OR: [{ supplierRef: refKey }, { supplierRef: p.ref }] },
       include: { variants: true },
     });
+    if (existing?.deletedAt) {
+      // The operator deleted this one. Leave it dead — do not touch its price,
+      // its status, or resurrect it. "Restore" in the picker is the way back.
+      skipped++;
+      continue;
+    }
     if (existing) {
       // Stock drives visibility ONLY for products the operator has already
       // published. A hidden product must stay hidden — sync bringing it back into
@@ -592,19 +609,46 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
       }
       updated++;
     } else {
-      if (!inStock) continue; // don't import out-of-stock products
-      const slug = `sup-${s.id.slice(0, 6)}-${p.ref}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 60);
-      const created = await prisma.product.create({
-        data: {
-          slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
-          activationGuide: p.note.slice(0, 2000) || null,
-          type: "MANUAL_SERVICE", status: goLive ? "ACTIVE" : "PAUSED", fulfillmentMode: "MANUAL", categoryId: cat.id,
-          supplierId: s.id, supplierRef: p.variantRef ? `${p.ref}|${p.variantRef}` : p.ref, supplierStock: p.stock,
-          variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
-        },
-      });
-      newIds.push(created.id);
+      // Out-of-stock products USED TO be dropped here, which is why the review
+      // list never matched what the vendor actually offers. Import everything —
+      // visibility is the operator's decision, not the stock level's.
+      const base = `sup-${s.id.slice(0, 6)}-${p.ref}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 52);
+      // A new product is only ACTIVE if the operator opted in AND it is sellable.
+      const status = goLive && inStock ? "ACTIVE" : "PAUSED";
+      // stock-driven ONLY when the operator wanted it live and stock is what
+      // stopped it. Anything else is a sticky hide that sync must not override.
+      const stockDriven = goLive && !inStock;
+
+      let created: { id: string } | null = null;
+      for (let attempt = 0; attempt < 5 && !created; attempt++) {
+        const slug = (attempt === 0 ? base : `${base}-${attempt}`).slice(0, 60);
+        try {
+          created = await prisma.product.create({
+            data: {
+              slug, name: p.name.slice(0, 200), description: p.description.slice(0, 4000) || null,
+              activationGuide: p.note.slice(0, 2000) || null,
+              type: "MANUAL_SERVICE", status, fulfillmentMode: "MANUAL", categoryId: cat.id,
+              supplierStockDrivenPause: stockDriven,
+              supplierId: s.id, supplierRef: refKey, supplierStock: p.stock,
+              variants: { create: { name: "Standard", sku: `${slug}-std`.slice(0, 64), sortOrder: 0, prices: { create: [{ tierId: retail.id, currency: "USD", amountMinor: priceMinor }, { tierId: retail.id, currency: "INR", amountMinor: inrMinor }] } } },
+            },
+            select: { id: true },
+          });
+        } catch (e) {
+          // Two supplier refs can normalise to the same slug once truncated.
+          // Only a uniqueness clash is worth retrying — rethrow anything else.
+          if ((e as { code?: string })?.code !== "P2002") throw e;
+        }
+      }
+      if (!created) throw new Error(`could not allocate a unique slug for ${p.ref}`);
+      // Only ACTIVE products are worth announcing.
+      if (status === "ACTIVE") newIds.push(created.id);
       added++;
+    }
+    } catch (e) {
+      // One malformed product must never abort the rest of the catalogue.
+      failed++;
+      await logEvent("supplier", "warn", "supplier.sync", `Skipped ${p.ref}: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`, { supplierId }).catch(() => undefined);
     }
   }
   await invalidate("cat:*");
@@ -626,7 +670,7 @@ async function syncSupplierProductsInner(supplierId: string): Promise<{ added: n
       }).catch(() => undefined);
     }
   }
-  return { added, updated };
+  return { added, updated, skipped, failed };
 }
 
 export interface SupplierProductRow {
@@ -644,17 +688,33 @@ export interface SupplierProductRow {
  * 30 with no paging, so everything beyond that was unreachable — you could not hide
  * a product you could not see.
  */
-export async function listSupplierProducts(
-  supplierId: string,
-  opts: { page?: number; pageSize?: number; search?: string; only?: "all" | "visible" | "hidden" } = {},
-): Promise<{ items: SupplierProductRow[]; page: number; pages: number; total: number; visibleTotal: number }> {
-  const pageSize = Math.min(50, Math.max(5, opts.pageSize ?? 12));
-  const only = opts.only ?? "all";
-  const where = {
+export type SupplierFilter = "all" | "visible" | "hidden" | "deleted";
+
+/**
+ * Prisma `where` for one filter tab.
+ *
+ * "all" deliberately means "all live rows" — deleted products only appear under
+ * their own tab, so a delete visibly removes something from the working list
+ * while still being recoverable.
+ */
+export function supplierFilterWhere(supplierId: string, only: SupplierFilter) {
+  if (only === "deleted") return { supplierId, deletedAt: { not: null } };
+  return {
     supplierId,
     deletedAt: null,
     ...(only === "visible" ? { status: "ACTIVE" as const } : {}),
     ...(only === "hidden" ? { status: { not: "ACTIVE" as const } } : {}),
+  };
+}
+
+export async function listSupplierProducts(
+  supplierId: string,
+  opts: { page?: number; pageSize?: number; search?: string; only?: SupplierFilter } = {},
+): Promise<{ items: SupplierProductRow[]; page: number; pages: number; total: number; visibleTotal: number }> {
+  const pageSize = Math.min(50, Math.max(5, opts.pageSize ?? 12));
+  const only = opts.only ?? "all";
+  const where = {
+    ...supplierFilterWhere(supplierId, only),
     ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
   };
   const [total, visibleTotal] = await Promise.all([
@@ -688,7 +748,7 @@ export async function listSupplierProducts(
 /** Ids on one page — so "select all on page" doesn't need the client to know them. */
 export async function supplierProductIdsOnPage(
   supplierId: string,
-  opts: { page?: number; pageSize?: number; only?: "all" | "visible" | "hidden" } = {},
+  opts: { page?: number; pageSize?: number; only?: SupplierFilter } = {},
 ): Promise<string[]> {
   const r = await listSupplierProducts(supplierId, opts);
   return r.items.map((i) => i.id);
@@ -697,21 +757,28 @@ export async function supplierProductIdsOnPage(
 /** Every id matching the current filter — for "select all N". */
 export async function supplierProductIdsAll(
   supplierId: string,
-  only: "all" | "visible" | "hidden" = "all",
+  only: SupplierFilter = "all",
   cap = 500,
 ): Promise<string[]> {
   const rows = await prisma.product.findMany({
-    where: {
-      supplierId,
-      deletedAt: null,
-      ...(only === "visible" ? { status: "ACTIVE" as const } : {}),
-      ...(only === "hidden" ? { status: { not: "ACTIVE" as const } } : {}),
-    },
+    where: supplierFilterWhere(supplierId, only),
     orderBy: { name: "asc" },
     take: cap,
     select: { id: true },
   });
   return rows.map((r) => r.id);
+}
+
+/** Counts for the picker header, in one round trip. */
+export async function countSupplierProductStates(
+  supplierId: string,
+): Promise<{ shown: number; hidden: number; deleted: number }> {
+  const [shown, hidden, deleted] = await Promise.all([
+    prisma.product.count({ where: supplierFilterWhere(supplierId, "visible") }),
+    prisma.product.count({ where: supplierFilterWhere(supplierId, "hidden") }),
+    prisma.product.count({ where: supplierFilterWhere(supplierId, "deleted") }),
+  ]);
+  return { shown, hidden, deleted };
 }
 
 /**
@@ -720,14 +787,17 @@ export async function supplierProductIdsAll(
  * The supplierId in the where clause is not decoration: it stops a stale or
  * tampered selection from touching another vendor's products.
  */
+export type SupplierBulkAction = "show" | "hide" | "delete" | "restore";
+
 export async function bulkSupplierProducts(
   supplierId: string,
   productIds: string[],
-  action: "show" | "hide" | "delete",
+  action: SupplierBulkAction,
 ): Promise<number> {
   const ids = [...new Set(productIds)].slice(0, 500);
   if (ids.length === 0) return 0;
-  const where = { id: { in: ids }, supplierId, deletedAt: null };
+  // "restore" is the only action that operates on already-deleted rows.
+  const where = { id: { in: ids }, supplierId, ...(action === "restore" ? { deletedAt: { not: null } } : { deletedAt: null }) };
   let count = 0;
   if (action === "show") {
     ({ count } = await prisma.product.updateMany({ where, data: { status: "ACTIVE", supplierStockDrivenPause: false } }));
@@ -735,10 +805,39 @@ export async function bulkSupplierProducts(
     // supplierStockDrivenPause false marks this as a MANUAL hide, so the next sync
     // will not helpfully put it back in the shop.
     ({ count } = await prisma.product.updateMany({ where, data: { status: "PAUSED", supplierStockDrivenPause: false } }));
+  } else if (action === "restore") {
+    // Comes back HIDDEN, never straight to the shelf — restoring is a decision to
+    // reconsider a product, not a decision to sell it.
+    ({ count } = await prisma.product.updateMany({ where, data: { deletedAt: null, status: "PAUSED", supplierStockDrivenPause: false } }));
   } else {
     // Soft delete — orders reference these rows, so they are never destroyed.
-    ({ count } = await prisma.product.updateMany({ where, data: { deletedAt: new Date(), status: "ARCHIVED" } }));
+    // supplierId is deliberately KEPT: the next sync matches on it and skips the
+    // row, which is what stops a deleted product reappearing on every sync.
+    ({ count } = await prisma.product.updateMany({ where, data: { deletedAt: new Date(), status: "ARCHIVED", supplierStockDrivenPause: false } }));
   }
+  await invalidate("cat:*");
+  return count;
+}
+
+/**
+ * Whole-catalogue action, with no 500-id ceiling.
+ *
+ * The picker's "every product" buttons used to collect ids first and then bulk
+ * them, which silently stopped at 500 while reporting success — on a 2,000-SKU
+ * vendor three quarters of the catalogue quietly stayed as it was.
+ */
+export async function bulkAllSupplierProducts(
+  supplierId: string,
+  action: SupplierBulkAction,
+  only: SupplierFilter = "all",
+): Promise<number> {
+  const where = supplierFilterWhere(supplierId, action === "restore" ? "deleted" : only);
+  const data =
+    action === "show" ? { status: "ACTIVE" as const, supplierStockDrivenPause: false }
+    : action === "hide" ? { status: "PAUSED" as const, supplierStockDrivenPause: false }
+    : action === "restore" ? { deletedAt: null, status: "PAUSED" as const, supplierStockDrivenPause: false }
+    : { deletedAt: new Date(), status: "ARCHIVED" as const, supplierStockDrivenPause: false };
+  const { count } = await prisma.product.updateMany({ where, data });
   await invalidate("cat:*");
   return count;
 }
@@ -1009,7 +1108,9 @@ export async function retryPendingSupplierFulfilment(maxOrders = 20): Promise<{ 
     if (r.ok) delivered++;
   }
   if (delivered > 0) {
-    await logWallet("supplier.retry", `Recovered ${delivered} undelivered supplier item(s)`, { scanned: items.length });
+    // Was logWallet, which writes to the "wallet" channel — supplier events were
+    // landing in a tab the admin never checks for them.
+    await logEvent("supplier", "warn", "supplier.retry", `Recovered ${delivered} undelivered supplier item(s)`, { scanned: items.length });
   }
   return { scanned: items.length, delivered };
 }
