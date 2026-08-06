@@ -765,6 +765,8 @@ export function createBot(): Bot<Ctx> {
           ? "⚠️ That transaction’s amount doesn’t match your order. "
           : r.reason === "ALREADY_USED"
             ? "⚠️ That transaction was already used. "
+            : r.reason === "TOO_OLD"
+              ? "⚠️ That payment is older than this order, so it can't be the payment for it. "
             : r.reason === "WRONG_USER"
               ? "⚠️ That order doesn’t belong to your account. "
               : "";

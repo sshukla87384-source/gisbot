@@ -1841,6 +1841,19 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       if (!supId) return;
       const r = await removeSupplier(supId, m);
       await ctx.answerCallbackQuery().catch(() => undefined);
+      if (!r.removed) {
+        await ctx.reply(
+          [
+            "⚠️ <b>Vendor could NOT be removed.</b>",
+            `Their ${r.affected} product(s) were unlinked, but the vendor row is still there.`,
+            r.error ? `<code>${escapeHtml(r.error)}</code>` : "",
+            "",
+            "Nothing was lost — try again, and send this message to support if it repeats.",
+          ].filter(Boolean).join("\n"),
+          { parse_mode: "HTML" },
+        );
+        return suppliersView(ctx);
+      }
       await ctx.reply(
         m === "delete" ? `🗑 Vendor removed and ${r.affected} product(s) taken out of the shop.`
         : m === "hide" ? `🗑 Vendor removed. ${r.affected} product(s) hidden and unlinked.`
@@ -3161,7 +3174,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       const msg: Record<string, string> = {
         NOT_FOUND: "❌ That transaction ID wasn't found in your Binance Pay history.",
         AMOUNT_MISMATCH: "❌ The amount for that transaction doesn't match this order.",
-        ALREADY_USED: "❌ That transaction was already used for another order.",
+        ALREADY_USED: "❌ That transaction was already used — for another order or a wallet top-up.",
+        TOO_OLD: "❌ That payment was made BEFORE this order existed, so it cannot be its payment. Check you copied the right Order ID.",
         NO_API: "⚠️ Binance API key not set — can't auto-verify. Confirm manually if you've checked it.",
         ORDER_NOT_PENDING: "❌ This order is no longer awaiting payment.",
       };
