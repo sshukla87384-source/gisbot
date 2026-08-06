@@ -133,7 +133,13 @@ export interface SessionData {
   /** Bulk supplier-product picker state. */
   supSelected?: string[];
   supPage?: number;
-  supFilter?: "all" | "visible" | "hidden";
+  supFilter?: "all" | "visible" | "hidden" | "deleted";
+  /** "quick" = tapping a row publishes/hides it instantly; "select" = tapping ticks it. */
+  supMode?: "select" | "quick";
+  /** One-shot banner shown at the top of the picker after an action. */
+  supFlash?: string;
+  /** Pending bulk action awaiting confirmation, e.g. "delete". */
+  supConfirm?: string;
   /** Bulk categoriser state. */
   catTarget?: string;
   catSelected?: string[];

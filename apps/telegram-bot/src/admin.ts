@@ -131,7 +131,9 @@ import {
   supplierProductIdsOnPage,
   supplierProductIdsAll,
   bulkSupplierProducts,
+  bulkAllSupplierProducts,
   countSupplierProducts,
+  countSupplierProductStates,
   getSupplierNewVisible,
   setSupplierNewVisible,
   listRecentUsers,
@@ -214,6 +216,7 @@ import {
   getAutoPromo,
   setAutoPromo,
 } from "@gis/core";
+import type { SyncResult } from "@gis/core";
 import { cb } from "@gis/shared";
 import { InlineKeyboard, InputFile } from "grammy";
 import QRCode from "qrcode";
@@ -1320,24 +1323,80 @@ async function replacementDetailView(ctx: Ctx, id: string): Promise<void> {
  * selection, so a vendor's 200th product was simply unreachable — you could not
  * hide what you could not see.
  */
+const SUP_PAGE_SIZE = 12;
+
+/** The rows currently on screen, so an index in callback data can be resolved back to an id. */
+async function supplierPageIds(ctx: Ctx, supplierId: string): Promise<string[]> {
+  return supplierProductIdsOnPage(supplierId, {
+    page: ctx.session.supPage ?? 1,
+    pageSize: SUP_PAGE_SIZE,
+    only: ctx.session.supFilter ?? "all",
+  });
+}
+
 async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void> {
-  const only = (ctx.session.supFilter ?? "all") as "all" | "visible" | "hidden";
+  const only = ctx.session.supFilter ?? "all";
+  const quick = ctx.session.supMode === "quick";
   const page = ctx.session.supPage ?? 1;
   const sel = new Set(ctx.session.supSelected ?? []);
-  const r = await listSupplierProducts(supplierId, { page, pageSize: 12, only });
+  const [r, counts, newVis] = await Promise.all([
+    listSupplierProducts(supplierId, { page, pageSize: SUP_PAGE_SIZE, only }),
+    countSupplierProductStates(supplierId),
+    getSupplierNewVisible(supplierId),
+  ]);
+  const flash = ctx.session.supFlash;
+  ctx.session.supFlash = undefined;
+  const confirm = ctx.session.supConfirm;
+  ctx.session.supConfirm = undefined;
   const kb = new InlineKeyboard();
 
-  // Filter row
-  const f = (label: string, key: "all" | "visible" | "hidden") =>
+  // Nothing imported yet — offer the one button that actually helps.
+  if (counts.shown + counts.hidden + counts.deleted === 0) {
+    kb.add(sbtn("🔄 Sync catalog now", cb("adm", "supsync", supplierId), "success")).row();
+    kb.text("◀️ Back", cb("adm", "sups"));
+    await show(ctx, [
+      "📂 <b>Supplier products</b>",
+      "",
+      "Nothing imported yet. Tap 🔄 <b>Sync catalog</b> to pull this vendor's products in.",
+      "",
+      "They arrive <b>hidden</b> — nothing reaches your shop until you publish it here.",
+    ].join("\n"), kb, true);
+    return;
+  }
+
+  // ── Confirmation gate for the irreversible-looking action ──
+  if (confirm === "delete" && sel.size > 0) {
+    kb.add(sbtn(`🗑 Yes, delete ${sel.size}`, cb("adm", "spdo", `${supplierId}~delete`), "danger")).row();
+    kb.text("✖️ Cancel", cb("adm", "supprods", supplierId));
+    await show(ctx, [
+      `🗑 <b>Delete ${sel.size} product(s)?</b>`,
+      "",
+      "They come out of the shop and stop being re-imported by future syncs.",
+      "",
+      "Existing orders keep their full history, and you can bring them back from the 🗑 <b>Deleted</b> tab.",
+    ].join("\n"), kb, true);
+    return;
+  }
+
+  // ── Filter tabs ──
+  const f = (label: string, key: "all" | "visible" | "hidden" | "deleted") =>
     kb.text(only === key ? `• ${label} •` : label, cb("adm", "spfil", `${supplierId}~${key}`));
-  f("All", "all"); f("👁 Shown", "visible"); f("🙈 Hidden", "hidden");
+  f("All", "all"); f(`👁 ${counts.shown}`, "visible"); f(`🙈 ${counts.hidden}`, "hidden");
+  if (counts.deleted > 0) f(`🗑 ${counts.deleted}`, "deleted");
   kb.row();
 
-  for (const p of r.items) {
-    const box = sel.has(p.id) ? "☑️" : "⬜";
-    const eye = p.visible ? "👁" : "🙈";
-    kb.text(`${box} ${eye} ${p.name.slice(0, 26)} · $${(p.priceMinor / 100).toFixed(2)}`, cb("adm", "sptog", `${supplierId}~${p.id}`)).row();
-  }
+  // ── Mode switch: one-by-one vs bulk ──
+  kb.add(sbtn(quick ? "⚡ Tapping = publish/hide instantly" : "☑️ Tapping = tick for bulk", cb("adm", "spmode", supplierId), quick ? "success" : "primary")).row();
+
+  // ── Product rows. Callback carries the ROW INDEX, not the id: two cuids plus
+  // the route overflowed Telegram's 64-byte callback_data limit, and cb() throws
+  // on overflow, which would take the whole screen down rather than one button.
+  const deletedTab = only === "deleted";
+  r.items.forEach((p, i) => {
+    const mark = deletedTab ? "🗑" : quick ? (p.visible ? "👁" : "🙈") : `${sel.has(p.id) ? "☑️" : "⬜"} ${p.visible ? "👁" : "🙈"}`;
+    const stock = p.stock === null ? "" : p.stock <= 0 ? " · ⛔️" : ` · ${p.stock}`;
+    kb.text(`${mark} ${p.name.slice(0, 24)} · $${(p.priceMinor / 100).toFixed(2)}${stock}`, cb("adm", "sptog", `${supplierId}~${i}`)).row();
+  });
 
   if (r.pages > 1) {
     if (r.page > 1) kb.text("◀️", cb("adm", "sppg", `${supplierId}~${r.page - 1}`));
@@ -1346,38 +1405,54 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     kb.row();
   }
 
-  // Selection helpers
-  kb.text("☑️ This page", cb("adm", "sppage", supplierId)).text(`☑️ All ${r.total}`, cb("adm", "spallsel", supplierId));
-  if (sel.size > 0) kb.text("✖️ Clear", cb("adm", "spclr", supplierId));
-  kb.row();
+  if (!quick) {
+    kb.text("☑️ This page", cb("adm", "sppage", supplierId)).text(`☑️ All ${r.total}`, cb("adm", "spallsel", supplierId));
+    if (sel.size > 0) kb.text("✖️ Clear", cb("adm", "spclr", supplierId));
+    kb.row();
 
-  if (sel.size > 0) {
-    kb.add(
-      sbtn(`👁 Show ${sel.size}`, cb("adm", "spdo", `${supplierId}~show`), "success"),
-      sbtn(`🙈 Hide ${sel.size}`, cb("adm", "spdo", `${supplierId}~hide`), "primary"),
-    ).row();
-    kb.add(sbtn(`🗑 Delete ${sel.size}`, cb("adm", "spdo", `${supplierId}~delete`), "danger")).row();
+    if (sel.size > 0) {
+      if (deletedTab) {
+        kb.add(sbtn(`♻️ Restore ${sel.size}`, cb("adm", "spdo", `${supplierId}~restore`), "success")).row();
+      } else {
+        kb.add(
+          sbtn(`👁 Publish ${sel.size}`, cb("adm", "spdo", `${supplierId}~show`), "success"),
+          sbtn(`🙈 Hide ${sel.size}`, cb("adm", "spdo", `${supplierId}~hide`), "primary"),
+        ).row();
+        // Routed through spask, not spdo — deleting on a single tap was too easy.
+        kb.add(sbtn(`🗑 Delete ${sel.size}`, cb("adm", "spask", `${supplierId}~delete`), "danger")).row();
+      }
+    }
   }
 
-  // Whole-catalogue shortcuts
-  kb.add(sbtn("👁 Show every product", cb("adm", "spall", `${supplierId}~1`), "primary"), sbtn("🙈 Hide every product", cb("adm", "spall", `${supplierId}~0`), "danger")).row();
-  const newVis = await getSupplierNewVisible(supplierId);
+  // ── Whole-catalogue shortcuts (uncapped) ──
+  if (deletedTab) {
+    kb.add(sbtn(`♻️ Restore all ${counts.deleted}`, cb("adm", "spall", `${supplierId}~restore`), "success")).row();
+  } else {
+    kb.add(
+      sbtn("👁 Publish every product", cb("adm", "spall", `${supplierId}~show`), "primary"),
+      sbtn("🙈 Hide every product", cb("adm", "spall", `${supplierId}~hide`), "danger"),
+    ).row();
+  }
   kb.add(sbtn(`🆕 New products arrive: ${newVis ? "👁 visible" : "🙈 hidden"}`, cb("adm", "spnewvis", supplierId), newVis ? "success" : "primary")).row();
-  kb.text("◀️ Back", cb("adm", "sups"));
+  kb.text("🔄 Sync", cb("adm", "supsync", supplierId)).text("◀️ Back", cb("adm", "sups"));
 
-  await show(ctx, r.total === 0
-    ? "No products synced yet — tap 🔄 Sync on the supplier first."
-    : [
-        `📂 <b>Supplier products</b>`,
-        `👁 ${r.visibleTotal} shown of ${r.total} total${only !== "all" ? ` · filtered: ${only}` : ""}`,
-        sel.size > 0 ? `☑️ <b>${sel.size} selected</b>` : "",
-        "",
-        "Tap products to tick them, then choose an action. Ticks survive paging and filtering.",
-        "",
-        newVis
-          ? "🆕 New synced products go <b>straight into the shop</b>."
-          : "🆕 New synced products arrive <b>hidden</b>, so a big vendor can't flood your shop. Sync still imports everything.",
-      ].filter(Boolean).join("\n"), kb, true);
+  await show(ctx, [
+    flash ? `${flash}\n` : "",
+    "📂 <b>Supplier products</b>",
+    `👁 ${counts.shown} in shop · 🙈 ${counts.hidden} hidden${counts.deleted > 0 ? ` · 🗑 ${counts.deleted} deleted` : ""}`,
+    only !== "all" ? `<i>Showing: ${only}</i>` : "",
+    sel.size > 0 && !quick ? `☑️ <b>${sel.size} selected</b>` : "",
+    "",
+    deletedTab
+      ? "These are out of the shop and will not be re-imported by future syncs. Restore brings them back <b>hidden</b>."
+      : quick
+        ? "⚡ <b>One-by-one:</b> tap any product to publish or hide it immediately."
+        : "☑️ <b>Bulk:</b> tap products to tick them, then choose an action. Ticks survive paging and filtering.",
+    "",
+    newVis
+      ? "🆕 New synced products go <b>straight into the shop</b>."
+      : "🆕 New synced products arrive <b>hidden</b>, so a big vendor can't flood your shop. Sync still imports everything.",
+  ].filter(Boolean).join("\n"), kb, true);
 }
 
 function saleTargetKb(): InlineKeyboard {
@@ -1686,13 +1761,25 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     case "supprods":
       // A fresh open starts with a clean selection.
-      if (ctx.session.supTarget !== id) { ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "all"; }
+      if (ctx.session.supTarget !== id) {
+        ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "all"; ctx.session.supMode = "select";
+      }
       ctx.session.supTarget = id;
       return supplierProductsView(ctx, id);
+    case "spmode": {
+      ctx.session.supMode = ctx.session.supMode === "quick" ? "select" : "quick";
+      if (ctx.session.supMode === "quick") ctx.session.supSelected = [];
+      return supplierProductsView(ctx, id);
+    }
     case "spfil": {
       const [supId, key] = id.split("~");
-      if (supId) { ctx.session.supFilter = (key === "visible" || key === "hidden" ? key : "all"); ctx.session.supPage = 1; await supplierProductsView(ctx, supId); }
-      return;
+      if (!supId) return;
+      ctx.session.supFilter = key === "visible" || key === "hidden" || key === "deleted" ? key : "all";
+      ctx.session.supPage = 1;
+      // Selections do not carry across the deleted boundary — the actions
+      // available there are different, and a stale tick would be invisible.
+      ctx.session.supSelected = [];
+      return supplierProductsView(ctx, supId);
     }
     case "sppg": {
       const [supId, pg] = id.split("~");
@@ -1701,82 +1788,145 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "sppage": {
       // Tick everything on the current page, keeping earlier ticks.
-      const ids = await supplierProductIdsOnPage(id, { page: ctx.session.supPage ?? 1, pageSize: 12, only: (ctx.session.supFilter ?? "all") as "all" | "visible" | "hidden" });
+      const ids = await supplierPageIds(ctx, id);
       const cur = new Set(ctx.session.supSelected ?? []);
-      const allOn = ids.every((x) => cur.has(x));
+      const allOn = ids.length > 0 && ids.every((x) => cur.has(x));
       for (const x of ids) { if (allOn) cur.delete(x); else cur.add(x); }
       ctx.session.supSelected = [...cur].slice(0, 500);
-      await ctx.answerCallbackQuery({ text: allOn ? "Page cleared" : `Page selected (${ids.length})` }).catch(() => undefined);
+      ctx.session.supFlash = allOn ? "✖️ Page cleared." : `☑️ Selected ${ids.length} on this page.`;
       return supplierProductsView(ctx, id);
     }
     case "spallsel": {
-      const ids = await supplierProductIdsAll(id, (ctx.session.supFilter ?? "all") as "all" | "visible" | "hidden");
-      const cur = ctx.session.supSelected ?? [];
-      ctx.session.supSelected = cur.length >= ids.length ? [] : ids;
-      await ctx.answerCallbackQuery({ text: cur.length >= ids.length ? "Cleared" : `Selected ${ids.length}` }).catch(() => undefined);
+      const ids = await supplierProductIdsAll(id, ctx.session.supFilter ?? "all");
+      const cur = new Set(ctx.session.supSelected ?? []);
+      // Compare membership, not counts: ticks from another filter made the old
+      // length check clear the selection when it should have extended it.
+      const allOn = ids.length > 0 && ids.every((x) => cur.has(x));
+      ctx.session.supSelected = allOn ? [] : ids;
+      ctx.session.supFlash = allOn
+        ? "✖️ Selection cleared."
+        : `☑️ Selected ${ids.length}.${ids.length >= 500 ? " (capped at 500 — use the “every product” buttons for the whole catalogue.)" : ""}`;
       return supplierProductsView(ctx, id);
     }
     case "spclr":
       ctx.session.supSelected = [];
-      await ctx.answerCallbackQuery({ text: "Selection cleared" }).catch(() => undefined);
+      ctx.session.supFlash = "✖️ Selection cleared.";
       return supplierProductsView(ctx, id);
+    case "spask": {
+      // Stage a destructive action so the view can render a confirmation.
+      const [supId, act] = id.split("~");
+      if (!supId) return;
+      if ((ctx.session.supSelected ?? []).length === 0) {
+        ctx.session.supFlash = "⚠️ Nothing selected.";
+        return supplierProductsView(ctx, supId);
+      }
+      ctx.session.supConfirm = act;
+      return supplierProductsView(ctx, supId);
+    }
     case "spdo": {
       const [supId, action] = id.split("~");
-      const act = action === "show" || action === "hide" || action === "delete" ? action : null;
+      const act = action === "show" || action === "hide" || action === "delete" || action === "restore" ? action : null;
       if (!supId || !act) return;
       const ids = ctx.session.supSelected ?? [];
-      if (ids.length === 0) { await ctx.answerCallbackQuery({ text: "Nothing selected" }).catch(() => undefined); return; }
+      if (ids.length === 0) {
+        ctx.session.supFlash = "⚠️ Nothing selected.";
+        return supplierProductsView(ctx, supId);
+      }
       const n = await bulkSupplierProducts(supId, ids, act);
       ctx.session.supSelected = [];
-      await ctx.answerCallbackQuery().catch(() => undefined);
-      await ctx.reply(
-        act === "show" ? `👁 ${n} product(s) are now in the shop.`
-        : act === "hide" ? `🙈 ${n} product(s) hidden. Sync won't put them back.`
-        : `🗑 ${n} product(s) removed from the shop. Existing orders keep their history.`,
-      );
+      ctx.session.supFlash =
+        act === "show" ? `👁 <b>${n} product(s) published</b> — live in your shop now.`
+        : act === "hide" ? `🙈 <b>${n} product(s) hidden.</b> Sync won't put them back.`
+        : act === "restore" ? `♻️ <b>${n} product(s) restored</b> — hidden, ready to publish.`
+        : `🗑 <b>${n} product(s) deleted.</b> Orders keep their history; restore from the 🗑 tab.`;
       return supplierProductsView(ctx, supId);
     }
     case "spnewvis": {
       const next = !(await getSupplierNewVisible(id));
       await setSupplierNewVisible(id, next);
-      await ctx.answerCallbackQuery({ text: next ? "New products will be visible" : "New products will arrive hidden" }).catch(() => undefined);
+      ctx.session.supFlash = next
+        ? "🆕 New synced products will now go <b>straight into the shop</b>."
+        : "🆕 New synced products will now arrive <b>hidden</b>.";
       return supplierProductsView(ctx, id);
     }
     case "spall": {
-      const [supId, on] = id.split("~");
-      if (supId) {
-        const ids = await supplierProductIdsAll(supId, "all");
-        const n = await bulkSupplierProducts(supId, ids, on === "1" ? "show" : "hide");
-        await ctx.reply(`${on === "1" ? "👁 Showing" : "🙈 Hidden"} ${n} product(s).`);
-        await supplierProductsView(ctx, supId);
-      }
-      return;
+      const [supId, act] = id.split("~");
+      if (!supId) return;
+      const a = act === "show" || act === "hide" || act === "restore" ? act : null;
+      if (!a) return;
+      const n = await bulkAllSupplierProducts(supId, a);
+      ctx.session.supSelected = [];
+      ctx.session.supFlash =
+        a === "show" ? `👁 <b>${n} product(s) published.</b>`
+        : a === "hide" ? `🙈 <b>${n} product(s) hidden.</b>`
+        : `♻️ <b>${n} product(s) restored</b> — hidden, ready to publish.`;
+      return supplierProductsView(ctx, supId);
     }
     case "sptog": {
-      const [supId, prodId] = id.split("~");
-      if (supId && prodId) {
-        // Ticks a checkbox now — it does not flip visibility on its own.
-        const cur = new Set(ctx.session.supSelected ?? []);
-        if (cur.has(prodId)) cur.delete(prodId); else cur.add(prodId);
-        ctx.session.supSelected = [...cur].slice(0, 500);
-        await ctx.answerCallbackQuery().catch(() => undefined);
-        await supplierProductsView(ctx, supId);
+      const [supId, idxRaw] = id.split("~");
+      if (!supId || idxRaw === undefined) return;
+      const idx = Number.parseInt(idxRaw, 10);
+      if (!Number.isInteger(idx) || idx < 0) return;
+      // Resolve the row index against the page as it is RIGHT NOW, so a list that
+      // shifted under the admin can't flip the wrong product.
+      const page = await listSupplierProducts(supId, {
+        page: ctx.session.supPage ?? 1,
+        pageSize: SUP_PAGE_SIZE,
+        only: ctx.session.supFilter ?? "all",
+      });
+      const row = page.items[idx];
+      if (!row) {
+        ctx.session.supFlash = "⚠️ That list moved on — refreshed it for you.";
+        return supplierProductsView(ctx, supId);
       }
-      return;
+      if (ctx.session.supMode === "quick" && ctx.session.supFilter !== "deleted") {
+        // One-by-one: flip this single product's visibility immediately.
+        const makeVisible = !row.visible;
+        await bulkSupplierProducts(supId, [row.id], makeVisible ? "show" : "hide");
+        ctx.session.supFlash = `${makeVisible ? "👁" : "🙈"} <b>${escapeHtml(row.name.slice(0, 40))}</b> ${makeVisible ? "published" : "hidden"}.`;
+        return supplierProductsView(ctx, supId);
+      }
+      // Bulk mode: ticks a checkbox — it does not flip visibility on its own.
+      const cur = new Set(ctx.session.supSelected ?? []);
+      if (cur.has(row.id)) cur.delete(row.id); else cur.add(row.id);
+      ctx.session.supSelected = [...cur].slice(0, 500);
+      return supplierProductsView(ctx, supId);
     }
     case "supsync": {
       await ctx.reply("🔄 Syncing catalog…");
-      const r = await syncSupplierProducts(id).catch((e) => ({ added: 0, updated: 0, err: String(e) } as { added: number; updated: number; busy?: boolean; err?: string }));
-      if ("busy" in r && r.busy) {
+      const r = await syncSupplierProducts(id).catch((e) =>
+        ({ added: 0, updated: 0, skipped: 0, failed: 0, err: String(e) }) as SyncResult & { err?: string });
+      if (r.busy) {
         await ctx.reply("⏳ A sync is already running for this supplier — waiting for it to finish. Tapping 🔄 again won't speed it up.");
-      } else if ("err" in r && r.err) {
-        await ctx.reply(`❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}`);
-      } else if (r.added + r.updated === 0) {
-        await ctx.reply("ℹ️ Synced — nothing imported.\n\nUsually the base URL or key is wrong. Tap 🔎 <b>Auto-find docs</b>, or 🔍 <b>Diagnose</b> to see the raw response.", { parse_mode: "HTML" });
-      } else {
-        await ctx.reply(`✅ Synced — ${r.added} added, ${r.updated} updated.`);
+        return suppliersView(ctx);
       }
-      return suppliersView(ctx);
+      if ("err" in r && r.err) {
+        await ctx.reply(`❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}`);
+        return suppliersView(ctx);
+      }
+      if (r.added + r.updated + r.skipped === 0) {
+        await ctx.reply("ℹ️ Synced — nothing imported.\n\nUsually the base URL or key is wrong. Tap 🔎 <b>Auto-find docs</b>, or 🔍 <b>Diagnose</b> to see the raw response.", { parse_mode: "HTML" });
+        return suppliersView(ctx);
+      }
+      const goLive = await getSupplierNewVisible(id);
+      const kb = new InlineKeyboard()
+        .add(sbtn(`📂 Review ${r.added > 0 ? `${r.added} new ` : ""}product(s)`, cb("adm", "supprods", id), "success")).row()
+        .text("◀️ Suppliers", cb("adm", "sups"));
+      await show(ctx, [
+        "✅ <b>Sync complete</b>",
+        "",
+        `• ➕ ${r.added} added`,
+        `• ♻️ ${r.updated} updated`,
+        r.skipped > 0 ? `• 🗑 ${r.skipped} skipped (you deleted these)` : "",
+        r.failed > 0 ? `• ⚠️ ${r.failed} could not be imported — see 🩺 Logs → Supplier` : "",
+        "",
+        r.added > 0 && !goLive
+          ? "The new products are <b>hidden</b>. Nothing is in your shop until you publish it — open the review list and pick what goes live, one by one or in bulk."
+          : r.added > 0
+            ? "⚠️ This supplier is set to publish new products <b>immediately</b>, so they are already live. Change that in the review list."
+            : "Nothing new this time.",
+      ].filter(Boolean).join("\n"), kb, false);
+      return;
     }
     case "supauto": {
       await ctx.reply("🔎 Looking for this supplier's documentation…");
