@@ -224,7 +224,7 @@ export interface SessionData {
   bcBody?: string;
   bcBtnText?: string;
   bcBtnUrl?: string;
-  saleDraft?: { title?: string; body?: string; btnText?: string; btnStyle?: string; btnUrl?: string; endsHours?: number };
+  saleDraft?: { title?: string; body?: string; btnText?: string; btnStyle?: string; btnUrl?: string; endsHours?: number; photo?: string };
   btnKey?: string;
   pendEmojiId?: string;
   pendEmojiGlyph?: string;

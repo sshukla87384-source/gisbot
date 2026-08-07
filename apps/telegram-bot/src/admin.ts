@@ -1537,11 +1537,21 @@ async function runSpecialSale(ctx: Ctx, mode: "now" | "daily" | "weekly"): Promi
   const d = ctx.session.saleDraft;
   if (!d?.title) { await ctx.reply("Sale draft expired — start again."); return sendPanel(ctx, false); }
   const body = buildSaleBody(d);
-  const common = { title: "", body, bodyIsHtml: true, segment: "all" as const, buttonText: d.btnText, buttonUrl: d.btnUrl, buttonStyle: d.btnStyle, createdById: "bot-admin" };
+  // With a photo the body becomes a caption, and Telegram allows 1024 there.
+  // Checked before anything is queued: a scheduled campaign that fails at 3am
+  // for every recipient is far worse than being told now.
+  if (d.photo && body.length > 1024) {
+    await ctx.reply(
+      `⚠️ Not sent. With an image the text becomes a caption, and Telegram allows 1024 characters — this sale is ${body.length}.\n\nShorten the text, or remove the image.`,
+      { reply_markup: new InlineKeyboard().text("🗑 Remove image", cb("adm", "salenophoto")).row().text("✖️ Cancel", cb("adm", "home")) },
+    );
+    return;
+  }
+  const common = { title: "", body, bodyIsHtml: true, segment: "all" as const, buttonText: d.btnText, buttonUrl: d.btnUrl, buttonStyle: d.btnStyle, imageUrl: d.photo, createdById: "bot-admin" };
   ctx.session.saleDraft = undefined;
   if (mode === "now") {
     const r = await sendBroadcast(common);
-    await ctx.reply(`📣 Special sale announced to ${r.targets} users. 🎉`);
+    await ctx.reply(`📣 Special sale${d.photo ? " (with image)" : ""} announced to ${r.targets} users. 🎉`);
   } else {
     await scheduleBroadcast({ ...common, scheduledAt: new Date(Date.now() + 60_000), recurrence: mode });
     await ctx.reply(`⏰ Special sale scheduled to auto-announce <b>${mode}</b> (starting shortly). 🎉`, { parse_mode: "HTML" });
@@ -3367,6 +3377,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return finishBroadcast(ctx);
     }
     case "bcsend": return finishBroadcast(ctx);
+    case "salenophoto": {
+      if (ctx.session.saleDraft) ctx.session.saleDraft = { ...ctx.session.saleDraft, photo: undefined };
+      flash(ctx, "🗑 Image removed — the sale will send as text.");
+      return sendPanel(ctx, true);
+    }
     case "bcnophoto": {
       ctx.session.bcPhoto = undefined;
       flash(ctx, "🗑 Photo removed — the broadcast will send as text.");
