@@ -31,7 +31,12 @@ export async function createStarsCheckout(userId: string): Promise<StarsCheckout
           select: { id: true, orderNumber: true, walletUsedMinor: true },
         });
         for (const so of stale) {
-          const sw = await tx.wallet.findUnique({ where: { userId } });
+          // SELECT ... FOR UPDATE, not findUnique. This writes an ABSOLUTE
+          // balance; without the row lock a concurrent checkout or top-up reads
+          // the same figure and one of the two movements is silently lost.
+          const swRows = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+            SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
+          const sw = swRows[0];
           if (!sw) continue;
           const back = sw.balanceMinor + BigInt(so.walletUsedMinor);
           await tx.walletTransaction.create({
