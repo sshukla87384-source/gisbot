@@ -1325,6 +1325,11 @@ async function replacementDetailView(ctx: Ctx, id: string): Promise<void> {
  */
 const SUP_PAGE_SIZE = 12;
 
+/** Quick-mode label — on the deleted tab a tap restores rather than publishes. */
+function deletedTabLabel(only: string): string {
+  return only === "deleted" ? "⚡ Tapping = restore instantly" : "⚡ Tapping = publish/hide instantly";
+}
+
 /** The rows currently on screen, so an index in callback data can be resolved back to an id. */
 async function supplierPageIds(ctx: Ctx, supplierId: string): Promise<string[]> {
   return supplierProductIdsOnPage(supplierId, {
@@ -1345,6 +1350,10 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     getSupplierNewVisible(supplierId),
   ]);
   const flash = ctx.session.supFlash;
+  // listSupplierProducts clamps the page to the available range. Write the
+  // clamped value back, otherwise a session stuck on page 5 of a list that
+  // shrank to 2 pages keeps re-clamping on every render.
+  ctx.session.supPage = r.page;
   ctx.session.supFlash = undefined;
   const confirm = ctx.session.supConfirm;
   ctx.session.supConfirm = undefined;
@@ -1386,14 +1395,22 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   kb.row();
 
   // ── Mode switch: one-by-one vs bulk ──
-  kb.add(sbtn(quick ? "⚡ Tapping = publish/hide instantly" : "☑️ Tapping = tick for bulk", cb("adm", "spmode", supplierId), quick ? "success" : "primary")).row();
+  const quickLabel = deletedTabLabel(only);
+  kb.add(sbtn(quick ? quickLabel : "☑️ Tapping = tick for bulk", cb("adm", "spmode", supplierId), quick ? "success" : "primary")).row();
 
   // ── Product rows. Callback carries the ROW INDEX, not the id: two cuids plus
   // the route overflowed Telegram's 64-byte callback_data limit, and cb() throws
   // on overflow, which would take the whole screen down rather than one button.
   const deletedTab = only === "deleted";
   r.items.forEach((p, i) => {
-    const mark = deletedTab ? "🗑" : quick ? (p.visible ? "👁" : "🙈") : `${sel.has(p.id) ? "☑️" : "⬜"} ${p.visible ? "👁" : "🙈"}`;
+    // The deleted tab used to render a bare 🗑 for every row, so ticks were
+    // invisible while "♻️ Restore N" was driven by those very ticks — you could
+    // not see what you were about to restore. In quick mode a tap restores
+    // outright, so it shows the action rather than a checkbox.
+    const box = sel.has(p.id) ? "☑️" : "⬜";
+    const mark = deletedTab
+      ? (quick ? "♻️" : `${box} 🗑`)
+      : (quick ? (p.visible ? "👁" : "🙈") : `${box} ${p.visible ? "👁" : "🙈"}`);
     const stock = p.stock === null ? "" : p.stock <= 0 ? " · ⛔️" : ` · ${p.stock}`;
     kb.text(`${mark} ${p.name.slice(0, 24)} · $${(p.priceMinor / 100).toFixed(2)}${stock}`, cb("adm", "sptog", `${supplierId}~${i}`)).row();
   });
@@ -1443,8 +1460,9 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     only !== "all" ? `<i>Showing: ${only}</i>` : "",
     sel.size > 0 && !quick ? `☑️ <b>${sel.size} selected</b>` : "",
     "",
+    r.total === 0 ? "<i>No products match this filter.</i>\n" : "",
     deletedTab
-      ? "These are out of the shop and will not be re-imported by future syncs. Restore brings them back <b>hidden</b>."
+      ? `These are out of the shop and will not be re-imported by future syncs. Restore brings them back <b>hidden</b>.${quick ? "\n\n⚡ <b>One-by-one:</b> tap any product to restore it immediately." : "\n\n☑️ <b>Bulk:</b> tick products, then tap Restore."}`
       : quick
         ? "⚡ <b>One-by-one:</b> tap any product to publish or hide it immediately."
         : "☑️ <b>Bulk:</b> tap products to tick them, then choose an action. Ticks survive paging and filtering.",
@@ -1774,11 +1792,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "spfil": {
       const [supId, key] = id.split("~");
       if (!supId) return;
-      ctx.session.supFilter = key === "visible" || key === "hidden" || key === "deleted" ? key : "all";
+      const prev = ctx.session.supFilter ?? "all";
+      const next = key === "visible" || key === "hidden" || key === "deleted" ? key : "all";
+      ctx.session.supFilter = next;
       ctx.session.supPage = 1;
-      // Selections do not carry across the deleted boundary — the actions
-      // available there are different, and a stale tick would be invisible.
-      ctx.session.supSelected = [];
+      // Ticks survive all ↔ visible ↔ hidden, which is what the view promises.
+      // They are only dropped when crossing the deleted boundary: a deleted id
+      // carried into Publish/Hide silently matches nothing (those actions filter
+      // deletedAt: null), so the admin would tap "Publish 12" and be told 0 were
+      // published with no explanation.
+      if ((prev === "deleted") !== (next === "deleted")) {
+        const had = (ctx.session.supSelected ?? []).length;
+        ctx.session.supSelected = [];
+        if (had > 0) ctx.session.supFlash = `✖️ Cleared ${had} tick(s) — deleted products need their own actions.`;
+      }
       return supplierProductsView(ctx, supId);
     }
     case "sppg": {
@@ -1879,8 +1906,15 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         ctx.session.supFlash = "⚠️ That list moved on — refreshed it for you.";
         return supplierProductsView(ctx, supId);
       }
-      if (ctx.session.supMode === "quick" && ctx.session.supFilter !== "deleted") {
-        // One-by-one: flip this single product's visibility immediately.
+      if (ctx.session.supMode === "quick") {
+        // One-by-one. On the deleted tab the meaningful single action is restore;
+        // it previously fell through to ticking a checkbox that was neither
+        // visible nor usable, because quick mode hides the bulk action buttons.
+        if (ctx.session.supFilter === "deleted") {
+          await bulkSupplierProducts(supId, [row.id], "restore");
+          ctx.session.supFlash = `♻️ <b>${escapeHtml(row.name.slice(0, 40))}</b> restored — hidden, ready to publish.`;
+          return supplierProductsView(ctx, supId);
+        }
         const makeVisible = !row.visible;
         await bulkSupplierProducts(supId, [row.id], makeVisible ? "show" : "hide");
         ctx.session.supFlash = `${makeVisible ? "👁" : "🙈"} <b>${escapeHtml(row.name.slice(0, 40))}</b> ${makeVisible ? "published" : "hidden"}.`;
