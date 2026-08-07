@@ -1,5 +1,6 @@
 import { prisma } from "@gis/database";
 import { getRedis } from "./redis.js";
+import { UPI_UTR_GRACE_MIN } from "./orders/binance-window.js";
 
 /**
  * UPI UTR reuse protection.
@@ -75,10 +76,20 @@ export async function claimUpiUtrForOrder(orderId: string, utr: string): Promise
   const usedByOrder = await prisma.order.findFirst({ where: { binanceTxnId: key }, select: { id: true } });
   if (usedByOrder) return { ok: false, reason: "ALREADY_USED" };
   try {
-    const claimed = await prisma.order.updateMany({
+    let claimed = await prisma.order.updateMany({
       where: { id: orderId, status: "PENDING_PAYMENT", binanceTxnId: null },
       data: { binanceTxnId: key },
     });
+    if (claimed.count === 0) {
+      // The session closed while they were fetching the reference. Someone who
+      // actually paid must not be told their order vanished — revive it inside
+      // the grace period and let the operator decide. Nothing is released here.
+      const graceFrom = new Date(Date.now() - UPI_UTR_GRACE_MIN * 60_000);
+      claimed = await prisma.order.updateMany({
+        where: { id: orderId, status: "EXPIRED", binanceTxnId: null, expiresAt: { gte: graceFrom } },
+        data: { binanceTxnId: key, status: "PENDING_PAYMENT" },
+      });
+    }
     if (claimed.count === 0) return { ok: false, reason: "ORDER_NOT_PENDING" };
   } catch (e) {
     // Unique violation: another order claimed this reference first.

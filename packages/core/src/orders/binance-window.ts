@@ -16,3 +16,21 @@
 export const BINANCE_SESSION_MIN = 15;
 export const CLAIM_WINDOW_MIN = 5;
 export const CLAIM_WINDOW_MS = CLAIM_WINDOW_MIN * 60_000;
+
+/**
+ * UPI payment session.
+ *
+ * Short, so a customer cannot sit on a live order indefinitely and so the
+ * amount they owe stays unambiguous for the operator checking BharatPe.
+ */
+export const UPI_SESSION_MIN = 5;
+
+/**
+ * Grace period for sending the UTR AFTER the session closes.
+ *
+ * Without this, someone who paid at 4:50 and pasted their reference at 5:30
+ * would be told their order no longer exists, having genuinely paid. The order
+ * is revived for the operator to review rather than auto-released, so the
+ * grace costs nothing in safety — a human still confirms the money arrived.
+ */
+export const UPI_UTR_GRACE_MIN = 10;

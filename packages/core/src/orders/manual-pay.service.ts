@@ -1,5 +1,5 @@
 import { loadConfig } from "@gis/config";
-import { BINANCE_SESSION_MIN } from "./binance-window.js";
+import { BINANCE_SESSION_MIN, UPI_SESSION_MIN } from "./binance-window.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
@@ -187,7 +187,7 @@ export async function createUpiManualCheckout(userId: string, opts: { useWallet?
   if (!upiId) throw new CoreError("VALIDATION_FAILED", "UPI is not configured");
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
-  const expiresAt = new Date(Date.now() + 60 * 60_000);
+  const expiresAt = new Date(Date.now() + UPI_SESSION_MIN * 60_000);
   const created = await prisma.$transaction(async (tx) => {
     await cancelStalePendingTx(tx, userId);
     const lines = await priceCart(tx, userId, user.currency);
