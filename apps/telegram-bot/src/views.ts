@@ -1,4 +1,6 @@
 import {
+  getUpiAutoPolicy,
+  getUpiProvider,
   getCartView,
   getLedger,
   getProductView,
@@ -399,9 +401,18 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     if (loadConfig().BINANCE_PAY_UID) {
       kb.add(sbtn("🪙 Pay via Binance (USDT) ⚡ instant", cb("ord", "paybinance"), "success")).row();
     }
-    // UPI is INR-only and needs manual approval — hide it from USD/USDT customers.
+    // UPI is INR-only — hide it from USD/USDT customers.
     if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
-      kb.add(sbtn("🇮🇳 Pay via UPI (INR) 🕐 manual approval", cb("ord", "payupi"), "primary")).row();
+      // The label used to say "manual approval" unconditionally. Once a provider
+      // is configured and auto-delivery is on, payments are verified against the
+      // merchant account and delivered without anyone tapping anything, so
+      // telling the customer to expect a wait costs sales for no reason.
+      const [policy, provider] = await Promise.all([getUpiAutoPolicy(), getUpiProvider()]);
+      const instant = policy.enabled && Boolean(provider);
+      kb.add(sbtn(
+        instant ? "🇮🇳 Pay via UPI (INR) ⚡ instant" : "🇮🇳 Pay via UPI (INR) 🕐 manual approval",
+        cb("ord", "payupi"), instant ? "success" : "primary",
+      )).row();
     }
   }
   navRow(kb, cb("crt", "view"));
