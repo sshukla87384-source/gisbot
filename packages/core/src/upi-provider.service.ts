@@ -93,8 +93,30 @@ export function mapCreditRow(row: Record<string, unknown>): { utr: string; amoun
 export class UpiSessionExpired extends Error {}
 
 /** Fetch recent credits. Throws UpiSessionExpired when the cookie has died. */
+/** How many recent transactions to pull per poll. */
+export const UPI_PAGE_SIZE = 50;
+
+/**
+ * Build the request URL.
+ *
+ * pageSize is forced up. Merchant dashboards hand out sample URLs with
+ * pageSize=1, and polling with that would only ever see the single most recent
+ * transaction — two customers paying between cron ticks means one credit is
+ * never recorded, and that order waits for manual approval forever.
+ *
+ * merchantId is filled in from the saved setting when the URL does not already
+ * carry one, so either form works.
+ */
+export function buildCreditsUrl(cfg: UpiProviderConfig): string {
+  const u = new URL(cfg.endpoint);
+  const size = Number(u.searchParams.get("pageSize") ?? 0);
+  if (!Number.isFinite(size) || size < UPI_PAGE_SIZE) u.searchParams.set("pageSize", String(UPI_PAGE_SIZE));
+  if (cfg.merchantId && !u.searchParams.get("merchantId")) u.searchParams.set("merchantId", cfg.merchantId);
+  return u.toString();
+}
+
 export async function fetchUpiCredits(cfg: UpiProviderConfig): Promise<Array<Record<string, unknown>>> {
-  const res = await fetch(cfg.endpoint, {
+  const res = await fetch(buildCreditsUrl(cfg), {
     method: "GET",
     headers: {
       cookie: cfg.cookie,
@@ -138,6 +160,13 @@ export async function pollUpiCredits(): Promise<number> {
   }
   let stored = 0;
   for (const row of rows) {
+    // PAYMENT_ALL returns outgoing rows too. A payout or refund carries a
+    // reference and an amount just like a credit does, and settling an order
+    // against one would hand over goods for money that LEFT the account.
+    const dir = String(row.type ?? row.txnType ?? row.transactionType ?? row.direction ?? "").toUpperCase();
+    if (/DEBIT|PAYOUT|WITHDRAW|REFUND|REVERSAL|SETTLEMENT/.test(dir)) continue;
+    const status = String(row.status ?? row.txnStatus ?? row.transactionStatus ?? "").toUpperCase();
+    if (status && !/SUCCESS|COMPLETED|CAPTURED|CREDIT|PAID/.test(status)) continue;
     const c = mapCreditRow(row);
     if (!c) continue;
     try {
