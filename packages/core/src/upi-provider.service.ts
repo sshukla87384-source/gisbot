@@ -68,9 +68,12 @@ const normUtr = (v: unknown): string => String(v ?? "").replace(/\D/g, "");
  * cannot stop the rest of the batch being recorded.
  */
 export function mapCreditRow(row: Record<string, unknown>): { utr: string; amountMinor: number; creditedAt: Date } | null {
+  // bankReferenceNo is BharatPe's 12-digit UTR and is what the customer reads
+  // off their payment app, so it is preferred. internalUtr is a long internal
+  // id, not the reference a customer can ever quote.
   const utr = normUtr(
-    row.utr ?? row.rrn ?? row.RRN ?? row.referenceId ?? row.refId ?? row.reference ??
-    row.transactionId ?? row.txnId ?? row.upiTransactionId ?? row.bankReferenceNo,
+    row.bankReferenceNo ?? row.utr ?? row.rrn ?? row.RRN ?? row.referenceId ?? row.refId ??
+    row.reference ?? row.transactionId ?? row.txnId ?? row.upiTransactionId,
   );
   if (utr.length !== 12) return null;
 
@@ -83,7 +86,11 @@ export function mapCreditRow(row: Record<string, unknown>): { utr: string; amoun
   const looksMinor = /minor|paise/i.test(Object.keys(row).find((k) => row[k] === rawAmt) ?? "");
   const amountMinor = looksMinor ? Math.round(amt) : Math.round(amt * 100);
 
-  const rawTime = row.creditedAt ?? row.transactionTime ?? row.txnDate ?? row.createdAt ?? row.date ?? row.timestamp;
+  // paymentTimestamp is what BharatPe uses. Its absence from this list is why
+  // every row was silently discarded: the reference and amount both read
+  // correctly, then the row was dropped for having no usable date.
+  const rawTime = row.paymentTimestamp ?? row.creditedAt ?? row.transactionTime ?? row.txnTimestamp
+    ?? row.paymentTime ?? row.txnDate ?? row.createdAt ?? row.date ?? row.timestamp;
   const t = typeof rawTime === "number" ? new Date(rawTime < 1e12 ? rawTime * 1000 : rawTime) : new Date(String(rawTime ?? ""));
   if (Number.isNaN(t.getTime())) return null;
 
@@ -189,7 +196,10 @@ export async function pollUpiCredits(): Promise<number> {
     // reference and an amount just like a credit does, and settling an order
     // against one would hand over goods for money that LEFT the account.
     const dir = String(row.type ?? row.txnType ?? row.transactionType ?? row.direction ?? "").toUpperCase();
-    if (/DEBIT|PAYOUT|WITHDRAW|REFUND|REVERSAL|SETTLEMENT/.test(dir)) continue;
+    // PAYMENT_RECV is money in. Check that first, so a future type containing
+    // an unrelated substring cannot cause a real credit to be skipped.
+    const incoming = /RECV|RECEIV|CREDIT|COLLECT/.test(dir);
+    if (!incoming && /DEBIT|PAYOUT|WITHDRAW|REFUND|REVERSAL|SETTLEMENT/.test(dir)) continue;
     const status = String(row.status ?? row.txnStatus ?? row.transactionStatus ?? "").toUpperCase();
     if (status && !/SUCCESS|COMPLETED|CAPTURED|CREDIT|PAID/.test(status)) continue;
     const c = mapCreditRow(row);
