@@ -980,7 +980,7 @@ export function createBot(): Bot<Ctx> {
       // Auto-delivery, when the operator has enabled it and this order sits
       // inside the risk limits. Nothing here proves the money landed — BharatPe
       // exposes no API to ask — so the bounds are what keep it honest.
-      const decision = await shouldAutoDeliverUpi(orderId);
+      const decision = await shouldAutoDeliverUpi(orderId, digits);
       if (decision.auto) {
         await step("▰▰▰▰▰", "✅ <b>Verified — delivering…</b>");
         try {

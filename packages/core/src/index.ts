@@ -44,3 +44,4 @@ export * from "./pricing.js";
 export * from "./maintenance-mode.service.js";
 export * from "./upi-utr.service.js";
 export * from "./orders/binance-window.js";
+export * from "./upi-provider.service.js";

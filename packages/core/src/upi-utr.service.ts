@@ -1,6 +1,7 @@
 import { prisma } from "@gis/database";
 import { getRedis } from "./redis.js";
 import { UPI_UTR_GRACE_MIN } from "./orders/binance-window.js";
+import { getUpiProvider } from "./upi-provider.service.js";
 
 /**
  * UPI UTR reuse protection.
@@ -141,7 +142,7 @@ export async function setUpiAutoApprove(enabled: boolean, maxMinor?: number): Pr
 
 export type AutoDecision =
   | { auto: true }
-  | { auto: false; reason: "DISABLED" | "OVER_CAP" | "FIRST_ORDER" };
+  | { auto: false; reason: "DISABLED" | "OVER_CAP" | "FIRST_ORDER" | "UNVERIFIED" | "CREDIT_USED" | "AMOUNT_MISMATCH" | "CREDIT_TOO_OLD" };
 
 /**
  * Decide whether a claimed UTR may release goods without a human.
@@ -153,11 +154,42 @@ export type AutoDecision =
  * first, because that is the combination a stranger typing twelve digits would
  * exploit. Everything above the line still goes to the operator.
  */
-export async function shouldAutoDeliverUpi(orderId: string): Promise<AutoDecision> {
+export async function shouldAutoDeliverUpi(orderId: string, utr?: string): Promise<AutoDecision> {
   const policy = await getUpiAutoPolicy();
   if (!policy.enabled) return { auto: false, reason: "DISABLED" };
-  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { userId: true, totalMinor: true } });
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { userId: true, totalMinor: true, createdAt: true },
+  });
   if (!order) return { auto: false, reason: "DISABLED" };
+
+  // ── Proof of payment ──
+  // A UTR typed by a customer proves nothing on its own. When a provider is
+  // configured, goods are only released if a credit READ FROM THE MERCHANT
+  // ACCOUNT carries that same reference, for the right amount, arriving after
+  // the order was placed, and has not already settled something else.
+  const provider = await getUpiProvider();
+  if (provider) {
+    if (!utr) return { auto: false, reason: "UNVERIFIED" };
+    const credit = await prisma.upiCredit.findUnique({ where: { utr } });
+    if (!credit) return { auto: false, reason: "UNVERIFIED" };
+    if (credit.orderId && credit.orderId !== orderId) return { auto: false, reason: "CREDIT_USED" };
+    if (credit.amountMinor !== order.totalMinor) return { auto: false, reason: "AMOUNT_MISMATCH" };
+    if (credit.creditedAt.getTime() < order.createdAt.getTime() - 2 * 60_000) return { auto: false, reason: "CREDIT_TOO_OLD" };
+    // Bind the credit to this order. updateMany with orderId still null IS the
+    // claim, so two orders cannot both consume one payment.
+    const bound = await prisma.upiCredit.updateMany({
+      where: { utr, orderId: null },
+      data: { orderId, matchedAt: new Date() },
+    });
+    if (bound.count === 0) return { auto: false, reason: "CREDIT_USED" };
+    // Payment proven. The caps below are belt-and-braces and no longer the only
+    // thing standing between a stranger and free stock, so they do not apply.
+    return { auto: true };
+  }
+
+  // No provider configured: nothing can confirm the money arrived, so the
+  // bounded-trust limits are all there is.
   if (order.totalMinor > policy.maxMinor) return { auto: false, reason: "OVER_CAP" };
   if (policy.requirePriorOrder) {
     const prior = await prisma.order.count({
