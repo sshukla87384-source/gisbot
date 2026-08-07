@@ -215,6 +215,8 @@ import {
   announcePromo,
   getAutoPromo,
   setAutoPromo,
+  getMaintenance,
+  setMaintenance,
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
 import { cb } from "@gis/shared";
@@ -399,6 +401,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
       [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
+      [["🛠 Maintenance Mode", cb("adm", "maint"), "danger"]],
       [["🚪 Logout", cb("adm", "logout"), "danger"], ["🚪 Logout All", cb("adm", "logoutall"), "danger"]],
     ] },
   };
@@ -1517,6 +1520,30 @@ async function runSpecialSale(ctx: Ctx, mode: "now" | "daily" | "weekly"): Promi
   await sendPanel(ctx, false);
 }
 
+async function maintenanceView(ctx: Ctx): Promise<void> {
+  const m = await getMaintenance();
+  const kb = new InlineKeyboard()
+    .add(
+      m.enabled
+        ? sbtn("✅ Reopen the shop", cb("adm", "maintoff"), "success")
+        : sbtn("🛠 Close the shop", cb("adm", "mainton"), "danger"),
+    ).row()
+    .text("✏️ Edit the closed message", cb("adm", "maintmsg")).row()
+    .text("◀️ Back", cb("adm", "m_sec"));
+  await show(ctx, [
+    "🛠 <b>Maintenance Mode</b>",
+    "",
+    m.enabled
+      ? "🔴 <b>The shop is CLOSED.</b> Customers see the message below and can't browse, order or pay."
+      : "🟢 <b>The shop is OPEN.</b> Everything works normally.",
+    "",
+    "<b>Customers currently see:</b>",
+    m.message,
+    "",
+    "<i>You keep full access while it's closed — admins bypass the gate, so you can always reopen from here.</i>",
+  ].join("\n"), kb, true);
+}
+
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
@@ -1534,6 +1561,25 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
+    case "maint": return maintenanceView(ctx);
+    case "mainton": {
+      await setMaintenance(true);
+      await ctx.reply("🛠 <b>Shop closed.</b> Customers now see the maintenance message. You still have full access.", { parse_mode: "HTML" });
+      return maintenanceView(ctx);
+    }
+    case "maintoff": {
+      await setMaintenance(false);
+      await ctx.reply("✅ <b>Shop reopened.</b> Customers can browse and order again.", { parse_mode: "HTML" });
+      return maintenanceView(ctx);
+    }
+    case "maintmsg":
+      ctx.session.awaiting = "maint_msg";
+      await askStep(ctx, "✏️ Send the message customers should see while the shop is closed.\n\nHTML like <b>bold</b> is allowed.");
+      return;
+    // m_money was missing from this list while MENUS defined its rows and six
+    // buttons pointed at it, so 💰 Money fell through to the default and did
+    // nothing — including four "◀️ Back" buttons that dead-ended there.
+    case "m_money":
     case "m_prod": case "m_orders": case "m_stats": case "m_pay": case "m_mkt": case "m_content": case "m_sec": case "m_tools":
       await showSubmenu(ctx, `m_${action.slice(2)}`);
       return;
@@ -4225,6 +4271,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await replacementsListView(ctx);
     return true;
   }
+  if (awaiting === "maint_msg") {
+    ctx.session.awaiting = undefined;
+    await setMaintenance((await getMaintenance()).enabled, text);
+    await ctx.reply("✅ Maintenance message updated.");
+    await maintenanceView(ctx);
+    return true;
+  }
+
   if (awaiting === "sale_title") {
     ctx.session.saleDraft = { ...(ctx.session.saleDraft ?? {}), title: composeBroadcastHtml(ctx) };
     ctx.session.awaiting = "sale_body";

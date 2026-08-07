@@ -4,6 +4,7 @@ import type { Context, SessionFlavor } from "grammy";
 export interface SessionData {
   /** What the next free-text message means (Bot UX doc: conversations). */
   awaiting?:
+    | "maint_msg"
     | "search"
     | "ticket"
     | "ticket_reply"
