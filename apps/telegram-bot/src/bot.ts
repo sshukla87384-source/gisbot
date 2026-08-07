@@ -57,6 +57,8 @@ import {
   getReplaceableItem,
   getProductIdBySlug,
   getRedis,
+  hasUpiUtrBeenUsed,
+  markUpiUtrPending,
   enqueueAdminAlert,
   removeItem,
   resolveTelegramUser,
@@ -721,10 +723,28 @@ export function createBot(): Bot<Ctx> {
       const minor = ctx.session.inrTopupMinor ?? 0;
       const rate = await getInrPerUsdt();
       const usdMinor = Math.max(1, Math.round(minor / rate));
-      if (utr.length < 6 || minor <= 0) {
+      // A UPI UTR/RRN is exactly 12 digits. The old check accepted any 6+
+      // characters, so "abcdef" passed straight through to an admin alert.
+      const digits = utr.replace(/\D/g, "");
+      if (digits.length !== 12 || minor <= 0) {
         ctx.session.awaiting = "wallet_inr_utr";
-        return ctx.reply("Please paste the <b>UTR number</b> from your UPI payment receipt.", { parse_mode: "HTML" });
+        return ctx.reply(
+          "Please paste the <b>12-digit UTR</b> from your UPI receipt.\n\nIt's the long reference number on the payment confirmation — digits only.",
+          { parse_mode: "HTML" },
+        );
       }
+      // One UTR is one payment. Without this the same reference could be
+      // submitted repeatedly, and each submission raised a fresh approval
+      // request that would credit the wallet again.
+      const already = await hasUpiUtrBeenUsed(digits);
+      if (already) {
+        ctx.session.awaiting = undefined;
+        return ctx.reply(
+          "⚠️ That UTR has already been submitted.\n\nEach UPI payment can only be credited once. If you've paid again, send the UTR from the <b>new</b> payment, or open 🎫 Support.",
+          { parse_mode: "HTML" },
+        );
+      }
+      await markUpiUtrPending(digits);
       ctx.session.inrTopupMinor = undefined;
       const who = ctx.user.telegramHandle ? `@${ctx.user.telegramHandle}` : (ctx.user.firstName ?? "customer");
       await enqueueAdminAlert(
