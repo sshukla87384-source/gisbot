@@ -1465,3 +1465,26 @@ model ProductWatch {
   @@unique([userId, productId, type])
   @@index([productId, type, notifiedAt])
 }
+
+/// A confirmed incoming UPI credit, read from the merchant account.
+/// This is the ONLY proof the bot has that money actually arrived; a UTR typed
+/// by a customer proves nothing on its own.
+model UpiCredit {
+  id          String   @id @default(cuid())
+  /// UPI reference / RRN, normalised to digits. @unique so one credit can only
+  /// ever settle one thing, matching how binanceTxnId works for Binance.
+  utr         String   @unique
+  amountMinor Int
+  currency    Currency @default(INR)
+  /// When the money landed, per the provider.
+  creditedAt  DateTime
+  /// Raw provider payload, for reconciliation when something looks wrong.
+  raw         Json?
+  /// Order this credit settled, once matched.
+  orderId     String?
+  matchedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([creditedAt])
+  @@index([amountMinor, creditedAt])
+}

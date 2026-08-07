@@ -6,6 +6,7 @@ export interface SessionData {
   awaiting?:
     | "maint_msg"
     | "admin_upi_auto_cap"
+    | "admin_bp_value"
     | "search"
     | "ticket"
     | "ticket_reply"
@@ -134,6 +135,8 @@ export interface SessionData {
   admVariantId?: string;
   /** file_id of a photo attached to the broadcast being composed. */
   bcPhoto?: string;
+  /** Which BharatPe credential is being entered. */
+  bpField?: string;
   /** One-shot banner shown at the top of the next admin view. */
   admFlash?: string;
   /** Bulk supplier-product picker state. */

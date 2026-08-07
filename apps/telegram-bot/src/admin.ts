@@ -219,6 +219,10 @@ import {
   setMaintenance,
   getUpiAutoPolicy,
   setUpiAutoApprove,
+  getUpiProvider,
+  setUpiProvider,
+  fetchUpiCredits,
+  mapCreditRow,
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
 import { CLAIM_WINDOW_MIN } from "@gis/core";
@@ -402,6 +406,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
+      [["🏦 BharatPe verification", cb("adm", "bharatpe"), "primary"]],
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
       [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
@@ -1562,6 +1567,34 @@ async function runSpecialSale(ctx: Ctx, mode: "now" | "daily" | "weekly"): Promi
   await sendPanel(ctx, false);
 }
 
+async function bharatpeView(ctx: Ctx): Promise<void> {
+  const cfg = await getUpiProvider();
+  const mask = (v: string): string => (v ? `${v.slice(0, 4)}…${v.slice(-4)} (${v.length} chars)` : "—");
+  const kb = new InlineKeyboard()
+    .text("🔗 Endpoint URL", cb("adm", "bpset", "endpoint")).text("🏪 Merchant ID", cb("adm", "bpset", "merchantId")).row()
+    .text("🔑 API key / Token", cb("adm", "bpset", "token")).text("🍪 Cookie", cb("adm", "bpset", "cookie")).row()
+    .text("🆔 UPI ID", cb("adm", "bpset", "upiId")).row()
+    .add(sbtn("🧪 Test connection", cb("adm", "bptest"), "success")).row()
+    .text("◀️ Back", cb("adm", "m_pay"));
+  await show(ctx, [
+    "🏦 <b>BharatPe verification</b>",
+    "",
+    cfg
+      ? "🟢 <b>Configured.</b> Incoming credits are read automatically and matched to orders."
+      : "🔴 <b>Not configured.</b> Nothing can confirm a payment arrived, so UPI orders rely on your approval.",
+    "",
+    `🔗 Endpoint: <code>${escapeHtml(cfg?.endpoint || "—")}</code>`,
+    `🏪 Merchant: <code>${escapeHtml(cfg?.merchantId || "—")}</code>`,
+    `🆔 UPI ID: <code>${escapeHtml(cfg?.upiId || "—")}</code>`,
+    `🔑 Token: <code>${escapeHtml(mask(cfg?.token ?? ""))}</code>`,
+    `🍪 Cookie: <code>${escapeHtml(mask(cfg?.cookie ?? ""))}</code>`,
+    "",
+    "<b>Once this works, a UPI order only delivers when a real credit</b> with the same reference and amount is found in your account. The reference alone is never enough.",
+    "",
+    "<i>Credentials are encrypted at rest and never shown in full. If the session or key stops working you'll be alerted — verification failing silently would look just like a quiet day.</i>",
+  ].join("\n"), kb, true);
+}
+
 async function upiAutoView(ctx: Ctx): Promise<void> {
   const p = await getUpiAutoPolicy();
   const kb = new InlineKeyboard()
@@ -1633,6 +1666,24 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
+    case "bharatpe": return bharatpeView(ctx);
+    case "bpset":
+      ctx.session.bpField = id;
+      ctx.session.awaiting = "admin_bp_value";
+      await askStep(ctx, `🏦 Send the <b>${escapeHtml(id)}</b> value. Your message is deleted straight after so it doesn't sit in the chat.`);
+      return;
+    case "bptest": {
+      const cfg = await getUpiProvider();
+      if (!cfg?.endpoint) { flash(ctx, "⚠️ Set the endpoint URL first."); return bharatpeView(ctx); }
+      try {
+        const rows = await fetchUpiCredits(cfg);
+        const usable = rows.map(mapCreditRow).filter(Boolean).length;
+        flash(ctx, `✅ <b>Connected.</b> ${rows.length} row(s) returned, ${usable} readable as credits.${usable === 0 && rows.length > 0 ? " Field names may differ — send me a sample row." : ""}`);
+      } catch (e) {
+        flash(ctx, `❌ <b>Failed:</b> ${escapeHtml(String(e instanceof Error ? e.message : e)).slice(0, 150)}`);
+      }
+      return bharatpeView(ctx);
+    }
     case "upiauto": return upiAutoView(ctx);
     case "upiautoon": {
       await setUpiAutoApprove(true);
@@ -4370,6 +4421,17 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await replacementsListView(ctx);
     return true;
   }
+  if (awaiting === "admin_bp_value") {
+    const field = ctx.session.bpField ?? "";
+    ctx.session.bpField = undefined;
+    await ctx.deleteMessage().catch(() => undefined); // credentials must not linger in the chat
+    if (!field) { await ctx.reply("Lost track of which field that was — start again."); return true; }
+    await setUpiProvider({ [field]: text } as never);
+    flash(ctx, `✅ <b>${escapeHtml(field)}</b> saved.`);
+    await bharatpeView(ctx);
+    return true;
+  }
+
   if (awaiting === "admin_upi_auto_cap") {
     const rupees = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
     if (!Number.isFinite(rupees) || rupees <= 0) { await askStep(ctx, "Please send a number, e.g. 500"); ctx.session.awaiting = "admin_upi_auto_cap"; return true; }

@@ -9,6 +9,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   profitReport,
   sendResellerStatements,
   pollBinancePayments,
+  pollUpiCredits,
   convertMinor,
 } from "@gis/core";
 import { prisma } from "@gis/database";
@@ -262,6 +263,7 @@ async function dailyMoneySummary(): Promise<void> {
  * gone unless they pasted a transaction id by hand.
  */
 async function binancePoll(): Promise<void> {
+  await pollUpiCredits().catch(() => 0);
   const n = await pollBinancePayments();
   if (n > 0) {
     await prisma.auditLog.create({
