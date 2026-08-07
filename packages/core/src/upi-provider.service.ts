@@ -115,17 +115,42 @@ export function buildCreditsUrl(cfg: UpiProviderConfig): string {
   return u.toString();
 }
 
+/** Raw probe used by the Test button: returns the body so it can be shown. */
+export async function probeUpiEndpoint(cfg: UpiProviderConfig): Promise<{ status: number; ctype: string; body: string }> {
+  const res = await fetchWithTimeout(cfg);
+  const ctype = res.headers.get("content-type") ?? "";
+  return { status: res.status, ctype, body: (await res.text()).slice(0, 4000) };
+}
+
+/**
+ * Ten seconds, then give up.
+ *
+ * Without this a hung request never returns: the admin's tap spins forever,
+ * Telegram redelivers the callback, the duplicate guard correctly drops it, and
+ * the button looks completely dead with nothing in the logs to explain it.
+ */
+async function fetchWithTimeout(cfg: UpiProviderConfig, ms = 10_000): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await fetch(buildCreditsUrl(cfg), {
+      method: "GET",
+      signal: ac.signal,
+      headers: {
+        cookie: cfg.cookie,
+        token: cfg.token,
+        authorization: cfg.token.startsWith("Bearer ") ? cfg.token : `Bearer ${cfg.token}`,
+        ...(cfg.merchantId ? { merchantid: cfg.merchantId } : {}),
+        accept: "application/json",
+      },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchUpiCredits(cfg: UpiProviderConfig): Promise<Array<Record<string, unknown>>> {
-  const res = await fetch(buildCreditsUrl(cfg), {
-    method: "GET",
-    headers: {
-      cookie: cfg.cookie,
-      token: cfg.token,
-      authorization: cfg.token.startsWith("Bearer ") ? cfg.token : `Bearer ${cfg.token}`,
-      ...(cfg.merchantId ? { merchantid: cfg.merchantId } : {}),
-      accept: "application/json",
-    },
-  });
+  const res = await fetchWithTimeout(cfg);
   // A dead session usually answers 401/403, but these dashboards often answer
   // 200 with an HTML login page, so content-type is checked too.
   const ctype = res.headers.get("content-type") ?? "";
