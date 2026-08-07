@@ -3314,6 +3314,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
         ALREADY_USED: "❌ That transaction was already used for another order.",
         NO_API: "⚠️ Binance API key not set — can't auto-verify. Confirm manually if you've checked it.",
         ORDER_NOT_PENDING: "❌ This order is no longer awaiting payment.",
+        TOO_OLD: "❌ That transaction arrived BEFORE this order was created, so it cannot be the payment for it. Check you've got the right transaction — this is exactly how an unpaid order gets released by mistake.",
       };
       await ctx.reply(msg[r.reason] ?? "❌ Could not verify.");
     }
