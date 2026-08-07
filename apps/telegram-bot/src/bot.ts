@@ -58,6 +58,7 @@ import {
   getProductIdBySlug,
   getRedis,
   hasUpiUtrBeenUsed,
+  claimUpiUtrForOrder,
   markUpiUtrPending,
   enqueueAdminAlert,
   removeItem,
@@ -870,21 +871,50 @@ export function createBot(): Bot<Ctx> {
       const orderId = ctx.session.upiOrderId ?? "";
       const ref = ctx.message.text.trim().slice(0, 64);
       if (!orderId) return ctx.reply("That checkout expired — please start again from your 🛒 Cart.");
-      if (ref.length < 6) {
+      // A UPI UTR/RRN is exactly 12 digits. The old check took any 6+ characters.
+      const digits = ref.replace(/\D/g, "");
+      if (digits.length !== 12) {
         ctx.session.awaiting = "upi_ref"; // keep waiting instead of dropping the order
         return ctx.reply(
-          "🔎 That doesn't look like a <b>UTR number</b>. Open your UPI app → the payment → copy the UTR / reference number and paste it here.",
+          "🔎 That doesn't look like a <b>UTR</b>. Open your UPI app → the payment → copy the <b>12-digit</b> UTR / RRN / Transaction ID and paste it here.",
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid") },
         );
       }
+
+      // Visible progress while the checks run, like a card terminal.
+      const progress = await ctx.reply("🔄 <b>Verifying your payment…</b>\n<code>▰▱▱▱▱</code>", { parse_mode: "HTML" });
+      const step = async (bar: string, text: string): Promise<void> => {
+        await ctx.api.editMessageText(progress.chat.id, progress.message_id, `${text}\n<code>${bar}</code>`, { parse_mode: "HTML" })
+          .catch(() => undefined);
+      };
+      await step("▰▰▱▱▱", "🔄 <b>Checking the reference…</b>");
+
+      // Bind the UTR to this order. @unique means one payment settles exactly
+      // one order — a reference cannot be pasted into a second one.
+      const claim = await claimUpiUtrForOrder(orderId, digits);
+      if (!claim.ok) {
+        ctx.session.awaiting = undefined;
+        ctx.session.upiOrderId = undefined;
+        await step("▰▰▰▰▰", claim.reason === "ALREADY_USED" ? "⚠️ <b>Already used</b>" : "⚠️ <b>Order not awaiting payment</b>");
+        return ctx.reply(
+          claim.reason === "ALREADY_USED"
+            ? "⚠️ That UTR has already been used for another payment.\n\nEach UPI payment can settle one order only. Paste the UTR from <b>this</b> payment, or open 🎫 Support if you think this is wrong."
+            : "⚠️ This order is no longer awaiting payment. Check 📦 My orders, or open 🎫 Support.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🎫 Support", "mnu:home") },
+        );
+      }
+      await step("▰▰▰▰▱", "🔄 <b>Confirming with our team…</b>");
+
       ctx.session.upiOrderId = undefined;
-      const notified = await notifyAdminsForApproval(ctx, orderId, "UPI", ref);
-      if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref}.`).catch(() => undefined);
+      const notified = await notifyAdminsForApproval(ctx, orderId, "UPI", digits);
+      await step("▰▰▰▰▰", "✅ <b>Reference accepted</b>");
+      const ref2 = digits;
+      if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref2}.`).catch(() => undefined);
       return ctx.reply(
         [
           "🧾 <b>Thanks — UTR received!</b>",
           "",
-          `🔢 <code>${escapeHtml(ref)}</code>`,
+          `🔢 <code>${escapeHtml(ref2)}</code>`,
           "",
           "🧑‍💼 Our team is verifying your payment now. Your order is delivered here as soon as it clears. 🙏",
         ].join("\n"),
