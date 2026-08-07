@@ -412,7 +412,20 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Queue a one-line result banner for the NEXT view instead of sending a chat
+ * message. Nine product deletions used to leave nine "Product deleted." bubbles
+ * stacked above the list; now the list itself reports what happened.
+ */
+function flash(ctx: Ctx, text: string): void {
+  ctx.session.admFlash = text;
+}
+
 async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): Promise<void> {
+  // Consume any queued banner and render it inline with the view.
+  const banner = ctx.session.admFlash;
+  ctx.session.admFlash = undefined;
+  if (banner) text = `${banner}\n\n${text}`;
   const opts = { parse_mode: "HTML" as const, reply_markup: kb };
   if (edit && ctx.callbackQuery?.message) {
     try { await ctx.editMessageText(text, opts); return; } catch (err) {
@@ -1564,12 +1577,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "maint": return maintenanceView(ctx);
     case "mainton": {
       await setMaintenance(true);
-      await ctx.reply("🛠 <b>Shop closed.</b> Customers now see the maintenance message. You still have full access.", { parse_mode: "HTML" });
+      flash(ctx, "🛠 <b>Shop closed.</b> Customers now see the maintenance message. You still have full access.");
       return maintenanceView(ctx);
     }
     case "maintoff": {
       await setMaintenance(false);
-      await ctx.reply("✅ <b>Shop reopened.</b> Customers can browse and order again.", { parse_mode: "HTML" });
+      flash(ctx, "✅ <b>Shop reopened.</b> Customers can browse and order again.");
       return maintenanceView(ctx);
     }
     case "maintmsg":
@@ -1629,7 +1642,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "logv": return logsView(ctx, id);
     case "logclr": {
       await clearLogs((id || "error") as LogChannel);
-      await ctx.reply("🧹 Cleared.");
+      flash(ctx, "🧹 Cleared.");
       return logsMenuView(ctx);
     }
     case "loy": {
@@ -1810,11 +1823,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     case "uban":
       await setUserBanned(id, true);
-      await ctx.reply("🚫 User banned — they can no longer use the bot.");
+      flash(ctx, "🚫 User banned — they can no longer use the bot.");
       return userDetailView(ctx, id);
     case "uunban":
       await setUserBanned(id, false);
-      await ctx.reply("✅ User unbanned.");
+      flash(ctx, "✅ User unbanned.");
       return userDetailView(ctx, id);
     case "sales": return salesView(ctx);
     case "sups": return suppliersView(ctx);
@@ -1977,7 +1990,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const r = await syncSupplierProducts(id).catch((e) =>
         ({ added: 0, updated: 0, skipped: 0, failed: 0, err: String(e) }) as SyncResult & { err?: string });
       if (r.busy) {
-        await ctx.reply("⏳ A sync is already running for this supplier — waiting for it to finish. Tapping 🔄 again won't speed it up.");
+        flash(ctx, "⏳ A sync is already running for this supplier — waiting for it to finish. Tapping 🔄 again won't speed it up.");
         return suppliersView(ctx);
       }
       if ("err" in r && r.err) {
@@ -1985,7 +1998,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         return suppliersView(ctx);
       }
       if (r.added + r.updated + r.skipped === 0) {
-        await ctx.reply("ℹ️ Synced — nothing imported.\n\nUsually the base URL or key is wrong. Tap 🔎 <b>Auto-find docs</b>, or 🔍 <b>Diagnose</b> to see the raw response.", { parse_mode: "HTML" });
+        flash(ctx, "ℹ️ Synced — nothing imported.\n\nUsually the base URL or key is wrong. Tap 🔎 <b>Auto-find docs</b>, or 🔍 <b>Diagnose</b> to see the raw response.");
         return suppliersView(ctx);
       }
       const goLive = await getSupplierNewVisible(id);
@@ -2107,7 +2120,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "emojirm":
       await removeCustomEmojiEntry(id);
       setDynamicEmojis(await getCustomEmojiRegistry());
-      await ctx.reply(`✖️ Removed <b>${escapeHtml(id)}</b>.`, { parse_mode: "HTML" });
+      flash(ctx, `✖️ Removed <b>${escapeHtml(id)}</b>.`);
       return emojiRegistryView(ctx);
     case "bnpl":
       ctx.session.awaiting = "admin_bnpl";
@@ -2173,7 +2186,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const cur = (await getProductBriefById(id))?.fulfillmentMode ?? "AUTOMATIC";
       const next = cur === "MANUAL" ? "AUTOMATIC" : "MANUAL";
       await setProductFulfillmentMode(id, next);
-      await ctx.reply(`⚙️ Delivery mode set to <b>${next}</b>.`, { parse_mode: "HTML" });
+      flash(ctx, `⚙️ Delivery mode set to <b>${next}</b>.`);
       return productView(ctx, id);
     }
     case "ppw": {
@@ -2392,7 +2405,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const n = await bulkSetCategory(ids, target);
       ctx.session.catSelected = [];
       await ctx.answerCallbackQuery().catch(() => undefined);
-      await ctx.reply(`🗂 Moved <b>${n}</b> product(s) into this category. They now appear under its tile in Shop by Category.`, { parse_mode: "HTML" });
+      flash(ctx, `🗂 Moved <b>${n}</b> product(s) into this category. They now appear under its tile in Shop by Category.`);
       return categoriseView(ctx);
     }
     case "catemoji":
@@ -3140,7 +3153,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "cancel": {
       await adminCancelOrder(id);
-      await ctx.reply("✖️ Order cancelled.");
+      flash(ctx, "✖️ Order cancelled.");
       return ordersView(ctx, true);
     }
     case "txn": {
@@ -3178,7 +3191,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "pdely": {
       await adminDeleteProduct(id);
-      await ctx.reply("🗑 Product deleted.");
+      flash(ctx, "🗑 Product deleted.");
       return productsView(ctx);
     }
     case "pimg": {
@@ -3285,7 +3298,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "apikeys": return apiKeysView(ctx);
     case "apiup":
       await setApiKeyScopes(id, ["catalog:read", "orders:read", "orders:write", "wallet:read"]);
-      await ctx.reply("⬆️ Purchasing + wallet access enabled on that key. It works immediately — no need to regenerate.");
+      flash(ctx, "⬆️ Purchasing + wallet access enabled on that key. It works immediately — no need to regenerate.");
       return apiKeysView(ctx);
     case "apinew": {
       ctx.session.awaiting = "admin_api_name";
@@ -3316,7 +3329,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "apirevoke": {
       await revokeApiKey(id);
-      await ctx.reply("🔑 Key revoked.");
+      flash(ctx, "🔑 Key revoked.");
       return apiKeysView(ctx);
     }
     case "bc": {

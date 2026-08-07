@@ -131,6 +131,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** One-shot banner shown at the top of the next admin view. */
+  admFlash?: string;
   /** Bulk supplier-product picker state. */
   supSelected?: string[];
   supPage?: number;
