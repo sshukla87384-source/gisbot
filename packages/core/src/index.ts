@@ -42,3 +42,4 @@ export * from "./apikey.service.js";
 export * from "./wallet/wallet-topup.service.js";
 export * from "./pricing.js";
 export * from "./maintenance-mode.service.js";
+export * from "./upi-utr.service.js";

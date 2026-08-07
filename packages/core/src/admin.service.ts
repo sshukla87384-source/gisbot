@@ -942,10 +942,34 @@ export async function setUserBanned(userId: string, banned: boolean): Promise<vo
 }
 
 /** Add or deduct a user's wallet balance by user id (admin). Positive = add, negative = deduct. */
-export async function adjustUserWalletById(userId: string, amountMinor: number, actorId?: string): Promise<{ ok: boolean; newBalanceMinor?: bigint; currency?: string }> {
+export async function adjustUserWalletById(
+  userId: string,
+  amountMinor: number,
+  actorId?: string,
+  opts: { note?: string; idempotencyKey?: string } = {},
+): Promise<{ ok: boolean; newBalanceMinor?: bigint; currency?: string; duplicate?: boolean }> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return { ok: false };
-  const newBalanceMinor = await adjustWallet({ userId, amountMinor: BigInt(amountMinor), type: "ADJUSTMENT", note: "admin adjustment (bot)", actorId });
+  // idempotencyKey is @unique on WalletTransaction, so passing "upi:<utr>" makes
+  // double-crediting a single UPI payment impossible at the DATABASE level, no
+  // matter how many times an approve button is tapped or redelivered.
+  if (opts.idempotencyKey) {
+    const seen = await prisma.walletTransaction.findFirst({
+      where: { idempotencyKey: opts.idempotencyKey }, select: { id: true },
+    });
+    if (seen) return { ok: false, duplicate: true };
+  }
+  let newBalanceMinor: bigint;
+  try {
+    newBalanceMinor = await adjustWallet({
+      userId, amountMinor: BigInt(amountMinor), type: "ADJUSTMENT",
+      note: opts.note ?? "admin adjustment (bot)", actorId, idempotencyKey: opts.idempotencyKey,
+    });
+  } catch (e) {
+    // Lost the race to a concurrent approval of the same reference.
+    if ((e as { code?: string })?.code === "P2002") return { ok: false, duplicate: true };
+    throw e;
+  }
   const w = await prisma.wallet.findUnique({ where: { userId } });
   const currency = w?.currency ?? user.currency;
   if (user.telegramId !== null) {
