@@ -219,6 +219,10 @@ import {
   setMaintenance,
   getUpiAutoPolicy,
   setUpiAutoApprove,
+  readUpiTopupClaim,
+  dropUpiTopupClaim,
+  clearUpiUtrPending,
+  upiUtrKey,
   getUpiProvider,
   setUpiProvider,
   fetchUpiCredits,
@@ -3071,12 +3075,28 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return sendPanel(ctx, false);
     }
     case "wdok": {
-      // args: userId ~ inrMinor ~ usdMinor  (wallet is always credited in USD)
-      const [uid, inrRaw, usdRaw] = (id || "").split("~");
-      const inrMinor = Number.parseInt(inrRaw ?? "0", 10);
-      const usdMinor = Number.parseInt(usdRaw ?? "0", 10);
-      if (!uid || !Number.isFinite(usdMinor) || usdMinor <= 0) { await ctx.reply("That top-up request is invalid."); return; }
-      const res = await adjustUserWalletById(uid, usdMinor, `UPI top-up approved (₹${(inrMinor / 100).toFixed(2)})`);
+      // A short claim id resolved server-side. The old inline form
+      // (userId~inrMinor~usdMinor) had no room for the UTR, so the credit was
+      // never tied to the payment that justified it. Older buttons still work.
+      const claim = await readUpiTopupClaim(id);
+      const legacy = (id || "").split("~");
+      const uid = claim?.userId ?? legacy[0];
+      const inrMinor = claim?.inrMinor ?? Number.parseInt(legacy[1] ?? "0", 10);
+      const usdMinor = claim?.usdMinor ?? Number.parseInt(legacy[2] ?? "0", 10);
+      const utr = claim?.utr;
+      if (!uid || !Number.isFinite(usdMinor) || usdMinor <= 0) { await ctx.reply("That top-up request has expired or is invalid. Ask the customer to resend the UTR."); return; }
+      // idempotencyKey is @unique, so a second tap — or a redelivered callback —
+      // cannot credit the same UPI payment twice.
+      const res = await adjustUserWalletById(uid, usdMinor, `UPI top-up approved (₹${(inrMinor / 100).toFixed(2)})`, {
+        note: `UPI top-up ₹${(inrMinor / 100).toFixed(2)}${utr ? ` · UTR ${utr}` : ""}`,
+        idempotencyKey: utr ? upiUtrKey(utr) : undefined,
+      });
+      if (res.duplicate) {
+        await ctx.reply("⚠️ That UPI payment has already been credited. Nothing was added a second time.");
+        if (utr) await dropUpiTopupClaim(id);
+        return;
+      }
+      if (utr) await dropUpiTopupClaim(id);
       if (res.ok) {
         const tu = await getUserById(uid);
         if (tu) {
@@ -3096,6 +3116,8 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "wdno": {
+      const rejected = await readUpiTopupClaim(id);
+      if (rejected?.utr) { await clearUpiUtrPending(rejected.utr); await dropUpiTopupClaim(id); }
       if (!id) return;
       await dmUser(id, "❌ <b>We could not verify that UPI payment.</b>\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => undefined);
       await ctx.reply("❌ Rejected — the customer has been told.");

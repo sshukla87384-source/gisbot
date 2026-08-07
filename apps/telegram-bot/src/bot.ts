@@ -62,6 +62,7 @@ import {
   confirmManualPayment,
   claimUpiUtrForOrder,
   markUpiUtrPending,
+  stashUpiTopupClaim,
   enqueueAdminAlert,
   removeItem,
   resolveTelegramUser,
@@ -816,6 +817,7 @@ export function createBot(): Bot<Ctx> {
         );
       }
       await markUpiUtrPending(digits);
+      const claimId = await stashUpiTopupClaim({ userId: ctx.user.id, inrMinor: minor, usdMinor, utr: digits });
       ctx.session.inrTopupMinor = undefined;
       const who = ctx.user.telegramHandle ? `@${ctx.user.telegramHandle}` : (ctx.user.firstName ?? "customer");
       await enqueueAdminAlert(
@@ -830,8 +832,8 @@ export function createBot(): Bot<Ctx> {
           "Check the UTR in your UPI app, then approve to credit their wallet in USD.",
         ].join("\n"),
         [
-          { text: `✅ Approve — credit $${(usdMinor / 100).toFixed(2)}`, callbackData: `adm:wdok:${ctx.user.id}~${minor}~${usdMinor}`, style: "success" },
-          { text: "❌ Reject", callbackData: `adm:wdno:${ctx.user.id}`, style: "danger" },
+          { text: `✅ Approve — credit $${(usdMinor / 100).toFixed(2)}`, callbackData: `adm:wdok:${claimId}`, style: "success" },
+          { text: "❌ Reject", callbackData: `adm:wdno:${claimId}`, style: "danger" },
         ],
       ).catch(() => undefined);
       return ctx.reply(

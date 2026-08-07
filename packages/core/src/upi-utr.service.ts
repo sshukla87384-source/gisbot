@@ -1,4 +1,5 @@
 import { prisma } from "@gis/database";
+import { randomBytes } from "node:crypto";
 import { getRedis } from "./redis.js";
 import { UPI_UTR_GRACE_MIN } from "./orders/binance-window.js";
 import { getUpiProvider } from "./upi-provider.service.js";
@@ -202,4 +203,47 @@ export async function shouldAutoDeliverUpi(orderId: string, utr?: string): Promi
     if (prior === 0) return { auto: false, reason: "FIRST_ORDER" };
   }
   return { auto: true };
+}
+
+/**
+ * A pending UPI top-up awaiting an admin tap.
+ *
+ * The approval callback used to carry userId~inrMinor~usdMinor, which left no
+ * room for the UTR — a cuid plus two amounts plus a 12-digit reference overruns
+ * Telegram's 64-byte callback_data limit, and cb() throws on overflow, which
+ * would take the whole approval message down rather than one button. So the
+ * details are parked under a short id and the callback carries only that.
+ *
+ * Carrying the UTR through matters: it becomes the wallet ledger's
+ * idempotencyKey, which is @unique. That is what makes crediting one UPI
+ * payment twice impossible in the database rather than merely unlikely.
+ */
+export interface UpiTopupClaim {
+  userId: string;
+  inrMinor: number;
+  usdMinor: number;
+  utr: string;
+}
+
+const TOPUP_PREFIX = "upitopup:";
+
+export async function stashUpiTopupClaim(claim: UpiTopupClaim): Promise<string> {
+  const id = randomBytes(6).toString("hex"); // 12 chars, callback-safe
+  try {
+    await getRedis().set(`${TOPUP_PREFIX}${id}`, JSON.stringify(claim), "EX", 14 * 24 * 3600);
+  } catch { /* falls back to the legacy inline form below */ }
+  return id;
+}
+
+export async function readUpiTopupClaim(id: string): Promise<UpiTopupClaim | null> {
+  try {
+    const raw = await getRedis().get(`${TOPUP_PREFIX}${id}`);
+    return raw ? (JSON.parse(raw) as UpiTopupClaim) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function dropUpiTopupClaim(id: string): Promise<void> {
+  try { await getRedis().del(`${TOPUP_PREFIX}${id}`); } catch { /* best effort */ }
 }
