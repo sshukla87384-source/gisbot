@@ -1626,6 +1626,7 @@ export function createBot(): Bot<Ctx> {
             .row()
             .text("⚠️ I have paid — need help", "ord:upipaid")
             .row()
+            .text("✖️ Cancel", "ord:upicancel")
             .text("🏠 Menu", "mnu:home");
           try {
             const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
