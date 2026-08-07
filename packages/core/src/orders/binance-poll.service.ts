@@ -1,5 +1,6 @@
 import { loadConfig } from "@gis/config";
 import { encryptSecret, decryptSecret } from "@gis/shared";
+import { CLAIM_WINDOW_MS } from "./binance-window.js";
 import { prisma } from "@gis/database";
 import { createHmac } from "node:crypto";
 import { enqueueAdminAlert } from "../queues.js";
@@ -86,6 +87,8 @@ export async function testBinanceApi(): Promise<{ ok: boolean; detail: string }>
  */
 const CLOCK_SKEW_MS = 2 * 60_000;
 
+
+
 /** Transaction types that are not a customer paying us. */
 const NOT_A_PAYMENT = /refund|reversal|revoke|cancel|payout|withdraw/i;
 
@@ -163,6 +166,10 @@ export async function pollBinancePayments(): Promise<number> {
     // No usable timestamp means guard 1 cannot be enforced — refuse rather than
     // fall back to matching on amount alone.
     if (!Number.isFinite(txnTime) || txnTime <= 0) continue;
+    // A credit only auto-releases goods while it is fresh. Older credits are
+    // real money that arrived, but nothing here can tell WHICH order they were
+    // meant for, so they go to a human rather than to the first amount match.
+    if (Date.now() - txnTime > CLAIM_WINDOW_MS) continue;
     if (await txnAlreadyUsed(txnId)) continue;
 
     const amount = parseFloat(txn.amount);
@@ -220,7 +227,7 @@ export async function pollBinancePayments(): Promise<number> {
 
 export type BinanceVerifyResult =
   | { ok: true; orderNumber: string }
-  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" | "WRONG_USER" | "TOO_OLD" };
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" | "WRONG_USER" | "TOO_OLD" | "TOO_LATE" | "SESSION_EXPIRED" };
 
 /**
  * Verify a specific Binance Pay transaction ID against an order and confirm it.
@@ -231,7 +238,7 @@ export type BinanceVerifyResult =
 export async function verifyBinanceByTxnId(orderId: string, txnId: string, expectedUserId?: string): Promise<BinanceVerifyResult> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true, userId: true, createdAt: true },
+    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true, userId: true, createdAt: true, expiresAt: true },
   });
   if (!order) return { ok: false, reason: "NOT_FOUND" };
   if (expectedUserId && order.userId !== expectedUserId) return { ok: false, reason: "WRONG_USER" };
@@ -264,6 +271,11 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string, expec
   const txnTime = Number(txn.transactionTime);
   if (!Number.isFinite(txnTime) || txnTime <= 0) return { ok: false, reason: "NOT_FOUND" };
   if (txnTime < order.createdAt.getTime() - CLOCK_SKEW_MS) return { ok: false, reason: "TOO_OLD" };
+  // The reference must be submitted while the payment is still fresh, so an old
+  // transaction id cannot be produced later to release a different order.
+  if (Date.now() - txnTime > CLAIM_WINDOW_MS) return { ok: false, reason: "TOO_LATE" };
+  // And the order itself must still be within its payment session.
+  if (order.expiresAt && order.expiresAt.getTime() < Date.now()) return { ok: false, reason: "SESSION_EXPIRED" };
 
   const want = parseFloat(order.binanceAmount ?? "0");
   if (!(want > 0) || Math.abs(parseFloat(txn.amount) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
