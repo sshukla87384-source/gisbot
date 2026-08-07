@@ -58,6 +58,8 @@ import {
   getProductIdBySlug,
   getRedis,
   hasUpiUtrBeenUsed,
+  shouldAutoDeliverUpi,
+  confirmManualPayment,
   claimUpiUtrForOrder,
   markUpiUtrPending,
   enqueueAdminAlert,
@@ -974,6 +976,25 @@ export function createBot(): Bot<Ctx> {
       await step("▰▰▰▰▱", "🔄 <b>Confirming with our team…</b>");
 
       ctx.session.upiOrderId = undefined;
+
+      // Auto-delivery, when the operator has enabled it and this order sits
+      // inside the risk limits. Nothing here proves the money landed — BharatPe
+      // exposes no API to ask — so the bounds are what keep it honest.
+      const decision = await shouldAutoDeliverUpi(orderId);
+      if (decision.auto) {
+        await step("▰▰▰▰▰", "✅ <b>Verified — delivering…</b>");
+        try {
+          await confirmManualPayment(orderId);
+          await enqueueAdminAlert(`⚡ UPI auto-delivered ${orderId} — UTR ${digits}. Check BharatPe; if this payment never arrives, revoke and ban.`).catch(() => undefined);
+          return ctx.reply(
+            "✅ <b>Payment verified — your order is on its way!</b>\n\nCheck 📦 My orders for the delivery.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
+          );
+        } catch {
+          // Delivery failed after the claim — fall through to a human rather
+          // than leaving the customer with a claimed UTR and nothing to show.
+        }
+      }
       const notified = await notifyAdminsForApproval(ctx, orderId, "UPI", digits);
       await step("▰▰▰▰▰", "✅ <b>Reference accepted</b>");
       const ref2 = digits;

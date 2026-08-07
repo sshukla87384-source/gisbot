@@ -99,3 +99,71 @@ export async function claimUpiUtrForOrder(orderId: string, utr: string): Promise
   await markUpiUtrPending(utr);
   return { ok: true };
 }
+
+const AUTO_KEY = "upi.auto_approve";
+const AUTO_CAP_KEY = "upi.auto_approve_max_minor";
+
+export interface UpiAutoPolicy {
+  enabled: boolean;
+  /** Orders above this (minor units, order currency) always go to a human. */
+  maxMinor: number;
+  /** A customer's first order is never auto-delivered. */
+  requirePriorOrder: boolean;
+}
+
+export async function getUpiAutoPolicy(): Promise<UpiAutoPolicy> {
+  try {
+    const [on, cap] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: AUTO_KEY } }),
+      prisma.setting.findUnique({ where: { key: AUTO_CAP_KEY } }),
+    ]);
+    const raw = on?.value as unknown;
+    const enabled = typeof raw === "boolean" ? raw : (raw as { on?: boolean } | null)?.on === true;
+    const maxMinor = Number((cap?.value as { minor?: number } | null)?.minor ?? 50_000);
+    return { enabled, maxMinor: Number.isFinite(maxMinor) && maxMinor > 0 ? maxMinor : 50_000, requirePriorOrder: true };
+  } catch {
+    // Any lookup failure means manual review — never auto-deliver by accident.
+    return { enabled: false, maxMinor: 0, requirePriorOrder: true };
+  }
+}
+
+export async function setUpiAutoApprove(enabled: boolean, maxMinor?: number): Promise<UpiAutoPolicy> {
+  await prisma.setting.upsert({ where: { key: AUTO_KEY }, create: { key: AUTO_KEY, value: { on: enabled } }, update: { value: { on: enabled } } });
+  if (maxMinor !== undefined && maxMinor > 0) {
+    await prisma.setting.upsert({
+      where: { key: AUTO_CAP_KEY },
+      create: { key: AUTO_CAP_KEY, value: { minor: Math.round(maxMinor) } },
+      update: { value: { minor: Math.round(maxMinor) } },
+    });
+  }
+  return getUpiAutoPolicy();
+}
+
+export type AutoDecision =
+  | { auto: true }
+  | { auto: false; reason: "DISABLED" | "OVER_CAP" | "FIRST_ORDER" };
+
+/**
+ * Decide whether a claimed UTR may release goods without a human.
+ *
+ * Nothing here proves money arrived — BharatPe exposes no API to ask. What it
+ * does prove is that the reference is well formed, has never settled anything
+ * else, and belongs to exactly one order inside its payment window. Auto-
+ * delivery is therefore bounded: small orders only, and never a customer's
+ * first, because that is the combination a stranger typing twelve digits would
+ * exploit. Everything above the line still goes to the operator.
+ */
+export async function shouldAutoDeliverUpi(orderId: string): Promise<AutoDecision> {
+  const policy = await getUpiAutoPolicy();
+  if (!policy.enabled) return { auto: false, reason: "DISABLED" };
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { userId: true, totalMinor: true } });
+  if (!order) return { auto: false, reason: "DISABLED" };
+  if (order.totalMinor > policy.maxMinor) return { auto: false, reason: "OVER_CAP" };
+  if (policy.requirePriorOrder) {
+    const prior = await prisma.order.count({
+      where: { userId: order.userId, id: { not: orderId }, status: { in: ["PAID", "COMPLETED"] } },
+    });
+    if (prior === 0) return { auto: false, reason: "FIRST_ORDER" };
+  }
+  return { auto: true };
+}

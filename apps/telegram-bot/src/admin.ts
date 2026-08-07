@@ -217,6 +217,8 @@ import {
   setAutoPromo,
   getMaintenance,
   setMaintenance,
+  getUpiAutoPolicy,
+  setUpiAutoApprove,
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
 import { CLAIM_WINDOW_MIN } from "@gis/core";
@@ -399,6 +401,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["📄 Export orders (CSV)", cb("adm", "tlcsv"), "primary"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
+      [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
       [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
@@ -1559,6 +1562,36 @@ async function runSpecialSale(ctx: Ctx, mode: "now" | "daily" | "weekly"): Promi
   await sendPanel(ctx, false);
 }
 
+async function upiAutoView(ctx: Ctx): Promise<void> {
+  const p = await getUpiAutoPolicy();
+  const kb = new InlineKeyboard()
+    .add(p.enabled
+      ? sbtn("🛑 Turn OFF auto-delivery", cb("adm", "upiautooff"), "danger")
+      : sbtn("⚡ Turn ON auto-delivery", cb("adm", "upiautoon"), "success")).row()
+    .text(`✏️ Max auto amount: ₹${(p.maxMinor / 100).toFixed(0)}`, cb("adm", "upiautocap")).row()
+    .text("◀️ Back", cb("adm", "m_pay"));
+  await show(ctx, [
+    "⚡ <b>UPI auto-delivery</b>",
+    "",
+    p.enabled
+      ? "🟢 <b>ON</b> — a valid UTR delivers the order immediately, with no tap from you."
+      : "🔴 <b>OFF</b> — every UPI payment waits for your approval.",
+    "",
+    "<b>What is checked automatically</b>",
+    "• The UTR is 12 digits",
+    "• It has never settled any other order or top-up",
+    "• It belongs to this order alone, inside its payment window",
+    "",
+    "<b>What cannot be checked</b>",
+    "BharatPe publishes no API to ask whether the money actually arrived. A valid-looking",
+    "reference is accepted on trust, so auto-delivery is deliberately bounded:",
+    `• Orders above <b>₹${(p.maxMinor / 100).toFixed(0)}</b> always come to you`,
+    "• A customer's <b>first order</b> always comes to you",
+    "",
+    "Every auto-delivery is announced in your alerts so you can spot-check it against BharatPe.",
+  ].join("\n"), kb, true);
+}
+
 async function maintenanceView(ctx: Ctx): Promise<void> {
   const m = await getMaintenance();
   const kb = new InlineKeyboard()
@@ -1600,6 +1633,21 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
 
   switch (action) {
     case "home": return sendPanel(ctx, true);
+    case "upiauto": return upiAutoView(ctx);
+    case "upiautoon": {
+      await setUpiAutoApprove(true);
+      flash(ctx, "⚡ <b>Auto-delivery ON.</b> Spot-check the alerts against BharatPe.");
+      return upiAutoView(ctx);
+    }
+    case "upiautooff": {
+      await setUpiAutoApprove(false);
+      flash(ctx, "🛑 <b>Auto-delivery OFF.</b> UPI payments wait for your approval again.");
+      return upiAutoView(ctx);
+    }
+    case "upiautocap":
+      ctx.session.awaiting = "admin_upi_auto_cap";
+      await askStep(ctx, "✏️ Send the highest order value to auto-deliver, in rupees (e.g. <code>500</code>). Anything above it comes to you.");
+      return;
     case "maint": return maintenanceView(ctx);
     case "mainton": {
       await setMaintenance(true);
@@ -4322,6 +4370,15 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await replacementsListView(ctx);
     return true;
   }
+  if (awaiting === "admin_upi_auto_cap") {
+    const rupees = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(rupees) || rupees <= 0) { await askStep(ctx, "Please send a number, e.g. 500"); ctx.session.awaiting = "admin_upi_auto_cap"; return true; }
+    await setUpiAutoApprove((await getUpiAutoPolicy()).enabled, Math.round(rupees * 100));
+    flash(ctx, `✏️ Auto-delivery limit set to <b>₹${rupees.toFixed(0)}</b>.`);
+    await upiAutoView(ctx);
+    return true;
+  }
+
   if (awaiting === "maint_msg") {
     ctx.session.awaiting = undefined;
     await setMaintenance((await getMaintenance()).enabled, text);
