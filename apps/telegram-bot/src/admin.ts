@@ -726,17 +726,32 @@ async function broadcastProductPicker(ctx: Ctx): Promise<void> {
 async function finishBroadcast(ctx: Ctx): Promise<void> {
   const body = ctx.session.bcBody ?? "";
   if (!body.trim()) { await ctx.reply("Nothing to send — start again from 📢 Broadcast."); return sendPanel(ctx, false); }
+  const photo = ctx.session.bcPhoto;
+  // A photo send puts the text in the caption, and Telegram caps captions at
+  // 1024 characters. Sending anyway would fail for every single recipient, so
+  // stop here and let the operator choose rather than silently dropping either.
+  if (photo && body.length > 1024) {
+    await ctx.reply(
+      `⚠️ Not sent. With a photo the text becomes a caption, and Telegram allows 1024 characters — yours is ${body.length}.\n\nShorten the text, or remove the photo to send it as a normal message.`,
+      { reply_markup: new InlineKeyboard().text("🗑 Remove photo and send", cb("adm", "bcnophoto")).row().text("✖️ Cancel", cb("adm", "home")) },
+    );
+    return;
+  }
   const res = await sendBroadcast({
     title: "",
     body,
     bodyIsHtml: true,
     segment: "all",
+    // A Telegram file_id is accepted wherever sendPhoto takes a photo, so the
+    // existing imageUrl -> opts.photo -> worker sendPhoto path carries it as-is.
+    imageUrl: photo,
     buttonText: ctx.session.bcBtnText,
     buttonUrl: ctx.session.bcBtnUrl,
     createdById: "bot-admin",
   });
   ctx.session.bcBody = ctx.session.bcBtnText = ctx.session.bcBtnUrl = undefined;
-  await ctx.reply(`📢 Broadcast queued to ${res.targets} users.${res.targets ? "" : " (no eligible users yet)"}`);
+  ctx.session.bcPhoto = undefined;
+  await ctx.reply(`📢 Broadcast${photo ? " (with photo)" : ""} queued to ${res.targets} users.${res.targets ? "" : " (no eligible users yet)"}`);
   return sendPanel(ctx, false);
 }
 
@@ -3352,6 +3367,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return finishBroadcast(ctx);
     }
     case "bcsend": return finishBroadcast(ctx);
+    case "bcnophoto": {
+      ctx.session.bcPhoto = undefined;
+      flash(ctx, "🗑 Photo removed — the broadcast will send as text.");
+      return sendPanel(ctx, true);
+    }
     case "webpass":
       ctx.session.awaiting = "admin_web_email";
       await askStep(ctx, "🔐 <b>Reset web admin login</b>\nSend the <b>email</b> for the web panel login (e.g. <code>admin@getitsasta.cloud</code>):");
@@ -4379,7 +4399,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       .text("🏠 Attach Menu button", cb("adm", "bcmenu")).row()
       .text("📨 Send now (text only)", cb("adm", "bcsend")).row()
       .text("✖️ Cancel", cb("adm", "home"));
-    await ctx.reply("📢 <b>Ready to send.</b> Attach a product or the menu, or send now:", { parse_mode: "HTML", reply_markup: kb });
+    await ctx.reply(`📢 <b>Ready to send.</b>${ctx.session.bcPhoto ? " 🖼 Photo attached." : " Send a photo now to attach one."}\n\nAttach a product or the menu, or send now:`, { parse_mode: "HTML", reply_markup: kb });
     return true;
   }
 

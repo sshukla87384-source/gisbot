@@ -552,6 +552,40 @@ export function createBot(): Bot<Ctx> {
   });
 
   bot.on("message:photo", async (ctx) => {
+    // Admin attaching an image to a broadcast. The outbox already supported
+    // photo sends end to end — OutboxOptions.photo, both enqueue helpers and the
+    // worker's sendPhoto — but the compose step only ever read text, so there
+    // was no way to put an image into a broadcast.
+    if (ctx.session.awaiting === "admin_broadcast" && (await isBotAdmin(ctx.from?.id))) {
+      const photos = ctx.message.photo;
+      const fileId = photos[photos.length - 1]?.file_id; // largest rendition
+      if (fileId) {
+        ctx.session.bcPhoto = fileId;
+        const cap = (ctx.message.caption ?? "").trim();
+        if (cap) ctx.session.bcBody = cap;
+        // Telegram caps a photo caption at 1024 characters; a longer body would
+        // make sendPhoto fail for every recipient.
+        const body = ctx.session.bcBody ?? "";
+        ctx.session.awaiting = body ? null : "admin_broadcast";
+        await ctx.reply(
+          body
+            ? (body.length > 1024
+                ? `🖼 Photo attached — but the text is ${body.length} characters and a photo caption can only be 1024. Shorten it, or send without the photo.`
+                : "🖼 <b>Photo attached.</b> Now choose how to send it:")
+            : "🖼 <b>Photo attached.</b> Now send the broadcast <b>text</b>:",
+          {
+            parse_mode: "HTML",
+            reply_markup: body && body.length <= 1024
+              ? new InlineKeyboard()
+                  .text("📨 Send now", cb("adm", "bcsend")).row()
+                  .text("🗑 Remove photo", cb("adm", "bcnophoto")).row()
+                  .text("✖️ Cancel", cb("adm", "home"))
+              : undefined,
+          },
+        );
+        return;
+      }
+    }
     // Customer submitting a replacement / support screenshot.
     if (ctx.session.awaiting === "replace_proof") {
       const photos = ctx.message.photo;
