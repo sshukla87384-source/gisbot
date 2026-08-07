@@ -79,6 +79,7 @@ import {
   listUserPrices,
   setStoreDefaultPrice,
   type DeliveredSecret,
+  getMaintenance,
 } from "@gis/core";
 import type { Currency } from "@gis/database";
 import {
@@ -297,6 +298,20 @@ export function createBot(): Bot<Ctx> {
     if ((user as { status?: string }).status === "BANNED") {
       await ctx.reply("🚫 Your access has been suspended. Contact support if you think this is a mistake.").catch(() => undefined);
       return;
+    }
+
+    // ── Maintenance mode ──
+    // Admins always get through, otherwise enabling it would lock the operator
+    // out of the very panel that turns it back off. /admin stays reachable for
+    // the same reason, before the passcode session exists.
+    const isAdminHere = await isBotAdmin(ctx.from.id);
+    const cmd = ctx.message?.text ?? "";
+    if (!isAdminHere && !cmd.startsWith("/admin")) {
+      const maint = await getMaintenance();
+      if (maint.enabled) {
+        await ctx.reply(maint.message, { parse_mode: "HTML" }).catch(() => undefined);
+        return;
+      }
     }
     await next();
   });
