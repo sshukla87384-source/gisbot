@@ -131,6 +131,8 @@ export interface SessionData {
   admOrderId?: string;
   admProductId?: string;
   admVariantId?: string;
+  /** file_id of a photo attached to the broadcast being composed. */
+  bcPhoto?: string;
   /** One-shot banner shown at the top of the next admin view. */
   admFlash?: string;
   /** Bulk supplier-product picker state. */
