@@ -212,12 +212,33 @@ export function createBot(): Bot<Ctx> {
   const config = loadConfig();
   const bot = new Bot<Ctx>(config.BOT_TOKEN);
 
-  bot.use(session({ initial: (): Ctx["session"] => ({}), storage: redisSessionStorage() }));
   // Serialize updates per user. Webhook mode handles POSTs concurrently and
   // Telegram redelivers on timeout, so without this a double-tap ran the same
   // handler twice against the SAME session snapshot — producing duplicate
   // replacement requests that could never be approved. A per-user promise chain
   // is enough here and avoids pulling in @grammyjs/runner.
+  // ── Drop redelivered updates ──
+  // Telegram redelivers an update if the webhook does not answer in time. The
+  // per-user serializer below made the retry WAIT rather than dropping it, and
+  // the session was loaded before that wait — so the retry resumed from a stale
+  // snapshot and re-ran the handler with state the first pass had consumed.
+  // That is how one gift became a gift every minute: each retry still saw
+  // giftUser/giftTitle set and created the record again.
+  bot.use(async (ctx, next) => {
+    const id = ctx.update?.update_id;
+    if (typeof id !== "number") return next();
+    try {
+      // NX: the first caller wins, every redelivery is dropped. A whole hour is
+      // far longer than Telegram's retry window.
+      const first = await getRedis().set(`upd:${id}`, "1", "EX", 3600, "NX");
+      if (first !== "OK") return;
+    } catch {
+      // Redis down: fall through and process. Losing dedupe is better than
+      // losing the bot.
+    }
+    return next();
+  });
+
   bot.use(async (ctx, next) => {
     const uid = ctx.from?.id;
     if (uid === undefined) return next();
@@ -238,6 +259,11 @@ export function createBot(): Bot<Ctx> {
       if (userLocks.get(key) === chained) userLocks.delete(key);
     }
   });
+
+  // Session is loaded AFTER the serializer on purpose. Loading it before meant
+  // every update queued behind another had already taken its snapshot, so it
+  // resumed with state the earlier update had since consumed and saved.
+  bot.use(session({ initial: (): Ctx["session"] => ({}), storage: redisSessionStorage() }));
 
   // ── Anti-spam: per-user token bucket (Bot UX doc §14) ──
   bot.use(async (ctx, next) => {
