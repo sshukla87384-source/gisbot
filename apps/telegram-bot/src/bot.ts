@@ -1514,9 +1514,10 @@ export function createBot(): Bot<Ctx> {
             "📷 <b>Scan the QR</b> in any UPI app (GPay / PhonePe / Paytm) — the amount is pre-filled.",
             "📋 No QR? Tap the buttons below to copy the amount and UPI ID.",
             "",
-            "✅ After paying, just paste your <b>UTR number</b> here.",
+            "✅ After paying, paste the <b>12-digit UTR</b> from your receipt here.",
             "",
-            "🕐 <b>Note:</b> UPI payments are checked <b>manually by our team</b>, so delivery may be delayed.",
+            "⏳ <b>Pay within 5 minutes</b> — after that this order closes and you'll need to start again.",
+            "🕐 UPI payments are checked <b>by our team</b>, so delivery can take a short while.",
             "⚡ Want it instantly? Pay with <b>Binance (USDT)</b> — that verifies automatically.",
           ].join("\n");
           // NOTE: no url() button for the upi:// link — Telegram only accepts
