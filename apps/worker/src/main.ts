@@ -44,8 +44,11 @@ async function main(): Promise<void> {
   const outboxWorker = new Worker<OutboxJob>(
     QUEUE_NAMES.outbox,
     async (job) => {
+      let replyMarkup: any;
       try {
         const styled = config.BUTTON_STYLES_ENABLED;
+        // Hoisted so the 400 fallback in the catch block can reuse the buttons.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const btns = job.data.buttons && job.data.buttons.length > 0
           ? job.data.buttons.map((b) => {
               const base: Record<string, unknown> = b.copyText
@@ -64,7 +67,8 @@ async function main(): Promise<void> {
               ...(btns.some((b) => !("copy_text" in b)) ? [btns.filter((b) => !("copy_text" in b))] : []),
             ]
           : undefined;
-        const reply_markup = rows ? ({ inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
+        replyMarkup = rows ? ({ inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
+        const reply_markup = replyMarkup;
         let msg;
         if (job.data.document) {
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
@@ -89,6 +93,35 @@ async function main(): Promise<void> {
             data: { notifiable: false },
           });
           return;
+        }
+        if (e instanceof GrammyError && e.error_code === 400) {
+          // 400 means Telegram rejected the message itself — unparseable HTML or
+          // over 4096 characters. Retrying it unchanged fails identically every
+          // time, so the job exhausts its attempts and a customer who has PAID
+          // never receives their item, with nothing in the chat to show why.
+          // License keys legitimately contain < > and &, which is all it takes.
+          //
+          // The content matters more than the formatting: resend as plain text,
+          // split to fit. Ugly beats undelivered.
+          // Sent with NO parse_mode, so Telegram treats every character
+          // literally and cannot reject it. Stripping tags first was worse: a
+          // key like ABCD-<XY>-Z has <XY> eaten by any tag regex, so the
+          // customer would receive a corrupted key, which is worse than a
+          // slightly ugly one.
+          const plain = job.data.text;
+          const chunks: string[] = [];
+          for (let i = 0; i < plain.length; i += 4000) chunks.push(plain.slice(i, i + 4000));
+          try {
+            for (let i = 0; i < chunks.length; i++) {
+              // Buttons go on the last chunk so they sit under the full message.
+              await telegram.sendMessage(job.data.telegramId, chunks[i]!, i === chunks.length - 1 ? ({ reply_markup: replyMarkup } as never) : {});
+            }
+            // eslint-disable-next-line no-console
+            console.error("outbox: HTML rejected, delivered as plain text", { telegramId: job.data.telegramId, chunks: chunks.length, error: e.description });
+            return;
+          } catch {
+            // Plain text failed too — let BullMQ retry the original.
+          }
         }
         throw e; // 429 & transient errors → BullMQ retries with backoff
       }
