@@ -556,6 +556,23 @@ export function createBot(): Bot<Ctx> {
     // photo sends end to end — OutboxOptions.photo, both enqueue helpers and the
     // worker's sendPhoto — but the compose step only ever read text, so there
     // was no way to put an image into a broadcast.
+    // Admin attaching an image to a special sale / campaign. Same outbox path as
+    // a broadcast — sendBroadcast and scheduleBroadcast both take imageUrl — so
+    // scheduled daily and weekly campaigns carry the image too.
+    if (ctx.session.awaiting?.startsWith("sale_") && ctx.session.saleDraft && (await isBotAdmin(ctx.from?.id))) {
+      const photos = ctx.message.photo;
+      const fileId = photos[photos.length - 1]?.file_id;
+      if (fileId) {
+        ctx.session.saleDraft = { ...ctx.session.saleDraft, photo: fileId };
+        const cap = (ctx.message.caption ?? "").trim();
+        if (cap) ctx.session.saleDraft = { ...ctx.session.saleDraft, body: cap };
+        await ctx.reply(
+          "🖼 <b>Image attached to the sale.</b> Carry on with the next step — it will be sent with the announcement, including scheduled ones.",
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+    }
     if (ctx.session.awaiting === "admin_broadcast" && (await isBotAdmin(ctx.from?.id))) {
       const photos = ctx.message.photo;
       const fileId = photos[photos.length - 1]?.file_id; // largest rendition
