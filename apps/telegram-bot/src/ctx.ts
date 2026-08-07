@@ -5,6 +5,7 @@ export interface SessionData {
   /** What the next free-text message means (Bot UX doc: conversations). */
   awaiting?:
     | "maint_msg"
+    | "admin_upi_auto_cap"
     | "search"
     | "ticket"
     | "ticket_reply"
