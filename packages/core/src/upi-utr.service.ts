@@ -142,7 +142,7 @@ export async function setUpiAutoApprove(enabled: boolean, maxMinor?: number): Pr
 
 export type AutoDecision =
   | { auto: true }
-  | { auto: false; reason: "DISABLED" | "OVER_CAP" | "FIRST_ORDER" | "UNVERIFIED" | "CREDIT_USED" | "AMOUNT_MISMATCH" | "CREDIT_TOO_OLD" };
+  | { auto: false; reason: "DISABLED" | "OVER_CAP" | "FIRST_ORDER" | "UNVERIFIED" | "CREDIT_USED" | "AMOUNT_MISMATCH" | "CREDIT_TOO_OLD" | "CURRENCY_MISMATCH" };
 
 /**
  * Decide whether a claimed UTR may release goods without a human.
@@ -159,7 +159,7 @@ export async function shouldAutoDeliverUpi(orderId: string, utr?: string): Promi
   if (!policy.enabled) return { auto: false, reason: "DISABLED" };
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { userId: true, totalMinor: true, createdAt: true },
+    select: { userId: true, totalMinor: true, createdAt: true, currency: true },
   });
   if (!order) return { auto: false, reason: "DISABLED" };
 
@@ -174,6 +174,10 @@ export async function shouldAutoDeliverUpi(orderId: string, utr?: string): Promi
     const credit = await prisma.upiCredit.findUnique({ where: { utr } });
     if (!credit) return { auto: false, reason: "UNVERIFIED" };
     if (credit.orderId && credit.orderId !== orderId) return { auto: false, reason: "CREDIT_USED" };
+    // Minor units are only comparable within one currency. A USD order of
+    // $78.75 and an INR credit of Rs 78.75 are both 7875 minor, so without this
+    // an unrelated rupee payment would settle a dollar order.
+    if (order.currency !== credit.currency) return { auto: false, reason: "CURRENCY_MISMATCH" };
     if (credit.amountMinor !== order.totalMinor) return { auto: false, reason: "AMOUNT_MISMATCH" };
     if (credit.creditedAt.getTime() < order.createdAt.getTime() - 2 * 60_000) return { auto: false, reason: "CREDIT_TOO_OLD" };
     // Bind the credit to this order. updateMany with orderId still null IS the
