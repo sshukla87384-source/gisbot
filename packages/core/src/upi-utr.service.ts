@@ -51,3 +51,40 @@ export async function clearUpiUtrPending(utr: string): Promise<void> {
     await getRedis().del(`${PENDING_PREFIX}${utr}`);
   } catch { /* best effort */ }
 }
+
+export type UpiClaim =
+  | { ok: true }
+  | { ok: false; reason: "ALREADY_USED" | "ORDER_NOT_PENDING" };
+
+/**
+ * Atomically bind a UTR to an order.
+ *
+ * Order.binanceTxnId is "the transaction that settled this order" and is
+ * @unique, so storing "upi:<utr>" there gives a DATABASE-level guarantee that
+ * one UPI payment settles exactly one order — the same protection Binance
+ * payments already had. The order UTR handler previously accepted any 6+
+ * character string with no reuse check at all, so one reference could be
+ * pasted into an unlimited number of orders.
+ *
+ * The updateMany IS the claim: it only matches while the order is still unpaid
+ * and unclaimed, so two submissions racing cannot both win.
+ */
+export async function claimUpiUtrForOrder(orderId: string, utr: string): Promise<UpiClaim> {
+  const key = upiUtrKey(utr);
+  if (await hasUpiUtrBeenUsed(utr)) return { ok: false, reason: "ALREADY_USED" };
+  const usedByOrder = await prisma.order.findFirst({ where: { binanceTxnId: key }, select: { id: true } });
+  if (usedByOrder) return { ok: false, reason: "ALREADY_USED" };
+  try {
+    const claimed = await prisma.order.updateMany({
+      where: { id: orderId, status: "PENDING_PAYMENT", binanceTxnId: null },
+      data: { binanceTxnId: key },
+    });
+    if (claimed.count === 0) return { ok: false, reason: "ORDER_NOT_PENDING" };
+  } catch (e) {
+    // Unique violation: another order claimed this reference first.
+    if ((e as { code?: string })?.code === "P2002") return { ok: false, reason: "ALREADY_USED" };
+    throw e;
+  }
+  await markUpiUtrPending(utr);
+  return { ok: true };
+}
