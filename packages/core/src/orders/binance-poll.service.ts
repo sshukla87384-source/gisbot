@@ -81,23 +81,60 @@ export async function testBinanceApi(): Promise<{ ok: boolean; detail: string }>
 }
 
 /**
+ * A credit can only pay for an order that already existed when it arrived.
+ * Small allowance for clock skew between Binance and this server.
+ */
+const CLOCK_SKEW_MS = 2 * 60_000;
+
+/** Transaction types that are not a customer paying us. */
+const NOT_A_PAYMENT = /refund|reversal|revoke|cancel|payout|withdraw/i;
+
+/**
+ * Has this Binance transaction already settled ANYTHING?
+ *
+ * Order.binanceTxnId and WalletTopup.binanceTxnId are each @unique, but only
+ * within their own table — so a transaction that topped up a wallet could still
+ * be spent again to settle an order. Both tables must be checked together.
+ */
+async function txnAlreadyUsed(txnId: string): Promise<boolean> {
+  const [order, topup] = await Promise.all([
+    prisma.order.findFirst({ where: { binanceTxnId: txnId }, select: { id: true } }),
+    prisma.walletTopup.findFirst({ where: { binanceTxnId: txnId }, select: { id: true } }),
+  ]);
+  return Boolean(order ?? topup);
+}
+
+interface PendingBinanceOrder {
+  id: string;
+  orderNumber: string;
+  binanceAmount: string | null;
+  createdAt: Date;
+}
+
+/**
  * Poll Binance Pay history and auto-confirm any PENDING_PAYMENT Binance order
  * whose exact USDT amount has arrived. Uses a READ-ONLY API key; never moves
- * funds. Each transaction settles at most one order (binanceTxnId dedupe).
+ * funds.
+ *
+ * A credit is only accepted when ALL of these hold:
+ *   1. it arrived AFTER the order was created,
+ *   2. it has never settled another order or wallet top-up,
+ *   3. exactly one pending order matches it.
+ *
+ * Guard 1 is the one that matters most. Without it the poller matched purely on
+ * amount against the last 100 Pay transactions, so any older credit of the same
+ * size — and prices repeat, every buyer of a product owes the identical amount —
+ * would silently settle a brand-new order that nobody had paid for. Each stale
+ * credit in the window could hand over one order's goods for free.
  */
 export async function pollBinancePayments(): Promise<number> {
   const creds = await getBinanceCreds();
   if (!creds) return 0;
 
-  // OLDEST FIRST, and bounded. Two customers can owe the identical USDT amount
-  // for the same product; with no ordering the credit went to whichever row
-  // Postgres happened to return, so Alice's payment could deliver Bob's goods
-  // and let Alice's order expire. Oldest-first at least settles the person who
-  // has been waiting longest, and the txn is claimed atomically below.
-  const pending = await prisma.order.findMany({
+  const pending: PendingBinanceOrder[] = await prisma.order.findMany({
     where: { status: "PENDING_PAYMENT", binanceAsset: "USDT", expiresAt: { gt: new Date() } },
     orderBy: { createdAt: "asc" },
-    select: { id: true, orderNumber: true, binanceAmount: true },
+    select: { id: true, orderNumber: true, binanceAmount: true, createdAt: true },
     take: 500,
   });
   if (pending.length === 0) return 0;
@@ -112,36 +149,64 @@ export async function pollBinancePayments(): Promise<number> {
     return 0;
   }
 
-  const credits = txns.filter((t) => t.currency === "USDT" && parseFloat(t.amount) > 0); // incoming only
+  const credits = txns.filter(
+    (t) => t.currency === "USDT" && parseFloat(t.amount) > 0 && !NOT_A_PAYMENT.test(String(t.orderType ?? "")),
+  );
+
+  // Orders settled in this pass, so one order cannot take two credits.
+  const settled = new Set<string>();
   let confirmed = 0;
 
-  for (const order of pending) {
-    if (!order.binanceAmount) continue;
-    const want = parseFloat(order.binanceAmount);
-    const match = credits.find((t) => Math.abs(parseFloat(t.amount) - want) < 0.01);
-    if (!match) continue;
+  for (const txn of credits) {
+    const txnId = String(txn.transactionId);
+    const txnTime = Number(txn.transactionTime);
+    // No usable timestamp means guard 1 cannot be enforced — refuse rather than
+    // fall back to matching on amount alone.
+    if (!Number.isFinite(txnTime) || txnTime <= 0) continue;
+    if (await txnAlreadyUsed(txnId)) continue;
 
-    // One Binance transaction settles exactly one order. binanceTxnId is @unique,
-    // so this claim is decided by the database rather than by a read-then-write
-    // that two pollers or a poller and a customer could both pass.
+    const amount = parseFloat(txn.amount);
+    const candidates = pending.filter(
+      (o: PendingBinanceOrder) =>
+        !settled.has(o.id) &&
+        o.binanceAmount &&
+        Math.abs(parseFloat(o.binanceAmount) - amount) < 0.01 &&
+        txnTime >= o.createdAt.getTime() - CLOCK_SKEW_MS,
+    );
+
+    if (candidates.length === 0) continue;
+
+    if (candidates.length > 1) {
+      // Two people owe the same amount and both were waiting when this landed.
+      // Picking one would rob the other, so this needs a human.
+      await enqueueAdminAlert(
+        `⚠️ Binance payment needs manual review — ${amount} USDT (txn ${txnId}) matches ${candidates.length} pending orders: ` +
+          `${candidates.map((c: PendingBinanceOrder) => c.orderNumber).join(", ")}. Confirm the right one in the panel.`,
+      ).catch(() => undefined);
+      continue;
+    }
+
+    const order = candidates[0]!;
+
+    // The database decides the claim: binanceTxnId is @unique, so a race between
+    // two pollers cannot double-settle.
     let claimedOk = false;
     try {
       const claimed = await prisma.order.updateMany({
         where: { id: order.id, status: "PENDING_PAYMENT", binanceTxnId: null },
-        data: { binanceTxnId: match.transactionId },
+        data: { binanceTxnId: txnId },
       });
       claimedOk = claimed.count > 0;
     } catch {
       claimedOk = false; // unique violation: this txn already settled something
     }
     if (!claimedOk) continue;
-    // Don't let the same credit match a second order in this same pass.
-    credits.splice(credits.indexOf(match), 1);
+    settled.add(order.id);
 
     try {
       await confirmManualPayment(order.id);
       await enqueueAdminAlert(
-        `✅ Binance auto-confirmed ${order.orderNumber} — ${order.binanceAmount} USDT (txn ${match.transactionId}).`,
+        `✅ Binance auto-confirmed ${order.orderNumber} — ${order.binanceAmount} USDT (txn ${txnId}).`,
       );
       confirmed++;
     } catch (e) {
@@ -155,7 +220,7 @@ export async function pollBinancePayments(): Promise<number> {
 
 export type BinanceVerifyResult =
   | { ok: true; orderNumber: string }
-  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" | "WRONG_USER" };
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "ORDER_NOT_PENDING" | "WRONG_USER" | "TOO_OLD" };
 
 /**
  * Verify a specific Binance Pay transaction ID against an order and confirm it.
@@ -166,15 +231,16 @@ export type BinanceVerifyResult =
 export async function verifyBinanceByTxnId(orderId: string, txnId: string, expectedUserId?: string): Promise<BinanceVerifyResult> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true, userId: true },
+    select: { orderNumber: true, status: true, binanceAsset: true, binanceAmount: true, userId: true, createdAt: true },
   });
   if (!order) return { ok: false, reason: "NOT_FOUND" };
   if (expectedUserId && order.userId !== expectedUserId) return { ok: false, reason: "WRONG_USER" };
   if (order.status !== "PENDING_PAYMENT") return { ok: false, reason: "ORDER_NOT_PENDING" };
 
   const clean = txnId.trim();
-  const dup = await prisma.order.findFirst({ where: { binanceTxnId: clean }, select: { id: true } });
-  if (dup) return { ok: false, reason: "ALREADY_USED" };
+  // Checks orders AND wallet top-ups — a txn already spent on a top-up used to
+  // pass this check and settle an order as well.
+  if (await txnAlreadyUsed(clean)) return { ok: false, reason: "ALREADY_USED" };
 
   const creds = await getBinanceCreds();
   if (!creds) return { ok: false, reason: "NO_API" };
@@ -190,12 +256,20 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string, expec
 
   const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
   if (!txn || txn.currency !== "USDT" || !(parseFloat(txn.amount) > 0)) return { ok: false, reason: "NOT_FOUND" };
+  if (NOT_A_PAYMENT.test(String(txn.orderType ?? ""))) return { ok: false, reason: "NOT_FOUND" };
+
+  // Same rule as the poller: a credit that predates the order cannot be paying
+  // for it. Otherwise anyone could paste an old transaction id from any earlier
+  // payment and have a new, unpaid order released.
+  const txnTime = Number(txn.transactionTime);
+  if (!Number.isFinite(txnTime) || txnTime <= 0) return { ok: false, reason: "NOT_FOUND" };
+  if (txnTime < order.createdAt.getTime() - CLOCK_SKEW_MS) return { ok: false, reason: "TOO_OLD" };
 
   const want = parseFloat(order.binanceAmount ?? "0");
   if (!(want > 0) || Math.abs(parseFloat(txn.amount) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
 
   const claimed = await prisma.order.updateMany({
-    where: { id: orderId, status: "PENDING_PAYMENT" },
+    where: { id: orderId, status: "PENDING_PAYMENT", binanceTxnId: null },
     data: { binanceTxnId: clean },
   });
   if (claimed.count === 0) return { ok: false, reason: "ORDER_NOT_PENDING" };
