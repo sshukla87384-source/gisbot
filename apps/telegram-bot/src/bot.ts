@@ -352,6 +352,23 @@ export function createBot(): Bot<Ctx> {
   const render = async (ctx: Ctx, view: View, edit: boolean): Promise<void> => {
     const opts = { parse_mode: "HTML" as const, reply_markup: view.kb };
     const cap = (t: string) => (t.length > 1024 ? `${t.slice(0, 1021)}…` : t);
+
+    // Telegram cannot turn a photo message into a text one or the reverse, and
+    // this branch ignored `edit` completely whenever a view had a photo. So
+    // tapping Buy Now on a product card left the card sitting above the
+    // quantity picker, and the same happened at every photo/text boundary.
+    // When a true in-place edit is impossible, remove the old message so the
+    // screen still advances instead of accumulating.
+    const prev = ctx.callbackQuery?.message;
+    if (edit && prev) {
+      const prevIsPhoto = "photo" in prev && Boolean(prev.photo);
+      const nextIsPhoto = Boolean(view.photo);
+      if (prevIsPhoto !== nextIsPhoto || nextIsPhoto) {
+        await ctx.deleteMessage().catch(() => undefined);
+        edit = false; // the old message is gone; this must be a fresh send
+      }
+    }
+
     if (view.photo) {
       try {
         await ctx.replyWithPhoto(view.photo, { caption: cap(view.text), parse_mode: "HTML", reply_markup: view.kb });
