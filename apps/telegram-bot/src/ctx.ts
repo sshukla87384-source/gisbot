@@ -137,6 +137,8 @@ export interface SessionData {
   bcPhoto?: string;
   /** Which BharatPe credential is being entered. */
   bpField?: string;
+  /** Payment QR message, so it can be cleared once the payment is submitted. */
+  upiQrMsgId?: number;
   /** One-shot banner shown at the top of the next admin view. */
   admFlash?: string;
   /** Bulk supplier-product picker state. */

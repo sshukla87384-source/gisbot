@@ -978,6 +978,11 @@ export function createBot(): Bot<Ctx> {
       await step("▰▰▰▰▱", "🔄 <b>Confirming with our team…</b>");
 
       ctx.session.upiOrderId = undefined;
+      // The payment is in; the QR is now stale whichever way this resolves.
+      if (ctx.session.upiQrMsgId) {
+        await ctx.api.deleteMessage(ctx.chat.id, ctx.session.upiQrMsgId).catch(() => undefined);
+        ctx.session.upiQrMsgId = undefined;
+      }
 
       // Auto-delivery, when the operator has enabled it and this order sits
       // inside the risk limits. Nothing here proves the money landed — BharatPe
@@ -1624,11 +1629,15 @@ export function createBot(): Bot<Ctx> {
             .text("🏠 Menu", "mnu:home");
           try {
             const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
-            await ctx.replyWithPhoto(new InputFile(png, "upi-qr.png"), {
+            const qrMsg = await ctx.replyWithPhoto(new InputFile(png, "upi-qr.png"), {
               caption,
               parse_mode: "HTML",
               reply_markup: upiKb,
             });
+            // Remembered so it can be cleared once the payment is in. A QR left
+            // on screen after delivery invites a second payment to the same
+            // order, and buries the delivered items under a dead screen.
+            ctx.session.upiQrMsgId = qrMsg.message_id;
           } catch {
             // QR generation or photo send failed — still show the payment details.
             try {
@@ -1639,6 +1648,16 @@ export function createBot(): Bot<Ctx> {
               });
             }
           }
+          break;
+        }
+        case "ord:upicancel": {
+          await ctx.answerCallbackQuery();
+          if (ctx.session.upiQrMsgId) {
+            await ctx.api.deleteMessage(ctx.chat!.id, ctx.session.upiQrMsgId).catch(() => undefined);
+            ctx.session.upiQrMsgId = undefined;
+          }
+          ctx.session.upiOrderId = undefined;
+          await ctx.reply("✖️ Payment cancelled. Your order is still in 📦 My orders if you want to try again.");
           break;
         }
         case "ord:upipaid": {
