@@ -226,6 +226,7 @@ import {
   getUpiProvider,
   setUpiProvider,
   fetchUpiCredits,
+  probeUpiEndpoint,
   mapCreditRow,
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
@@ -1679,13 +1680,42 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "bptest": {
       const cfg = await getUpiProvider();
       if (!cfg?.endpoint) { flash(ctx, "⚠️ Set the endpoint URL first."); return bharatpeView(ctx); }
+      // Tell the admin something is happening: the request can take seconds and
+      // a silent button is indistinguishable from a broken one.
+      await ctx.reply("🧪 Testing the connection…");
+      let out: string;
       try {
-        const rows = await fetchUpiCredits(cfg);
+        // Probe first, so the RAW response can be shown. Without this the only
+        // way to see what the API actually returned was browser devtools.
+        const probe = await probeUpiEndpoint(cfg);
+        const rows = await fetchUpiCredits(cfg).catch(() => [] as Array<Record<string, unknown>>);
         const usable = rows.map(mapCreditRow).filter(Boolean).length;
-        flash(ctx, `✅ <b>Connected.</b> ${rows.length} row(s) returned, ${usable} readable as credits.${usable === 0 && rows.length > 0 ? " Field names may differ — send me a sample row." : ""}`);
+        out = [
+          `🧪 <b>Connection test</b>`,
+          `HTTP <b>${probe.status}</b> · ${escapeHtml(probe.ctype.split(";")[0] || "?")}`,
+          `Rows found: <b>${rows.length}</b> · readable as credits: <b>${usable}</b>`,
+          "",
+          rows.length === 0
+            ? "⚠️ The call succeeded but returned <b>no transactions</b>. Usually the URL is missing a date range (<code>fromDate</code>/<code>toDate</code>) or there is simply no recent activity. Copy the URL your dashboard uses when it IS showing transactions."
+            : usable === 0
+              ? "⚠️ Rows came back but none could be read as credits — the field names differ. Send the sample below and they can be mapped."
+              : "✅ Working. Credits will be matched to orders automatically.",
+          "",
+          "<b>Raw response (first 600 chars):</b>",
+          `<code>${escapeHtml(probe.body.slice(0, 600))}</code>`,
+        ].join("\n");
       } catch (e) {
-        flash(ctx, `❌ <b>Failed:</b> ${escapeHtml(String(e instanceof Error ? e.message : e)).slice(0, 150)}`);
+        const msg = String(e instanceof Error ? e.message : e);
+        out = [
+          "❌ <b>Connection failed</b>",
+          `<code>${escapeHtml(msg).slice(0, 200)}</code>`,
+          "",
+          /abort/i.test(msg)
+            ? "The request timed out after 10s — check the host is reachable from the server."
+            : "Check the endpoint URL, then re-copy the Cookie and Token (sessions expire quickly).",
+        ].join("\n");
       }
+      await ctx.reply(out, { parse_mode: "HTML" });
       return bharatpeView(ctx);
     }
     case "upiauto": return upiAutoView(ctx);
