@@ -100,7 +100,13 @@ export async function refundWalletForOrder(
 ): Promise<boolean> {
   if (!amountMinor || amountMinor <= 0) return false;
   return prisma.$transaction(async (tx) => {
-    const w = await tx.wallet.findUnique({ where: { userId } });
+    // SELECT ... FOR UPDATE, not findUnique. This writes an ABSOLUTE balance, so
+    // an unlocked read lets a concurrent checkout or top-up interleave: both read
+    // the same balance, both write their own total, and one movement vanishes.
+    // adjustWallet and applyWalletTx already lock; this refund path did not.
+    const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+      SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
+    const w = locked[0];
     if (!w) return false;
     const already = await tx.walletTransaction.findFirst({ where: { idempotencyKey: `refund-cancel:${orderId}` } });
     if (already) return false;
