@@ -1736,6 +1736,28 @@ export function createBot(): Bot<Ctx> {
           );
           break;
         }
+        case "wal:topuptxn": {
+          // This button was emitted but never handled. The customer had already
+          // SENT the USDT, tapped "I've paid — enter Order ID", and nothing
+          // happened — while the message above it promised their wallet would be
+          // credited automatically. The wallet_topup_txn text handler and
+          // verifyTopupByTxn were both already written and reachable from
+          // nowhere; only the case was missing.
+          await ctx.answerCallbackQuery();
+          if (!ctx.session.walletTopupId) {
+            await ctx.reply(
+              "That top-up request has expired. Start a new one from 💳 Wallet — if you already sent the payment, open 🎫 Support and we'll sort it out.",
+              { reply_markup: new InlineKeyboard().text("💳 Wallet", "wal:view").row().text("🏠 Menu", "mnu:home") },
+            );
+            break;
+          }
+          ctx.session.awaiting = "wallet_topup_txn";
+          await ctx.reply(
+            "🔎 Paste your Binance <b>Order ID</b> now (Binance → Pay → History → the completed payment). We'll verify it and credit your wallet.",
+            { parse_mode: "HTML" },
+          );
+          break;
+        }
         case "wal:freetxn":
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "wallet_free_txn";
