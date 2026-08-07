@@ -373,6 +373,8 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["📊 Dashboard", cb("adm", "stats"), "primary"], ["📈 Sales", cb("adm", "sales"), "primary"]],
     ] },
     m_pay: { title: "💳 <b>Payments & APIs</b>", subtitle: "Payment providers & suppliers", rows: [
+      [["🏦 BharatPe verification", cb("adm", "bharatpe"), "primary"]],
+      [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
       [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
@@ -409,8 +411,6 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["📄 Export orders (CSV)", cb("adm", "tlcsv"), "primary"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
-      [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
-      [["🏦 BharatPe verification", cb("adm", "bharatpe"), "primary"]],
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
       [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
