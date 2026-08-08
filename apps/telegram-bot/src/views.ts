@@ -779,7 +779,7 @@ export function helpView(): View {
 }
 
 export async function apiKeysView(user: BotUser): Promise<View> {
-  const keys = await listApiKeysByOwner(user.id);
+  const [keys, wallet] = await Promise.all([listApiKeysByOwner(user.id), getWallet(user.id)]);
   const active = keys.filter((k) => !k.revokedAt);
   const kb = new InlineKeyboard();
   // One key per user, so the first tap generates and every later one
@@ -787,7 +787,7 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   // is already using the old key.
   const key = active[0];
   if (!key) kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
-  if (key) kb.text("📦 API Orders", cb("api", "orders")).text("💰 API Balance", cb("api", "balance")).row();
+  if (key) kb.text("💰 API Balance", cb("api", "balance")).text("📦 API Orders", cb("api", "orders")).row();
   if (key) kb.add(sbtn("🔄 Regenerate Key", cb("api", "regen"), "danger")).row();
   kb.text("📖 API Documentation", cb("api", "docs")).row();
   if (active.length > 0) kb.add(sbtn("🛠 Fix permissions (403 errors)", cb("api", "fixscopes"), "primary")).row();
@@ -802,6 +802,9 @@ export async function apiKeysView(user: BotUser): Promise<View> {
       key
         ? [
             `🔑 <b>Key:</b>  <code>${key.prefix}</code>`,
+            // Balance sits with the key because it is the number that decides
+            // whether the next API call can actually place an order.
+            `💲 <b>Balance:</b>  <code>${toUsdt(Number(wallet.balanceMinor), wallet.currency as Currency)} USDT</code>`,
             `📊 <b>Status:</b>  ACTIVE`,
             `📈 <b>Calls:</b>  <code>${num(key.callCount ?? 0)}</code>`,
             "",
