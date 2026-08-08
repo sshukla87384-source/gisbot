@@ -200,7 +200,7 @@ export async function announceProduct(
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "🆕 ";
-  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
   const lines = [
     `${icon}${nameDisp}`,
@@ -265,7 +265,7 @@ export async function announceFlashSale(
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
-  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
   const hook = (await getFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
   const lines = [
@@ -300,6 +300,24 @@ export async function announceFlashSale(
  * Announce a restock to all users: "🔥 RESTOCKED — <product> · N added",
  * with image + price + a ⚡ Buy Now deep-link. Only for ACTIVE products.
  */
+
+/**
+ * Drop a leading emoji from a product name so only the icon the operator chose
+ * is shown.
+ *
+ * Names are often saved with an emoji already in front, and the icon is then
+ * prepended on top, giving two. A premium <tg-emoji> counts as well, because it
+ * renders as its plain fallback glyph and looks identical to the customer.
+ */
+export function stripLeadingEmoji(html: string): string {
+  let out = html.trimStart();
+  out = out.replace(/^<tg-emoji[^>]*>[\s\S]*?<\/tg-emoji>\s*/i, "");
+  // An opening tag such as <b> is kept in place while the emoji after it goes.
+  const m = out.match(/^(<[a-z]+[^>]*>)?\s*((?:[\p{Extended_Pictographic}\uFE0F\u200D])+)\s*/u);
+  if (m) out = (m[1] ?? "") + out.slice(m[0].length);
+  return out;
+}
+
 export async function announceRestock(
   productId: string,
   qtyAdded: number,
@@ -321,7 +339,7 @@ export async function announceRestock(
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const iconTxt = p.iconEmoji ? `${p.iconEmoji} ` : "";
-  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const usdt = cheapestMinor !== null ? (Number.isInteger(cheapestMinor / 100) ? (cheapestMinor / 100).toFixed(1) : (cheapestMinor / 100).toFixed(2)) : "";
   // A product's FIRST stock is news; every later batch is a restock. Announcing
   // both as "N new stock added" told customers a brand-new product was simply
@@ -341,7 +359,7 @@ export async function announceRestock(
         `${iconTxt}${nameDisp} — Stock: ${currentStock}`,
       ].join("\n")
     : `📣 <b>${qtyAdded} new stock added for</b> ${iconTxt}${nameDisp}`;
-  const btnLabel = `${iconTxt}${p.name} - ${usdt} USDT (Stock: ${currentStock})`.slice(0, 64);
+  const btnLabel = `${iconTxt}${stripLeadingEmoji(p.name)} - ${usdt} USDT (Stock: ${currentStock})`.slice(0, 64);
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
   const res = await sendBroadcast({
@@ -375,7 +393,7 @@ export async function announcePriceChange(
   const cfg = loadConfig();
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
-  const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+  const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const sym = currency === "INR" ? "₹" : "$";
   const money = (m: number) => `${sym}${(m / 100).toFixed(2)}`;
   const dropped = newMinor < oldMinor;
@@ -472,7 +490,7 @@ export async function announceCatalogue(
       .filter((n): n is number => n !== null);
     const price = priced.length > 0 ? `${sym}${(Math.min(...priced) / 100).toFixed(2)}` : "—";
     const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
-    const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
+    const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
     const stockTxt = unlimited ? "∞" : String(units);
     rows.push(`${icon}${nameDisp}\n🎁 <b>${stockTxt}</b> in stock · <b>${price}</b>`);
     shown++;
