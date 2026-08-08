@@ -1,4 +1,5 @@
 import {
+  listResellerPrices,
   getUpiAutoPolicy,
   getUpiProvider,
   getCartView,
@@ -788,6 +789,7 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   const key = active[0];
   if (!key) kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
   if (key) kb.text("💰 API Balance", cb("api", "balance")).text("📦 API Orders", cb("api", "orders")).row();
+  if (key) kb.text("🏷 My Selling Price", cb("api", "prices")).row();
   if (key) kb.add(sbtn("🔄 Regenerate Key", cb("api", "regen"), "danger")).row();
   kb.text("📖 API Documentation", cb("api", "docs")).row();
   if (active.length > 0) kb.add(sbtn("🛠 Fix permissions (403 errors)", cb("api", "fixscopes"), "primary")).row();
@@ -842,6 +844,33 @@ export async function apiOrdersView(user: BotUser): Promise<View> {
   for (const o of result.items.slice(0, 15)) lines.push(`${statusEmoji[o.status] ?? "•"} <code>${o.orderNumber}</code> · ${fmt(o.totalPaidMinor, o.currency)} · ${o.status}`);
   navRow(kb, cb("api", "home"));
   return { text: lines.join("\n"), kb };
+}
+
+export async function resellerPricesView(user: BotUser): Promise<View> {
+  const rows = await listResellerPrices(user.id, user.currency as Currency, 40);
+  const kb = new InlineKeyboard();
+  for (const r of rows) {
+    const shown = r.myPriceMinor ?? r.basePriceMinor;
+    kb.text(
+      `${r.myPriceMinor !== null ? "⭐ " : ""}${r.iconEmoji ? r.iconEmoji + " " : ""}${r.name.slice(0, 26)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
+      cb("api", "setprice", r.productId),
+    ).row();
+  }
+  navRow(kb, cb("api", "home"));
+  const withPrice = rows.filter((r) => r.myPriceMinor !== null).length;
+  return {
+    text: [
+      header(`🏷 ${bold("My Selling Price")}`),
+      "",
+      `⭐ <b>Custom set:</b>  <code>${withPrice} of ${rows.length}</code>`,
+      HR,
+      "This is what <b>your</b> API returns to <b>your</b> customers. You still pay our price — the difference is your profit.",
+      "",
+      "Tap a product to set or change its price. ⭐ = your custom price is set.",
+      rows.length >= 40 ? "\n<i>Showing first 40 — use the API for the rest.</i>" : "",
+    ].filter(Boolean).join("\n"),
+    kb,
+  };
 }
 
 export async function apiBalanceView(user: BotUser): Promise<View> {
