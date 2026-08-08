@@ -323,7 +323,24 @@ export async function announceRestock(
   const iconTxt = p.iconEmoji ? `${p.iconEmoji} ` : "";
   const nameDisp = p.nameHtml ?? `<b>${esc(p.name)}</b>`;
   const usdt = cheapestMinor !== null ? (Number.isInteger(cheapestMinor / 100) ? (cheapestMinor / 100).toFixed(1) : (cheapestMinor / 100).toFixed(2)) : "";
-  const body = `📣 <b>${qtyAdded} new stock added for</b> ${iconTxt}${nameDisp}`;
+  // A product's FIRST stock is news; every later batch is a restock. Announcing
+  // both as "N new stock added" told customers a brand-new product was simply
+  // back on the shelf, which reads as old and buries the launch.
+  //
+  // "First" means the product was created recently AND everything currently in
+  // stock arrived in this batch. Requiring both avoids calling an old product
+  // new just because it had sold out, and avoids calling a genuine launch a
+  // restock when the operator loads keys in two goes.
+  const isNewProduct =
+    Date.now() - p.createdAt.getTime() < 24 * 3600_000 && currentStock <= qtyAdded;
+  const body = isNewProduct
+    ? [
+        `📣 <b>New Update!</b>`,
+        "",
+        `We just added a new product:`,
+        `${iconTxt}${nameDisp} — Stock: ${currentStock}`,
+      ].join("\n")
+    : `📣 <b>${qtyAdded} new stock added for</b> ${iconTxt}${nameDisp}`;
   const btnLabel = `${iconTxt}${p.name} - ${usdt} USDT (Stock: ${currentStock})`.slice(0, 64);
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
