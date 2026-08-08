@@ -25,6 +25,8 @@ import {
   DELIVERY_FILE_THRESHOLD,
   createApiKey,
   revokeApiKeyOwned,
+  regenerateApiKeyForOwner,
+  getActiveApiKeyForOwner,
   createTicket,
   getWallet,
   convertMinor,
@@ -1070,7 +1072,8 @@ export function createBot(): Bot<Ctx> {
     }
     if (awaiting === "api_key_name") {
       const name = ctx.message.text.trim().slice(0, 120) || "my key";
-      const created = await createApiKey({ name, scopes: ["catalog:read", "orders:read", "orders:write", "wallet:read"], ownerUserId: ctx.user.id });
+      // One key per user: this retires any earlier one in the same transaction.
+      const created = await regenerateApiKeyForOwner(ctx.user.id, name);
       const base = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "") + "/api/v1/developer";
       await ctx.reply(
         [
@@ -1905,6 +1908,42 @@ export function createBot(): Bot<Ctx> {
         case "api:balance":
           await render(ctx, await views.apiBalanceView(user), true);
           break;
+        case "api:regen": {
+          await ctx.answerCallbackQuery();
+          const cur = await getActiveApiKeyForOwner(user.id);
+          await ctx.reply([
+            "⚠️ <b>Regenerate API Key?</b>",
+            "",
+            cur
+              ? `Your current key <code>${cur.prefix}</code> will stop working <u>immediately</u>. Any app or script using it will break until you update it with the new key.`
+              : "You don't have a key yet — this will create your first one.",
+            "",
+            "The new key will be shown <b>only once</b> — keep it safe.",
+            "",
+            "Do you want to continue?",
+          ].join("\n"), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("✅ Yes, Regenerate", "api:regenok")
+              .text("❌ No, Keep Key", "api:home"),
+          });
+          break;
+        }
+        case "api:regenok": {
+          await ctx.answerCallbackQuery();
+          const created = await regenerateApiKeyForOwner(user.id, "my key");
+          const base = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "") + "/api/v1/developer";
+          await ctx.reply([
+            "✅ <b>New API key</b> — copy it now, it won't be shown again:",
+            "",
+            `<code>${created.apiKey}</code>`,
+            "",
+            "Your previous key has been revoked and will no longer work.",
+            `Base URL: <code>${base}</code>`,
+          ].join("\n"), { parse_mode: "HTML" });
+          await render(ctx, await views.apiKeysView(user), false);
+          break;
+        }
         case "api:new":
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "api_key_name";

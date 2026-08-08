@@ -776,9 +776,13 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   const keys = await listApiKeysByOwner(user.id);
   const active = keys.filter((k) => !k.revokedAt);
   const kb = new InlineKeyboard();
-  kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
-  if (active.length > 0) kb.text(`📋 My API keys (${active.length})`, cb("api", "list")).row();
-  if (active.length > 0) kb.text("📦 API Orders", cb("api", "orders")).text("💰 API Balance", cb("api", "balance")).row();
+  // One key per user, so the first tap generates and every later one
+  // regenerates — behind a confirmation, because regenerating breaks whatever
+  // is already using the old key.
+  const key = active[0];
+  if (!key) kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
+  if (key) kb.text("📦 API Orders", cb("api", "orders")).text("💰 API Balance", cb("api", "balance")).row();
+  if (key) kb.add(sbtn("🔄 Regenerate Key", cb("api", "regen"), "danger")).row();
   kb.text("📖 API Documentation", cb("api", "docs")).row();
   if (active.length > 0) kb.add(sbtn("🛠 Fix permissions (403 errors)", cb("api", "fixscopes"), "primary")).row();
   backToMenuRow(kb);
@@ -789,9 +793,17 @@ export async function apiKeysView(user: BotUser): Promise<View> {
       "Build on our store: browse the catalog, check your balance, and place orders from your wallet — all via a REST API.",
       "<i>New here? Tap 📖 API Documentation for the base URL, auth header and example requests.</i>",
       "",
-      active.length > 0
-        ? `You have <b>${num(active.length)}</b> active key(s). Tap 📋 My API keys to manage them.`
-        : "Tap 🔑 Generate API key to create your first key.",
+      key
+        ? [
+            `🔑 <b>Key:</b>  <code>${key.prefix}</code>`,
+            `📊 <b>Status:</b>  ACTIVE`,
+            `📈 <b>Calls:</b>  <code>${num(key.callCount ?? 0)}</code>`,
+            "",
+            "<i>The full key is hidden for security — it was shown only once when generated. Need it again? Tap 🔄 Regenerate Key to get a new one.</i>",
+            "",
+            "Use the buttons below to manage your API access.",
+          ].join("\n")
+        : "📊 <b>Status:</b>  NO KEY\n\nTap 🔑 Generate API key to create your first key. You get one key, and you can regenerate it any time.",
     ].join("\n"),
     kb,
   };
