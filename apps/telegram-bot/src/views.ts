@@ -439,9 +439,30 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
   }
   paginationRow(kb, "ord", "list", result.page, result.pages);
   backToMenuRow(kb);
-  return { text: result.items.length > 0
-    ? `${header(`📦 ${bold("Your Orders")}`)}\n<i>Tap any order to view or re-copy your delivered keys/accounts. ✅ = delivered, 🕐 = being delivered.</i>`
-    : `${header(`📦 ${bold("Your Orders")}`)}\n<i>No orders yet — head to 🛍 Shop to make your first purchase.</i>`, kb };
+  const onPage = result.items.length;
+  const delivered = result.items.filter((o) => o.status === "COMPLETED").length;
+  const waiting = result.items.filter((o) => o.status === "PENDING_PAYMENT" || o.status === "PENDING_FULFILLMENT").length;
+  return { text: onPage > 0
+    ? [
+        header(`📦 ${bold("Your Orders")}`),
+        "",
+        // Counts describe THIS page, and say so — claiming a total would be
+        // wrong as soon as there is more than one page.
+        `📄 <b>Page:</b>  <code>${result.page} of ${result.pages}</code>`,
+        `✅ <b>Delivered:</b>  <code>${delivered} of ${onPage} shown</code>`,
+        waiting > 0 ? `🕐 <b>In progress:</b>  <code>${waiting}</code>` : "",
+        HR,
+        "<i>Tap any order to view or re-copy your delivered keys and accounts.</i>",
+        "",
+        "✅ delivered · 💳 paid · 🕐 being delivered · ⌛ awaiting payment · ↩️ refunded",
+      ].filter(Boolean).join("\n")
+    : [
+        header(`📦 ${bold("Your Orders")}`),
+        "",
+        `📄 <b>Orders:</b>  <code>none yet</code>`,
+        HR,
+        "<i>Head to 🛍 Shop to make your first purchase — delivery is instant for most items.</i>",
+      ].join("\n"), kb };
 }
 
 export async function vaultView(user: BotUser, page: number): Promise<View> {
@@ -465,21 +486,31 @@ export async function walletView(user: BotUser): Promise<View> {
     .text("➕ Top up", cb("wal", "topup")).text("📜 History", cb("wal", "hist", 1)).row();
   if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
   backToMenuRow(kb);
+  const spendable = wallet.balanceMinor > 0n;
   const lines = [
     header(`💰 ${bold("Wallet")}`),
-    `Balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b> (${wallet.currency})`,
+    "",
+    `💲 <b>Balance:</b>  <code>${fmt(wallet.balanceMinor, wallet.currency)}</code>`,
     wallet.currency === "USD"
-      ? `🇮🇳 Worth about <b>₹${(convertMinor(Number(wallet.balanceMinor), "USD" as Currency, "INR" as Currency) / 100).toFixed(2)}</b> at the store rate`
-      : `🪙 Worth about <b>${toUsdt(Number(wallet.balanceMinor), wallet.currency as Currency)} USDT</b> at the store rate`,
+      ? `🇮🇳 <b>Worth:</b>  <code>₹${(convertMinor(Number(wallet.balanceMinor), "USD" as Currency, "INR" as Currency) / 100).toFixed(2)}</code> at the store rate`
+      : `🪙 <b>Worth:</b>  <code>${toUsdt(Number(wallet.balanceMinor), wallet.currency as Currency)} USDT</code> at the store rate`,
+    `📊 <b>Status:</b>  ${bnpl.outstandingMinor > 0n ? "REPAYMENT DUE" : spendable ? "READY TO SPEND" : "EMPTY"}`,
   ];
   if (bnpl.limitMinor > 0) {
     lines.push(
-      "",
+      HR,
       `🕒 <b>Pay Later (BNPL)</b>`,
       `Limit: <b>${fmt(bnpl.limitMinor, bnpl.currency)}</b> · Owed: <b>${fmt(bnpl.outstandingMinor, bnpl.currency)}</b> · Available: <b>${fmt(bnpl.availableMinor, bnpl.currency)}</b>`,
     );
   }
-  lines.push("", "Top up instantly with Binance (USDT) — tap ➕ Top up. You can also pay orders directly at checkout.");
+  lines.push(
+    HR,
+    spendable
+      ? "<i>Your balance is spent automatically at checkout — no need to pay again.</i>"
+      : "<i>Top up instantly with Binance (USDT) or UPI, then pay for anything in one tap.</i>",
+    "",
+    "Use the buttons below to manage your wallet.",
+  );
   return { text: lines.join("\n"), kb };
 }
 
@@ -511,6 +542,11 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
     text: [
       header(`🎁 ${bold("Refer & Earn")}`),
       "",
+      `👥 <b>Invited:</b>  <code>${num(stats.invited)}</code>`,
+      `🛍 <b>Purchased:</b>  <code>${num(stats.purchased)}</code>`,
+      `💰 <b>Earned:</b>  <code>${fmt(stats.earnedMinor, user.currency)}</code>`,
+      `📊 <b>Status:</b>  ${stats.invited > 0 ? "ACTIVE" : "NOT STARTED"}`,
+      HR,
       "Invite friends and earn <b>real wallet rewards</b> on everything they buy! 💸",
       HR,
       `🎯 <b>How it works</b>`,
@@ -524,9 +560,6 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
       `• Rewards are held for <b>${cfg.holdHours}h</b> (anti-fraud), then auto-credited to your 💰 Wallet.`,
       `• No limit — the more friends buy, the more you earn. Spend rewards on any product.`,
       HR,
-      `📊 <b>Your progress</b>`,
-      `👥 Invited: <b>${num(stats.invited)}</b>  ·  🛍 Purchased: <b>${num(stats.purchased)}</b>  ·  💰 Earned: <b>${fmt(stats.earnedMinor, user.currency)}</b>`,
-      "",
       `🔗 <b>Your link</b> (tap to copy)`,
       `<code>${link}</code>`,
     ].join("\n"),
