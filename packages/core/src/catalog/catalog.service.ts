@@ -71,6 +71,9 @@ export interface ProductView {
   iconEmoji: string | null;
   onSale: boolean;
   salePercentBp: number | null;
+  bulkMinQty: number | null;
+  bulkPercentBp: number | null;
+  bulkUnitPriceMinor: number | null;
   saleEndsAt: Date | null;
   type: string;
   fulfillmentMode: string;
@@ -386,6 +389,15 @@ async function getProductViewUncached(productId: string, currency: Currency, use
     iconEmoji: p.iconEmoji,
     onSale,
     salePercentBp: p.salePercentBp,
+    bulkMinQty: p.bulkMinQty ?? null,
+    bulkPercentBp: p.bulkPercentBp ?? null,
+    // Precomputed with the SAME helper the charge uses, so the advertised
+    // per-unit price cannot drift from what the customer is actually billed.
+    bulkUnitPriceMinor: (() => {
+      if (!p.bulkMinQty || !p.bulkPercentBp) return null;
+      const b = p.variants[0]?.prices[0]?.amountMinor ?? null;
+      return b === null ? null : effectivePriceMinor(b, p, new Date(), p.bulkMinQty);
+    })(),
     saleEndsAt: p.saleEndsAt,
     type: p.type,
     fulfillmentMode: p.fulfillmentMode,
@@ -516,4 +528,17 @@ export async function categoryIdsUnder(categoryId: string): Promise<string[]> {
   };
   walk(categoryId);
   return out;
+}
+
+/** Set or clear a product's bulk-quantity tier. */
+export async function setProductBulkTier(
+  productId: string,
+  minQty: number | null,
+  percentBp: number | null,
+): Promise<void> {
+  await prisma.product.update({
+    where: { id: productId },
+    data: { bulkMinQty: minQty, bulkPercentBp: percentBp },
+  });
+  await invalidate("cat:*");
 }

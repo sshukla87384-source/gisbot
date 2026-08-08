@@ -215,6 +215,11 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     "",
     `💎 ${bold("Price")}`,
     priceStr,
+    // Advertised from the same helper the charge uses, so it cannot drift from
+    // what the customer is actually billed.
+    ...(p.bulkMinQty && p.bulkUnitPriceMinor !== null
+      ? ["", `📦 <b>BULK DISCOUNT ACTIVE</b>`, `• Buy <b>${p.bulkMinQty}+</b> → <b>${fmt(p.bulkUnitPriceMinor, user.currency)}</b> each`]
+      : []),
     "",
     `📈 ${bold("Available")}`,
     stockStr,

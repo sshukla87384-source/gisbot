@@ -97,7 +97,9 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       defaultCostMinor: v.defaultCostMinor ?? null,
       resellerId: v.product.resellerId,
       quantity: item.quantity,
-      unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product),
+      // Quantity is passed HERE, not only in the shop display. A bulk discount
+      // shown but not charged is a chargeback waiting to happen.
+      unitPriceMinor: vipOverride ?? effectivePriceMinor(price.amountMinor, v.product, new Date(), item.quantity),
       fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
     };
   });
