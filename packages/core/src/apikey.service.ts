@@ -128,3 +128,47 @@ export async function grantAllScopesToOwner(ownerUserId: string): Promise<{ upda
   });
   return { updated: res.count, scopes };
 }
+
+export const DEV_SCOPES = ["catalog:read", "orders:read", "orders:write", "wallet:read"] as const;
+
+/**
+ * Issue the caller's ONE developer key, retiring any earlier one.
+ *
+ * Creating a key used to just add another row — nothing tied a key to its
+ * owner exclusively, so a customer tapping Create twice ended up with two live
+ * keys and no way to tell which was which, and revoking the one they could see
+ * left the other still working. Old keys are revoked in the same transaction,
+ * so there is never a moment where two of a user's keys are valid.
+ */
+export async function regenerateApiKeyForOwner(
+  ownerUserId: string,
+  name = "my key",
+): Promise<CreatedApiKey> {
+  return prisma.$transaction(async (tx) => {
+    await tx.apiKey.updateMany({
+      where: { ownerUserId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    const raw = KEY_PREFIX + randomBytes(24).toString("hex");
+    const rec = await tx.apiKey.create({
+      data: {
+        name: name.slice(0, 120),
+        keyHash: sha256Hex(raw),
+        prefix: raw.slice(0, 16),
+        scopes: [...DEV_SCOPES],
+        rateLimitPerMin: 120,
+        ownerUserId,
+      },
+    });
+    return { id: rec.id, apiKey: raw, prefix: rec.prefix };
+  });
+}
+
+/** The caller's single active key, if any. */
+export async function getActiveApiKeyForOwner(ownerUserId: string): Promise<{ id: string; prefix: string; name: string; callCount: number; lastUsedAt: Date | null } | null> {
+  return prisma.apiKey.findFirst({
+    where: { ownerUserId, revokedAt: null },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, prefix: true, name: true, callCount: true, lastUsedAt: true },
+  });
+}
