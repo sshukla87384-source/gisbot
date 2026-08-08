@@ -215,7 +215,10 @@ export async function announceProduct(
     : [`📣 <b>New Update!</b>`, "", `We just added a new product:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`];
   if (cheapest) lines.push("", `💵 <b>${onSale ? "Sale price " : "Price "}from ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
 
-  const buttonText = onSale ? "🛒 Buy now — 🔥 Deal" : "🛒 Buy now";
+  // The emoji goes on the button too. It is the thing a customer recognises at
+  // a glance in a busy chat, and the button is often all they look at.
+  const btnEmoji = productEmoji(p.iconEmoji, p.name);
+  const buttonText = `${btnEmoji ? `${btnEmoji} ` : ""}${onSale ? "🛒 Buy now — 🔥 Deal" : "🛒 Buy now"}`.slice(0, 64);
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
 
   const res = await sendBroadcast({
@@ -316,6 +319,19 @@ export async function announceFlashSale(
  * prepended on top, giving two. A premium <tg-emoji> counts as well, because it
  * renders as its plain fallback glyph and looks identical to the customer.
  */
+
+/**
+ * The product's emoji — the icon field if set, otherwise the first emoji in the
+ * name. stripLeadingEmoji removes that one from the displayed name, so without
+ * this fallback a product whose emoji lives in its name would show none at all
+ * on the button.
+ */
+export function productEmoji(iconEmoji: string | null, name: string): string {
+  if (iconEmoji) return iconEmoji;
+  const m = name.match(/[\p{Extended_Pictographic}](?:\uFE0F|\u200D[\p{Extended_Pictographic}])*/u);
+  return m ? m[0] : "";
+}
+
 export function stripLeadingEmoji(html: string): string {
   let out = html.trimStart();
   out = out.replace(/^<tg-emoji[^>]*>[\s\S]*?<\/tg-emoji>\s*/i, "");
@@ -345,7 +361,10 @@ export async function announceRestock(
   const cheapestMinor = pricedMinors.length > 0 ? Math.min(...pricedMinors) : null;
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const iconTxt = p.iconEmoji ? `${p.iconEmoji} ` : "";
+  // Same fallback as the launch post, so a product whose emoji lives in its
+  // name is not blank here while showing one there.
+  const restockEmoji = productEmoji(p.iconEmoji, p.name);
+  const iconTxt = restockEmoji ? `${restockEmoji} ` : "";
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const usdt = cheapestMinor !== null ? (Number.isInteger(cheapestMinor / 100) ? (cheapestMinor / 100).toFixed(1) : (cheapestMinor / 100).toFixed(2)) : "";
   // A product's FIRST stock is news; every later batch is a restock. Announcing
