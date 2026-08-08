@@ -1,4 +1,5 @@
 import { cached, getRedis } from "../redis.js";
+import { convertMinor } from "../fx.js";
 import { prisma, type Currency, type User } from "@gis/database";
 import { REFERRAL_PREFIX } from "@gis/shared";
 
@@ -105,8 +106,48 @@ export async function setUserLocale(userId: string, locale: string): Promise<voi
   await prisma.user.update({ where: { id: userId }, data: { locale } });
 }
 
+/**
+ * Switch a user's currency, converting every balance they hold.
+ *
+ * bnplLimitMinor, bnplOutstandingMinor and the wallet balance are bare numbers
+ * interpreted as "whatever the user's currency currently is". Changing the
+ * currency alone therefore relabelled them without converting: a Rs 50 credit
+ * limit became a $50 one, roughly ninety times larger, and a customer owing
+ * Rs 4,400 would suddenly owe $4,400. The wallet balance moved the same way in
+ * the opposite direction.
+ *
+ * Everything is converted in one transaction so a failure part-way cannot leave
+ * a user with amounts in two different currencies.
+ */
 export async function setUserCurrency(userId: string, currency: Currency): Promise<void> {
-  await prisma.user.update({ where: { id: userId }, data: { currency } });
+  await prisma.$transaction(async (tx) => {
+    const u = await tx.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { currency: true, bnplLimitMinor: true, bnplOutstandingMinor: true },
+    });
+    if (u.currency === currency) return;
+    const from = u.currency as Currency;
+    const conv = (n: number): number => Math.round(convertMinor(n, from, currency));
+
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        currency,
+        bnplLimitMinor: conv(u.bnplLimitMinor),
+        bnplOutstandingMinor: conv(u.bnplOutstandingMinor),
+      },
+    });
+
+    // The wallet is the same kind of bare number and must move with it, or a
+    // balance would silently gain or lose value on a currency switch.
+    const w = await tx.wallet.findUnique({ where: { userId }, select: { id: true, balanceMinor: true, currency: true } });
+    if (w && w.currency !== currency) {
+      await tx.wallet.update({
+        where: { id: w.id },
+        data: { currency, balanceMinor: BigInt(Math.round(convertMinor(Number(w.balanceMinor), w.currency as Currency, currency))) },
+      });
+    }
+  });
 }
 
 export async function getReferralStats(userId: string): Promise<{
