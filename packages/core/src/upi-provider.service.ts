@@ -215,3 +215,13 @@ export async function pollUpiCredits(): Promise<number> {
   }
   return stored;
 }
+
+/** What the delivery gate can actually see — the stored ledger, not the API. */
+export async function upiLedgerSummary(): Promise<{ total: number; matched: number; latestUtr: string | null; latestAt: Date | null }> {
+  const [total, matched, latest] = await Promise.all([
+    prisma.upiCredit.count(),
+    prisma.upiCredit.count({ where: { orderId: { not: null } } }),
+    prisma.upiCredit.findFirst({ orderBy: { creditedAt: "desc" }, select: { utr: true, creditedAt: true } }),
+  ]);
+  return { total, matched, latestUtr: latest?.utr ?? null, latestAt: latest?.creditedAt ?? null };
+}
