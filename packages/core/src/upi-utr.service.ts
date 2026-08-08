@@ -2,7 +2,7 @@ import { prisma } from "@gis/database";
 import { randomBytes } from "node:crypto";
 import { getRedis } from "./redis.js";
 import { UPI_UTR_GRACE_MIN } from "./orders/binance-window.js";
-import { getUpiProvider } from "./upi-provider.service.js";
+import { getUpiProvider, pollUpiCredits } from "./upi-provider.service.js";
 
 /**
  * UPI UTR reuse protection.
@@ -172,7 +172,15 @@ export async function shouldAutoDeliverUpi(orderId: string, utr?: string): Promi
   const provider = await getUpiProvider();
   if (provider) {
     if (!utr) return { auto: false, reason: "UNVERIFIED" };
-    const credit = await prisma.upiCredit.findUnique({ where: { utr } });
+    let credit = await prisma.upiCredit.findUnique({ where: { utr } });
+    if (!credit) {
+      // The ledger is filled by a poll every two minutes, but a customer pastes
+      // their UTR seconds after paying — so at this moment the credit almost
+      // never exists yet, and waiting for the next tick would send virtually
+      // every order to manual approval. Fetch once, on demand, then re-check.
+      await pollUpiCredits().catch(() => 0);
+      credit = await prisma.upiCredit.findUnique({ where: { utr } });
+    }
     if (!credit) return { auto: false, reason: "UNVERIFIED" };
     if (credit.orderId && credit.orderId !== orderId) return { auto: false, reason: "CREDIT_USED" };
     // Minor units are only comparable within one currency. A USD order of

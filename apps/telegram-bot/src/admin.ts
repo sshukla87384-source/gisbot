@@ -228,6 +228,8 @@ import {
   setUpiProvider,
   fetchUpiCredits,
   probeUpiEndpoint,
+  pollUpiCredits,
+  upiLedgerSummary,
   mapCreditRow,
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
@@ -1692,6 +1694,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         const probe = await probeUpiEndpoint(cfg);
         const rows = await fetchUpiCredits(cfg).catch(() => [] as Array<Record<string, unknown>>);
         const usable = rows.map(mapCreditRow).filter(Boolean).length;
+        // Store what was just fetched, then report the LEDGER — delivery is
+        // gated on stored credits, so a test that only proves the API reads
+        // left the actual blocker invisible.
+        const storedNow = await pollUpiCredits().catch(() => 0);
+        const led = await upiLedgerSummary();
         out = [
           `🧪 <b>Connection test</b>`,
           `HTTP <b>${probe.status}</b> · ${escapeHtml(probe.ctype.split(";")[0] || "?")}`,
@@ -1702,6 +1709,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
             : usable === 0
               ? "⚠️ Rows came back but none could be read as credits — the field names differ. Send the sample below and they can be mapped."
               : "✅ Working. Credits will be matched to orders automatically.",
+          "",
+          "",
+          `💾 <b>Stored credits:</b> ${led.total} (${led.matched} matched to orders)`,
+          storedNow > 0 ? `➕ Just stored ${storedNow} new` : "",
+          led.latestUtr ? `🕐 Latest: <code>${escapeHtml(led.latestUtr)}</code>` : "⚠️ Ledger is EMPTY — nothing can auto-deliver until credits are stored.",
           "",
           "<b>Raw response (first 600 chars):</b>",
           `<code>${escapeHtml(probe.body.slice(0, 600))}</code>`,
