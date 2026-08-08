@@ -515,6 +515,10 @@ model Product {
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
   saleEndsAt      DateTime?
+  /// Buy this many or more and bulkPercentBp comes off the unit price.
+  bulkMinQty      Int?
+  /// Bulk discount in basis points (1000 = 10% off each unit).
+  bulkPercentBp   Int?
   announcedAt     DateTime? // set when auto-announced to bot users (dedupe)
   isFeatured      Boolean         @default(false)
   sortOrder       Int             @default(0)

@@ -96,7 +96,7 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
   const lines: CartLine[] = (cart?.items ?? []).map((item) => {
     const base = item.variant.prices[0]?.amountMinor ?? null;
     const override = overrideByProduct.get(item.variant.productId);
-    const price = base === null ? null : (override ?? effectivePriceMinor(base, item.variant.product));
+    const price = base === null ? null : (override ?? effectivePriceMinor(base, item.variant.product, new Date(), item.quantity));
     const available =
       item.variant.isActive &&
       item.variant.deletedAt === null &&

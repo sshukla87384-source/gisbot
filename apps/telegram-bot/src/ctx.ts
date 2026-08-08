@@ -7,6 +7,7 @@ export interface SessionData {
     | "maint_msg"
     | "admin_upi_auto_cap"
     | "admin_bp_value"
+    | "admin_p_bulk"
     | "search"
     | "ticket"
     | "ticket_reply"

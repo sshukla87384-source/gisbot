@@ -119,6 +119,7 @@ import {
   setProductActivationGuide,
   setProductButton,
   setProductStatus,
+  setProductBulkTier,
   testBinanceApi,
   setBinanceCreds,
   listSuppliers,
@@ -555,6 +556,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.add(sbtn(`🤖 Auto-announce: ${autoPromo.productIds.includes(p.id) ? "✅ ON" : "🚫 OFF"}`, cb("adm", "pauto", p.id), autoPromo.productIds.includes(p.id) ? "success" : "primary")).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
+  kb.row().text(p.bulkMinQty ? `📦 Bulk: ${p.bulkMinQty}+ = ${((p.bulkPercentBp ?? 0) / 100).toFixed(0)}% off` : "📦 Set bulk discount", cb("adm", "pbulk", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
@@ -3359,6 +3361,17 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "saleoff": { await clearFlashSale(id); await ctx.reply("🔥 Sale ended."); return productView(ctx, id); }
+    case "pbulk":
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_bulk";
+      await askStep(ctx, [
+        "📦 <b>Bulk discount</b>",
+        "",
+        "Send <code>QTY PERCENT</code> — e.g. <code>50 8</code> means buy 50 or more and get 8% off each unit.",
+        "",
+        "Send <code>off</code> to remove it.",
+      ].join("\n"));
+      return;
     case "pdel": {
       const kb = new InlineKeyboard()
         .add(sbtn("🗑 Yes, delete", cb("adm", "pdely", id), "danger")).row()
@@ -4490,6 +4503,31 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await setUpiAutoApprove((await getUpiAutoPolicy()).enabled, Math.round(rupees * 100));
     flash(ctx, `✏️ Auto-delivery limit set to <b>₹${rupees.toFixed(0)}</b>.`);
     await upiAutoView(ctx);
+    return true;
+  }
+
+  if (awaiting === "admin_p_bulk") {
+    const pid = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    if (!pid) { await ctx.reply("Lost track of that product — open it again."); return true; }
+    if (/^off$/i.test(text)) {
+      await setProductBulkTier(pid, null, null);
+      flash(ctx, "📦 Bulk discount removed.");
+      await handleAdminCallback(ctx, "prod", [pid]);
+      return true;
+    }
+    const m = text.match(/(\d+)\D+(\d+(?:\.\d+)?)/);
+    const qty = m ? Number.parseInt(m[1]!, 10) : NaN;
+    const pct = m ? Number.parseFloat(m[2]!) : NaN;
+    if (!Number.isFinite(qty) || qty < 2 || !Number.isFinite(pct) || pct <= 0 || pct > 90) {
+      ctx.session.admProductId = pid;
+      ctx.session.awaiting = "admin_p_bulk";
+      await ctx.reply("Send it as <code>QTY PERCENT</code>, e.g. <code>50 8</code>. Quantity must be 2 or more and the discount between 0 and 90%.", { parse_mode: "HTML" });
+      return true;
+    }
+    await setProductBulkTier(pid, qty, Math.round(pct * 100));
+    flash(ctx, `📦 Bulk discount set — buy <b>${qty}+</b> for <b>${pct}% off</b> each.`);
+    await handleAdminCallback(ctx, "prod", [pid]);
     return true;
   }
 
