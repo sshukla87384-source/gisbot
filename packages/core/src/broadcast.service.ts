@@ -202,10 +202,17 @@ export async function announceProduct(
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "🆕 ";
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
-  const lines = [
-    `${icon}${nameDisp}`,
-    onSale ? "🔥 <b>Flash sale — just added!</b>" : "🆕 <b>Just added & in stock!</b>",
-  ];
+  // Lead with the news rather than the product name. "Just added & in stock"
+  // sat under the title and read as a label; announcing the update first tells
+  // a customer scrolling past what actually happened.
+  const stockView = await getProductView(p.id, "USD").catch(() => null);
+  const UNLIMITED = 1_000_000;
+  const totalStock = stockView
+    ? stockView.variants.reduce((sum, v) => sum + (v.stock >= UNLIMITED ? 0 : v.stock), 0)
+    : 0;
+  const lines = onSale
+    ? [`📣 <b>New Update!</b>`, "", `We just added a new product — <b>on flash sale</b>:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`]
+    : [`📣 <b>New Update!</b>`, "", `We just added a new product:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`];
   if (cheapest) lines.push("", `💵 <b>${onSale ? "Sale price " : "Price "}from ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
 
   const buttonText = onSale ? "🛒 Buy now — 🔥 Deal" : "🛒 Buy now";
