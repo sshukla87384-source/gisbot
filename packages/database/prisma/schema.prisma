@@ -515,10 +515,12 @@ model Product {
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
   saleEndsAt      DateTime?
-  /// Buy this many or more and bulkPercentBp comes off the unit price.
+  /// Legacy single tier. Still honoured when bulkTiers is empty, so products
+  /// configured before tiered pricing keep working untouched.
   bulkMinQty      Int?
-  /// Bulk discount in basis points (1000 = 10% off each unit).
   bulkPercentBp   Int?
+  /// Quantity discount ladder: [{ "minQty": 10, "percentBp": 500 }, ...]
+  bulkTiers       Json?
   announcedAt     DateTime? // set when auto-announced to bot users (dedupe)
   isFeatured      Boolean         @default(false)
   sortOrder       Int             @default(0)

@@ -119,7 +119,7 @@ import {
   setProductActivationGuide,
   setProductButton,
   setProductStatus,
-  setProductBulkTier,
+  setProductBulkTiers,
   testBinanceApi,
   setBinanceCreds,
   listSuppliers,
@@ -556,7 +556,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.add(sbtn(`🤖 Auto-announce: ${autoPromo.productIds.includes(p.id) ? "✅ ON" : "🚫 OFF"}`, cb("adm", "pauto", p.id), autoPromo.productIds.includes(p.id) ? "success" : "primary")).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
-  kb.row().text(p.bulkMinQty ? `📦 Bulk: ${p.bulkMinQty}+ = ${((p.bulkPercentBp ?? 0) / 100).toFixed(0)}% off` : "📦 Set bulk discount", cb("adm", "pbulk", p.id));
+  kb.row().text("📦 Bulk discounts", cb("adm", "pbulk", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
@@ -3365,11 +3365,16 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_bulk";
       await askStep(ctx, [
-        "📦 <b>Bulk discount</b>",
+        "📦 <b>Bulk discounts</b>",
         "",
-        "Send <code>QTY PERCENT</code> — e.g. <code>50 8</code> means buy 50 or more and get 8% off each unit.",
+        "Send one tier per line as <code>QTY PERCENT</code>:",
+        "<code>10 5</code>",
+        "<code>20 6</code>",
+        "<code>50 8</code>",
         "",
-        "Send <code>off</code> to remove it.",
+        "That means 5% off each unit from 10, 6% from 20, 8% from 50. Add as many tiers as you like.",
+        "",
+        "Send <code>off</code> to remove them all.",
       ].join("\n"));
       return;
     case "pdel": {
@@ -4511,22 +4516,39 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     ctx.session.admProductId = undefined;
     if (!pid) { await ctx.reply("Lost track of that product — open it again."); return true; }
     if (/^off$/i.test(text)) {
-      await setProductBulkTier(pid, null, null);
-      flash(ctx, "📦 Bulk discount removed.");
+      await setProductBulkTiers(pid, []);
+      flash(ctx, "📦 Bulk discounts removed.");
       await handleAdminCallback(ctx, "prod", [pid]);
       return true;
     }
-    const m = text.match(/(\d+)\D+(\d+(?:\.\d+)?)/);
-    const qty = m ? Number.parseInt(m[1]!, 10) : NaN;
-    const pct = m ? Number.parseFloat(m[2]!) : NaN;
-    if (!Number.isFinite(qty) || qty < 2 || !Number.isFinite(pct) || pct <= 0 || pct > 90) {
+    // One tier per line. Bad lines are reported rather than silently dropped —
+    // an operator who mistypes a rung should not discover it from a customer.
+    const tiers: Array<{ minQty: number; percentBp: number }> = [];
+    const bad: string[] = [];
+    for (const line of text.split(/[\n,;]+/).map((l) => l.trim()).filter(Boolean)) {
+      const m = line.match(/^(\d+)\s*\D{0,3}\s*(\d+(?:\.\d+)?)\s*%?$/);
+      const qty = m ? Number.parseInt(m[1]!, 10) : NaN;
+      const pct = m ? Number.parseFloat(m[2]!) : NaN;
+      if (!Number.isFinite(qty) || qty < 2 || !Number.isFinite(pct) || pct <= 0 || pct > 90) { bad.push(line); continue; }
+      tiers.push({ minQty: qty, percentBp: Math.round(pct * 100) });
+    }
+    if (tiers.length === 0) {
       ctx.session.admProductId = pid;
       ctx.session.awaiting = "admin_p_bulk";
-      await ctx.reply("Send it as <code>QTY PERCENT</code>, e.g. <code>50 8</code>. Quantity must be 2 or more and the discount between 0 and 90%.", { parse_mode: "HTML" });
+      await ctx.reply("None of those lines looked like a tier. Use <code>QTY PERCENT</code>, one per line — e.g. <code>10 5</code>. Quantity 2 or more, discount between 0 and 90%.", { parse_mode: "HTML" });
       return true;
     }
-    await setProductBulkTier(pid, qty, Math.round(pct * 100));
-    flash(ctx, `📦 Bulk discount set — buy <b>${qty}+</b> for <b>${pct}% off</b> each.`);
+    // Later rungs must not be worth less than earlier ones, or a bulk buyer
+    // would pay more than a smaller order.
+    const sorted = [...tiers].sort((a, b) => a.minQty - b.minQty);
+    const regressions = sorted.filter((t, i) => i > 0 && t.percentBp < sorted[i - 1]!.percentBp);
+    await setProductBulkTiers(pid, tiers);
+    flash(ctx, [
+      `📦 <b>${tiers.length} bulk tier(s) saved</b>`,
+      ...sorted.map((t) => `• ${t.minQty}+ → ${(t.percentBp / 100).toFixed(t.percentBp % 100 === 0 ? 0 : 1)}% off`),
+      ...(bad.length > 0 ? ["", `⚠️ Ignored: ${escapeHtml(bad.join(", ")).slice(0, 80)}`] : []),
+      ...(regressions.length > 0 ? ["", "⚠️ A larger quantity has a smaller discount — buyers get the best tier they qualify for, so that rung will never apply."] : []),
+    ].join("\n"));
     await handleAdminCallback(ctx, "prod", [pid]);
     return true;
   }
