@@ -1092,28 +1092,7 @@ export function createBot(): Bot<Ctx> {
       return render(ctx, await views.resellerPricesView(ctx.user), false);
     }
 
-    if (awaiting === "api_key_name") {
-      const name = ctx.message.text.trim().slice(0, 120) || "my key";
-      // One key per user: this retires any earlier one in the same transaction.
-      const created = await regenerateApiKeyForOwner(ctx.user.id, name);
-      const base = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "") + "/api/v1/developer";
-      await ctx.reply(
-        [
-          "✅ <b>API key created</b> — copy it now, it won’t be shown again:",
-          "",
-          `<code>${created.apiKey}</code>`,
-          "",
-          `Scopes: catalog:read, orders:read, orders:write, wallet:read`,
-          "This key can browse products, check your balance, and <b>buy from your wallet</b>.",
-          `Base URL: <code>${base}</code>`,
-          `📖 Full docs: ${base}`,
-          `🔧 Interactive reference: ${base}/docs`,
-          `Send it as <code>Authorization: Bearer &lt;key&gt;</code> or the <code>X-API-Key</code> header.`,
-        ].join("\n"),
-        { parse_mode: "HTML" },
-      );
-      return render(ctx, await views.apiKeysListView(ctx.user), false);
-    }
+    
     if (awaiting === "search") {
       const q = ctx.message.text.trim().slice(0, 64);
       ctx.session.lastSearch = q;
@@ -1980,11 +1959,27 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.apiKeysView(user), false);
           break;
         }
-        case "api:new":
+        case "api:new": {
+          // Generated straight away. Asking for a name was friction left over
+          // from when a user could hold several keys and needed to tell them
+          // apart; with exactly one key there is nothing to distinguish, and a
+          // developer who taps Generate wants the key, not a form.
           await ctx.answerCallbackQuery();
-          ctx.session.awaiting = "api_key_name";
-          await ctx.reply("🧑‍💻 Send a <b>name</b> for your API key (e.g. <code>my app</code>):", { parse_mode: "HTML" });
+          const created = await regenerateApiKeyForOwner(user.id, "api key");
+          const base = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "") + "/api/v1/developer";
+          await ctx.reply([
+            "✅ <b>Your API key</b> — copy it now, it won't be shown again:",
+            "",
+            `<code>${created.apiKey}</code>`,
+            "",
+            "Scopes: catalog:read, orders:read, orders:write, wallet:read",
+            `Base URL: <code>${base}</code>`,
+            "",
+            "<i>You have one key. Tap 🔄 Regenerate Key any time — the old one stops working immediately.</i>",
+          ].join("\n"), { parse_mode: "HTML" });
+          await render(ctx, await views.apiKeysView(user), false);
           break;
+        }
         case "api:revoke": {
           const done = await revokeApiKeyOwned(args[0] ?? "", user.id);
           await ctx.answerCallbackQuery({ text: done ? "Revoked" : "Not found" });

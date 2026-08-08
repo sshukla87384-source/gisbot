@@ -59,7 +59,6 @@ export interface SessionData {
     | "wallet_topup_amount"
     | "wallet_topup_txn"
     | "wallet_free_txn"
-    | "api_key_name"
     | "reseller_price"
     | "upi_ref"
     | "buy_qty"
