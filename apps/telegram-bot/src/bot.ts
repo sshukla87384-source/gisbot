@@ -27,6 +27,7 @@ import {
   revokeApiKeyOwned,
   regenerateApiKeyForOwner,
   getActiveApiKeyForOwner,
+  setResellerPrice,
   createTicket,
   getWallet,
   convertMinor,
@@ -1070,6 +1071,27 @@ export function createBot(): Bot<Ctx> {
       await createTicket(ctx.user.id, "PAYMENT_ISSUE", `Wallet top-up ${topupId}, txn ${txn} (${r.ok ? "ok" : r.reason}).`).catch(() => undefined);
       return ctx.reply(`${note}We’ve logged your Transaction ID — our team will credit your wallet shortly.`);
     }
+    if (awaiting === "reseller_price") {
+      const pid = ctx.session.priceProductId ?? "";
+      ctx.session.priceProductId = undefined;
+      if (!pid) { await ctx.reply("Lost track of that product — open 🏷 My Selling Price again."); return; }
+      const raw = ctx.message.text.trim();
+      if (/^off$/i.test(raw)) {
+        await setResellerPrice(ctx.user.id, pid, null, ctx.user.currency as Currency);
+        await ctx.reply("🏷 Custom price removed — your API now returns our price.");
+        return render(ctx, await views.resellerPricesView(ctx.user), false);
+      }
+      const val = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(val) || val <= 0) {
+        ctx.session.priceProductId = pid;
+        ctx.session.awaiting = "reseller_price";
+        return ctx.reply("Send a number, e.g. <code>1.20</code>, or <code>off</code> to clear it.", { parse_mode: "HTML" });
+      }
+      await setResellerPrice(ctx.user.id, pid, Math.round(val * 100), ctx.user.currency as Currency);
+      await ctx.reply(`🏷 Saved. Your API will return <b>${val.toFixed(2)}</b> for this product.`, { parse_mode: "HTML" });
+      return render(ctx, await views.resellerPricesView(ctx.user), false);
+    }
+
     if (awaiting === "api_key_name") {
       const name = ctx.message.text.trim().slice(0, 120) || "my key";
       // One key per user: this retires any earlier one in the same transaction.
@@ -1897,6 +1919,20 @@ export function createBot(): Bot<Ctx> {
             { parse_mode: "HTML" },
           );
           await render(ctx, await views.apiKeysView(user), false);
+          break;
+        }
+        case "api:prices":
+          await ctx.answerCallbackQuery();
+          await render(ctx, await views.resellerPricesView(user), true);
+          break;
+        case "api:setprice": {
+          await ctx.answerCallbackQuery();
+          ctx.session.priceProductId = args[0] ?? "";
+          ctx.session.awaiting = "reseller_price";
+          await ctx.reply(
+            "🏷 Send your selling price for this product (e.g. <code>1.20</code>).\n\nSend <code>off</code> to go back to our price.",
+            { parse_mode: "HTML" },
+          );
           break;
         }
         case "api:docs":

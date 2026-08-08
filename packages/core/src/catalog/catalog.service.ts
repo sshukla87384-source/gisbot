@@ -551,3 +551,78 @@ export async function setProductBulkTiers(productId: string, tiers: BulkTier[]):
   });
   await invalidate("cat:*");
 }
+
+export interface ResellerPriceRow {
+  productId: string;
+  name: string;
+  iconEmoji: string | null;
+  /** What the reseller pays us. */
+  basePriceMinor: number | null;
+  /** What their API returns, if they have set one. */
+  myPriceMinor: number | null;
+  currency: Currency;
+}
+
+/**
+ * Products a reseller can price, with their own price alongside ours.
+ *
+ * The UserPrice engine already existed and was already applied by the catalog
+ * and at checkout — only a screen to set the API-channel price was missing, so
+ * resellers had no way to reach a feature that was fully built underneath them.
+ */
+export async function listResellerPrices(
+  userId: string,
+  currency: Currency,
+  limit = 40,
+): Promise<ResellerPriceRow[]> {
+  const products = await prisma.product.findMany({
+    where: { status: "ACTIVE", deletedAt: null },
+    orderBy: [{ pinRank: "desc" }, { name: "asc" }],
+    take: limit,
+    select: {
+      id: true, name: true, iconEmoji: true, salePercentBp: true, saleStartsAt: true, saleEndsAt: true,
+      bulkMinQty: true, bulkPercentBp: true, bulkTiers: true,
+      variants: { where: { isActive: true, deletedAt: null }, take: 1, select: { prices: { where: { currency }, take: 1, select: { amountMinor: true } } } },
+    },
+  });
+  const mine = await prisma.userPrice.findMany({
+    where: { userId, productId: { in: products.map((p) => p.id) }, channel: { in: ["API", "BOTH"] } },
+  });
+  const byProduct = new Map<string, { amountMinor: number; currency: Currency }>();
+  for (const m of mine) {
+    // API beats BOTH, so a channel-specific price is never masked by a general one.
+    const cur = byProduct.get(m.productId);
+    if (!cur || m.channel === "API") byProduct.set(m.productId, { amountMinor: m.amountMinor, currency: m.currency as Currency });
+  }
+  return products.map((p) => {
+    const base = p.variants[0]?.prices[0]?.amountMinor ?? null;
+    const own = byProduct.get(p.id);
+    return {
+      productId: p.id,
+      name: p.name,
+      iconEmoji: p.iconEmoji,
+      basePriceMinor: base === null ? null : effectivePriceMinor(base, p),
+      myPriceMinor: own ? (own.currency === currency ? own.amountMinor : convertMinor(own.amountMinor, own.currency, currency)) : null,
+      currency,
+    };
+  });
+}
+
+/** Set or clear a reseller's own API selling price for one product. */
+export async function setResellerPrice(
+  userId: string,
+  productId: string,
+  amountMinor: number | null,
+  currency: Currency,
+): Promise<void> {
+  if (amountMinor === null) {
+    await prisma.userPrice.deleteMany({ where: { userId, productId, channel: { in: ["API", "BOTH"] } } });
+  } else {
+    await prisma.userPrice.upsert({
+      where: { userId_productId_channel: { userId, productId, channel: "API" } },
+      create: { userId, productId, amountMinor, currency, channel: "API" },
+      update: { amountMinor, currency },
+    });
+  }
+  await invalidate("cat:*");
+}
