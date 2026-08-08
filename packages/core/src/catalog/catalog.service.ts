@@ -3,8 +3,8 @@ import { sha256Hex } from "@gis/shared";
 import { CoreError, PAGE_SIZE } from "@gis/shared";
 import { translateMany } from "../translate.service.js";
 import { convertMinor, convertPriceMinor } from "../fx.js";
-import { cached } from "../redis.js";
-import { effectivePriceMinor, isSaleActive } from "../pricing.js";
+import { cached, invalidate } from "../redis.js";
+import { effectivePriceMinor, isSaleActive, bulkTiersOf, type BulkTier } from "../pricing.js";
 
 const CACHE_TTL = 60;
 
@@ -71,9 +71,7 @@ export interface ProductView {
   iconEmoji: string | null;
   onSale: boolean;
   salePercentBp: number | null;
-  bulkMinQty: number | null;
-  bulkPercentBp: number | null;
-  bulkUnitPriceMinor: number | null;
+  bulkLadder: Array<{ minQty: number; percentBp: number; unitPriceMinor: number }>;
   saleEndsAt: Date | null;
   type: string;
   fulfillmentMode: string;
@@ -389,14 +387,18 @@ async function getProductViewUncached(productId: string, currency: Currency, use
     iconEmoji: p.iconEmoji,
     onSale,
     salePercentBp: p.salePercentBp,
-    bulkMinQty: p.bulkMinQty ?? null,
-    bulkPercentBp: p.bulkPercentBp ?? null,
     // Precomputed with the SAME helper the charge uses, so the advertised
     // per-unit price cannot drift from what the customer is actually billed.
-    bulkUnitPriceMinor: (() => {
-      if (!p.bulkMinQty || !p.bulkPercentBp) return null;
+    // Each rung priced with the SAME helper the charge uses, so what is
+    // advertised is exactly what the customer pays at that quantity.
+    bulkLadder: (() => {
       const b = p.variants[0]?.prices[0]?.amountMinor ?? null;
-      return b === null ? null : effectivePriceMinor(b, p, new Date(), p.bulkMinQty);
+      if (b === null) return [];
+      return bulkTiersOf(p).map((t) => ({
+        minQty: t.minQty,
+        percentBp: t.percentBp,
+        unitPriceMinor: effectivePriceMinor(b, p, new Date(), t.minQty),
+      }));
     })(),
     saleEndsAt: p.saleEndsAt,
     type: p.type,
@@ -530,15 +532,22 @@ export async function categoryIdsUnder(categoryId: string): Promise<string[]> {
   return out;
 }
 
-/** Set or clear a product's bulk-quantity tier. */
-export async function setProductBulkTier(
-  productId: string,
-  minQty: number | null,
-  percentBp: number | null,
-): Promise<void> {
+/** Replace a product's whole discount ladder. */
+export async function setProductBulkTiers(productId: string, tiers: BulkTier[]): Promise<void> {
+  const clean = tiers
+    .filter((t) => t.minQty >= 2 && t.percentBp > 0 && t.percentBp <= 9000)
+    .sort((a, b) => a.minQty - b.minQty);
   await prisma.product.update({
     where: { id: productId },
-    data: { bulkMinQty: minQty, bulkPercentBp: percentBp },
+    data: {
+      bulkTiers: clean.length > 0 ? (clean as never) : undefined,
+      // The legacy columns are cleared so they cannot resurface as a fallback
+      // once a ladder exists, which would otherwise reintroduce an old tier the
+      // operator thought they had replaced.
+      bulkMinQty: null,
+      bulkPercentBp: null,
+      ...(clean.length === 0 ? { bulkTiers: undefined } : {}),
+    },
   });
   await invalidate("cat:*");
 }
