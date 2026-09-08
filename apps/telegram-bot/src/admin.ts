@@ -9,6 +9,7 @@ import {
   adjustUserWallet,
   resolveUserByTelegramId,
   setUserPrice,
+  setUserPricePermanent,
   removeUserPrice,
   listProductUserPrices,
   setProductPinRank,
@@ -798,6 +799,7 @@ async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
   for (const r of rows) {
     const sym = r.currency === "INR" ? "₹" : "$";
     kb.text(`✖️ ${r.label} · ${sym}${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
+    kb.text(r.permanent ? "🔒 Permanent — tap for ⏳ until sold out" : "⏳ Until sold out — tap for 🔒 permanent", cb("adm", "cpperm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
   }
   kb.text("◀️ Back", cb("adm", "prod", productId));
   const lines = [
@@ -805,7 +807,8 @@ async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
     "",
     rows.length ? "Set special prices for specific customers (direct, API, or both). Tap a row to remove it." : "No custom prices yet. Tap ➕ to add one.",
     "",
-    "<i>A custom price is permanent — it stays until you remove it here, and is not touched by sales or restocks.</i>",
+    "",
+    "<i>⏳ prices end by themselves when the product sells out — the customer goes back to the public price. 🔒 prices stay until you remove them here.</i>",
   ];
   await show(ctx, lines.join("\n"), kb, true);
 }
@@ -3468,11 +3471,52 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const uid = ctx.session.priceUserId ?? "";
       const amt = ctx.session.priceAmountMinor ?? 0;
       if (!pid || !uid || amt <= 0) { await sendPanel(ctx, true); return; }
-      await setUserPrice(uid, pid, amt, channel);
+      // Channel chosen — now say how long it stands. One extra tap, because
+      // "until this stock runs out" and "until I remove it" are very different
+      // promises to a customer.
+      ctx.session.priceChannel = channel;
+      const label = ctx.session.priceUserLabel ?? "customer";
+      const kb = new InlineKeyboard()
+        .add(sbtn("⏳ Until this product sells out", cb("adm", "cpsave", "T"), "primary")).row()
+        .add(sbtn("🔒 Permanent — until I remove it", cb("adm", "cpsave", "P"), "success")).row()
+        .text("✖️ Cancel", cb("adm", "cprice", pid));
+      await show(ctx, [
+        `💲 <b>${escapeHtml(label)}</b> · <b>${(amt / 100).toFixed(2)}</b> · ${chLabel(channel)}`,
+        "",
+        "How long should this price stand?",
+        "",
+        "⏳ <b>Until sold out</b> — when the product runs out of stock the customer goes back to the normal price, so a restock is never sold at an old private rate.",
+        "🔒 <b>Permanent</b> — it survives sell-outs and restocks, and only you can end it.",
+      ].join("\n"), kb, false);
+      return;
+    }
+    case "cpsave": {
+      const pid = ctx.session.priceProductId ?? "";
+      const uid = ctx.session.priceUserId ?? "";
+      const amt = ctx.session.priceAmountMinor ?? 0;
+      const channel = (ctx.session.priceChannel ?? "BOTH") as PriceChannel;
+      const permanent = id === "P";
+      if (!pid || !uid || amt <= 0) { await sendPanel(ctx, true); return; }
+      await setUserPrice(uid, pid, amt, channel, undefined, permanent);
       const label = ctx.session.priceUserLabel ?? "customer";
       ctx.session.priceProductId = ctx.session.priceUserId = ctx.session.priceUserLabel = undefined;
       ctx.session.priceAmountMinor = undefined;
-      await ctx.reply(`✅ Set ${escapeHtml(label)}'s price to <b>${(amt / 100).toFixed(2)}</b> (${chLabel(channel)}).`, { parse_mode: "HTML" });
+      ctx.session.priceChannel = undefined;
+      await ctx.reply(
+        `✅ Set ${escapeHtml(label)}'s price to <b>${(amt / 100).toFixed(2)}</b> (${chLabel(channel)}) — ${permanent ? "🔒 permanent" : "⏳ until it sells out"}.`,
+        { parse_mode: "HTML" },
+      );
+      await customPriceView(ctx, pid);
+      return;
+    }
+    case "cpperm": {
+      const [uid, ch] = id.split("~");
+      const pid = ctx.session.admProductId ?? "";
+      const channel = (ch === "D" ? "DIRECT" : ch === "A" ? "API" : "BOTH") as PriceChannel;
+      if (!uid || !pid) { await ctx.reply("That screen expired — open the product again."); return; }
+      const rows = await listProductUserPrices(pid);
+      const cur = rows.find((r) => r.userId === uid && r.channel === channel);
+      await setUserPricePermanent(uid, pid, channel, !(cur?.permanent ?? false));
       await customPriceView(ctx, pid);
       return;
     }

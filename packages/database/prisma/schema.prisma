@@ -370,6 +370,10 @@ model UserPrice {
   amountMinor Int          // override price (major units × 100)
   currency    Currency @default(USD) // the currency amountMinor is expressed in
   channel     PriceChannel @default(BOTH)
+  /// Survives a sell-out. A temporary override is dropped when the product hits
+  /// zero stock, so the customer goes back to whatever the public price is by
+  /// the time it is restocked; a permanent one stands until an admin removes it.
+  permanent   Boolean      @default(false)
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
