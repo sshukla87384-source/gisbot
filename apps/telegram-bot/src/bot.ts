@@ -22,6 +22,9 @@ import {
   creditFreeTopup,
   buildCombinedDeliveryText,
   buildDeliveryTxt,
+  isDeliveredLink,
+  linkLines,
+  isCopyable,
   DELIVERY_FILE_THRESHOLD,
   createApiKey,
   revokeApiKeyOwned,
@@ -2462,7 +2465,9 @@ async function sendRevealed(
       });
     } else if (rows.length > 1) {
       lines.push("🔑 <b>Your keys:</b>");
-      for (const r of rows) lines.push(`<code>${escapeHtml(r)}</code>`);
+      for (const r of rows) lines.push(...(isDeliveredLink(r) ? linkLines(r) : [`<code>${escapeHtml(r)}</code>`]));
+    } else if (isDeliveredLink(rows[0] ?? payload.key)) {
+      lines.push(...linkLines((rows[0] ?? payload.key) as string));
     } else {
       lines.push(`🔑 <b>Key:</b> <code>${escapeHtml(payload.key)}</code>`);
     }
@@ -2496,13 +2501,26 @@ async function sendRevealed(
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
   lines.push("", "💾 <b>Saved in 📦 My Orders</b> — reopen it any time.", "Problem? Open a 🎫 Support ticket.");
   const kb = new InlineKeyboard();
-  if (rName) kb.copyText("📋 Copy ID", rName).row();
-  if (rPass) kb.copyText("📋 Copy password", rPass).row();
-  if (rTwo) kb.copyText("📋 Copy 2FA secret", rTwo).row();
-  if (rName && rPass) kb.copyText("📋 Copy ALL credentials", `${rName}|${rPass}${rTwo ? `|${rTwo}` : ""}`).row();
+  // isCopyable(): Telegram caps copy_text at 256 chars and rejects the WHOLE
+  // message when it is exceeded, so an over-long value gets no copy button —
+  // it is in the message body, where tapping it copies anyway.
+  if (isCopyable(rName)) kb.copyText("📋 Copy ID", rName).row();
+  if (isCopyable(rPass)) kb.copyText("📋 Copy password", rPass).row();
+  if (isCopyable(rTwo)) kb.copyText("📋 Copy 2FA secret", rTwo).row();
+  if (rName && rPass) {
+    const all = `${rName}|${rPass}${rTwo ? `|${rTwo}` : ""}`;
+    if (isCopyable(all)) kb.copyText("📋 Copy ALL credentials", all).row();
+  }
   // Generate the OTP in the bot instead of sending them to 2fa.live.
   if (rTwo && looksLikeTotpSecret(rTwo)) kb.add(sbtn("🔢 Get my login code (OTP)", cb("otp", "get", orderItemId), "success")).row();
   kb.text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
     .text("🏠 Menu", "mnu:home");
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+  const body = lines.join("\n");
+  // A delivery must never be lost to a formatting rejection: HTML → plain text
+  // → plain text with no keyboard. The customer has PAID; ugly beats missing.
+  await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+    await ctx.reply(body.replace(/<[^>]+>/g, ""), { reply_markup: kb }).catch(async () => {
+      await ctx.reply(body.replace(/<[^>]+>/g, "")).catch(() => undefined);
+    });
+  });
 }

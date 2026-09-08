@@ -1,7 +1,7 @@
 import type { Currency, Prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { convertMinor, convertPriceMinor } from "../fx.js";
-import { CoreError, decryptSecret } from "@gis/shared";
+import { CoreError, decryptSecret, encryptSecret } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
 
 /**
@@ -103,6 +103,58 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
     };
   });
+}
+
+/** The order item shape a reusable ("same link for everyone") delivery needs. */
+export interface ReusableItem {
+  id: string;
+  variant: {
+    defaultCostMinor: number | null;
+    product: { id: string; reusableSecretEnc: string | null; reusableStock: number | null };
+  };
+}
+
+/**
+ * Deliver a "♾ Same link for everyone" product: one stored value handed to
+ * every buyer, consuming no inventory.
+ *
+ * The wallet checkout knew how to do this; the UPI/Binance confirmation and the
+ * gateway webhook did NOT — they went straight to assignLicenseKey, found no
+ * stock rows (a reusable product has none by design) and parked the paid order
+ * in AWAITING_STOCK / PENDING_FULFILLMENT. The customer's link then only ever
+ * arrived if an admin hand-delivered it. This is that missing branch, shared by
+ * every rail so they cannot drift apart again.
+ *
+ * Returns the payload to deliver, or null when the product is not reusable.
+ * Throws OUT_OF_STOCK when a sellable quantity was set and is exhausted.
+ */
+export async function fulfillReusableItemTx(
+  tx: Tx,
+  item: ReusableItem,
+  masterKey: string,
+): Promise<{ kind: "LICENSE_KEY"; key: string } | null> {
+  const product = item.variant.product;
+  if (!product.reusableSecretEnc) return null;
+  const secret = decryptSecret(product.reusableSecretEnc, masterKey);
+  // Respect a sellable quantity when the admin set one (null = unlimited).
+  if (product.reusableStock !== null && product.reusableStock !== undefined) {
+    const dec = await tx.product.updateMany({
+      where: { id: product.id, reusableStock: { gte: 1 } },
+      data: { reusableStock: { decrement: 1 } },
+    });
+    if (dec.count === 0) throw new CoreError("OUT_OF_STOCK", "This product is sold out");
+  }
+  const payload = { kind: "LICENSE_KEY" as const, key: secret };
+  await tx.orderItem.update({
+    where: { id: item.id },
+    data: {
+      fulfilledAt: new Date(),
+      warrantyStartAt: new Date(),
+      costMinor: item.variant.defaultCostMinor,
+      deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
+    },
+  });
+  return payload;
 }
 
 /**
@@ -300,6 +352,30 @@ export function credsOf(payload: DeliveryPayload): { id?: string; pw?: string; t
 /** The 2FA helper site customers paste the secret into. */
 export const TWOFA_SITE = "https://2fa.live";
 
+/** A delivered value that is just a link (redemption/sign-in URL), not a key. */
+export function isDeliveredLink(value: string | undefined | null): value is string {
+  if (!value) return false;
+  const t = value.trim();
+  return /^https?:\/\/\S+$/i.test(t) && !/\s/.test(t);
+}
+
+/**
+ * Render a delivered link so the customer can TAP it in the chat.
+ *
+ * A link shown only as <code> is not tappable — long sign-in URLs (Google/
+ * YouTube redirect links run to 380+ characters) then look like a wall of text
+ * the customer has to select by hand, and on some clients it wraps so badly it
+ * reads as missing. Anchor first (one tap), raw value underneath (tap to copy).
+ */
+export function linkLines(url: string, indent = ""): string[] {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const href = esc(url.trim()).replace(/"/g, "&quot;");
+  return [
+    `${indent}🔗 <b><a href="${href}">Tap here to open your link</a></b>`,
+    `${indent}<code>${esc(url.trim())}</code>`,
+  ];
+}
+
 
 export function buildDeliveryText(
   productName: string,
@@ -330,7 +406,9 @@ export function buildDeliveryText(
       });
     } else if (rows.length > 1) {
       lines.push("🔑 <b>Your keys:</b>");
-      for (const r of rows) lines.push(`<code>${esc(r)}</code>`);
+      for (const r of rows) lines.push(...(isDeliveredLink(r) ? linkLines(r) : [`<code>${esc(r)}</code>`]));
+    } else if (isDeliveredLink(rows[0] ?? payload.key)) {
+      lines.push(...linkLines((rows[0] ?? payload.key) as string));
     } else {
       lines.push(`🔑 <b>Key:</b> <code>${esc(payload.key)}</code>`);
     }
@@ -434,7 +512,9 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
         });
         out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
       } else if (rows.length > 1) {
-        for (const r of rows) out.push(`   🔑 <code>${esc(r)}</code>`);
+        for (const r of rows) out.push(...(isDeliveredLink(r) ? linkLines(r, "   ") : [`   🔑 <code>${esc(r)}</code>`]));
+      } else if (isDeliveredLink(rows[0] ?? p.key)) {
+        out.push(...linkLines((rows[0] ?? p.key) as string, "   "));
       } else {
         out.push(`   🔑 Key: <code>${esc(p.key)}</code>`);
       }

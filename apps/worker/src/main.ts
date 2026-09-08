@@ -50,15 +50,22 @@ async function main(): Promise<void> {
         // Hoisted so the 400 fallback in the catch block can reuse the buttons.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const btns = job.data.buttons && job.data.buttons.length > 0
-          ? job.data.buttons.map((b) => {
-              const base: Record<string, unknown> = b.copyText
-                ? { text: b.text, copy_text: { text: b.copyText } }
-                : b.callbackData
-                  ? { text: b.text, callback_data: b.callbackData }
-                  : { text: b.text, url: b.url };
-              if (styled && b.style && !b.copyText) base.style = b.style;
-              return base;
-            })
+          ? job.data.buttons
+              // Last line of defence: Telegram rejects the WHOLE message when a
+              // copy_text payload is over 256 chars (a long delivered link is
+              // easily 380). Drop the button, keep the message — the value is
+              // in the body anyway. deliveryButtons() already guards this; any
+              // other caller is covered here.
+              .filter((b) => !b.copyText || b.copyText.length <= 256)
+              .map((b) => {
+                const base: Record<string, unknown> = b.copyText
+                  ? { text: b.text, copy_text: { text: b.copyText } }
+                  : b.callbackData
+                    ? { text: b.text, callback_data: b.callbackData }
+                    : { text: b.text, url: b.url };
+                if (styled && b.style && !b.copyText) base.style = b.style;
+                return base;
+              })
           : undefined;
         // Copy buttons get their own row (long labels); the rest share one row.
         const rows = btns
@@ -111,16 +118,25 @@ async function main(): Promise<void> {
           const plain = job.data.text;
           const chunks: string[] = [];
           for (let i = 0; i < plain.length; i += 4000) chunks.push(plain.slice(i, i + 4000));
-          try {
-            for (let i = 0; i < chunks.length; i++) {
-              // Buttons go on the last chunk so they sit under the full message.
-              await telegram.sendMessage(job.data.telegramId, chunks[i]!, i === chunks.length - 1 ? ({ reply_markup: replyMarkup } as never) : {});
+          // The KEYBOARD is a 400 cause too, not just the text (an over-long
+          // copy_text payload, a bad callback_data). Re-sending the same
+          // reply_markup reproduced the rejection, the retry "failed too", and
+          // the job then died with the customer's item never reaching the chat.
+          // So: try once with the buttons, then once WITHOUT them. A delivery
+          // with no buttons is still a delivery.
+          for (const markup of [replyMarkup, undefined]) {
+            try {
+              for (let i = 0; i < chunks.length; i++) {
+                // Buttons go on the last chunk so they sit under the full message.
+                await telegram.sendMessage(job.data.telegramId, chunks[i]!, i === chunks.length - 1 && markup ? ({ reply_markup: markup } as never) : {});
+              }
+              // eslint-disable-next-line no-console
+              console.error("outbox: HTML rejected, delivered as plain text", { telegramId: job.data.telegramId, chunks: chunks.length, buttons: markup ? "kept" : "dropped", error: e.description });
+              return;
+            } catch {
+              // Try the next, more conservative shape; if none works, fall
+              // through and let BullMQ retry the original.
             }
-            // eslint-disable-next-line no-console
-            console.error("outbox: HTML rejected, delivered as plain text", { telegramId: job.data.telegramId, chunks: chunks.length, error: e.description });
-            return;
-          } catch {
-            // Plain text failed too — let BullMQ retry the original.
           }
         }
         throw e; // 429 & transient errors → BullMQ retries with backoff

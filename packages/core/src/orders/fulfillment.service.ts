@@ -4,7 +4,7 @@ import type { NormalizedPaymentEvent } from "@gis/payments";
 import { encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { accrueCommissionTx } from "./commission.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { logWallet } from "../logs.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
@@ -136,6 +136,28 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         if (item.fulfilledAt) continue;
         const type = item.variant.product.type;
         const guide = item.variant.product.activationGuide;
+
+        // "Same link for everyone" first: one stored value, no inventory, any
+        // product type, MANUAL mode included — the same branch the wallet rail
+        // has always had. Without it a gateway-paid link order sat in
+        // AWAITING_STOCK until an admin delivered it by hand.
+        try {
+          const reusable = await fulfillReusableItemTx(tx, item, masterKey);
+          if (reusable) {
+            if (order.user.telegramId !== null) {
+              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload: reusable, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+            }
+            await accrueCommissionTx(tx, item, order.currency);
+            continue;
+          }
+        } catch (e) {
+          awaitingStock++;
+          if (!(isCoreError(e) && e.code === "OUT_OF_STOCK")) {
+            // eslint-disable-next-line no-console
+            console.error("reusable fulfilment failed", { orderItemId: item.id, error: String(e).slice(0, 300) });
+          }
+          continue;
+        }
 
         if (item.fulfillmentMode === "MANUAL" || (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT")) {
           pendingManual++;
