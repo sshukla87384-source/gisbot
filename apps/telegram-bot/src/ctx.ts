@@ -4,6 +4,7 @@ import type { Context, SessionFlavor } from "grammy";
 export interface SessionData {
   /** What the next free-text message means (Bot UX doc: conversations). */
   awaiting?:
+    | "admin_order_search"
     | "maint_msg"
     | "admin_upi_auto_cap"
     | "admin_bp_value"
@@ -249,6 +250,13 @@ export interface SessionData {
   buyVariantId?: string;
   buyProductId?: string;
   buyMaxQty?: number;
+  /**
+   * Stock lines a live customer order still holds, waiting on the admin's
+   * Allow/Reject. ENCRYPTED with the master key: the session lives in Redis and
+   * these lines are license keys and account passwords, which never sit
+   * anywhere in the clear.
+   */
+  pendingStock?: { variantId: string; enc: string; count: number };
   /** True on the update where the user was just created. */
   isNewUser?: boolean;
 }
