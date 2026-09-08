@@ -97,6 +97,11 @@ import {
   deleteCategory,
   createProductFull,
   getAdminOrder,
+  adminRevealOrder,
+  searchOrders,
+  splitCredential,
+  isDeliveredLink,
+  type BlockedStockLine,
   getAdminStats,
   rejectManualOrder,
   getRedis,
@@ -234,7 +239,7 @@ import {
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
 import { CLAIM_WINDOW_MIN } from "@gis/core";
-import { cb } from "@gis/shared";
+import { cb, encryptSecret, decryptSecret } from "@gis/shared";
 import { InlineKeyboard, InputFile } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
@@ -490,6 +495,8 @@ function orderRowsKb(orders: Awaited<ReturnType<typeof listPendingPaymentOrders>
   for (const o of orders) {
     kb.text(`${o.orderNumber} · ${fmt(o.totalMinor, o.currency)} · ${o.status}`, cb("adm", "ord", o.id)).row();
   }
+  // These lists hold 10 rows; anything older needs a search box.
+  kb.add(sbtn("🔎 Find an order", cb("adm", "osearch"), "primary")).row();
   kb.text("◀️ Back", cb("adm", "home"));
   return kb;
 }
@@ -498,7 +505,102 @@ async function ordersView(ctx: Ctx, pending: boolean): Promise<void> {
   const orders = pending ? await listPendingPaymentOrders(10) : await listRecentOrders(10);
   const title = pending ? "⏳ <b>Pending payments</b>" : "🗂 <b>Recent orders</b>";
   const body = orders.length === 0 ? `${title}\n\nNothing here.` : title;
-  await show(ctx, body, orderRowsKb(orders), true);
+  const kb = orderRowsKb(orders);
+  await show(ctx, body, kb, true);
+}
+
+/** Results of an order search — same rows as the lists, so they open the order. */
+async function orderSearchResults(ctx: Ctx, query: string): Promise<void> {
+  const hits = await searchOrders(query, 12);
+  const kb = new InlineKeyboard();
+  for (const h of hits) {
+    kb.text(`${h.orderNumber} · ${h.userLabel.slice(0, 14)} · ${fmt(h.totalMinor, h.currency)}`, cb("adm", "ord", h.id)).row();
+  }
+  kb.text("🔎 Search again", cb("adm", "osearch")).row();
+  kb.text("◀️ Back", cb("adm", "orders"));
+  const lines = hits.length === 0
+    ? [`🔎 <b>No order matches</b> “${escapeHtml(query)}”`, "", "Try the order number, the customer's @username or Telegram ID, or a product name."]
+    : [`🔎 <b>${hits.length} order(s)</b> for “${escapeHtml(query)}”`, "", ...hits.map((h) => `🧾 <b>${escapeHtml(h.orderNumber)}</b> — ${h.status}\n   👤 ${escapeHtml(h.userLabel)} · 📦 ${escapeHtml(h.firstItem.slice(0, 28))}${h.itemCount > 1 ? ` +${h.itemCount - 1}` : ""}`)];
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+/**
+ * Ask before putting a value a customer still holds back on the shelf.
+ *
+ * These used to be counted into "skipped (duplicate)", so re-pasting a key you
+ * had delivered looked like the bot had simply ignored you. The admin now sees
+ * WHOSE it is and decides. The lines themselves are secrets, so they are
+ * encrypted with the master key before they touch the Redis-backed session.
+ */
+export async function askReAddBlocked(ctx: Ctx, variantId: string, blocked: BlockedStockLine[], unit: string): Promise<void> {
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  ctx.session.pendingStock = {
+    variantId,
+    enc: encryptSecret(JSON.stringify(blocked.map((b) => b.value)), masterKey),
+    count: blocked.length,
+  };
+  const lines = [
+    `⚠️ <b>${blocked.length} ${unit}(s) are already with a customer</b>`,
+    "",
+    "Do you want to add them anyway?",
+    "",
+    ...blocked.slice(0, 8).map((b) => {
+      const when = b.deliveredAt ? ` · ${b.deliveredAt.toISOString().slice(0, 10)}` : "";
+      return `• …${escapeHtml(b.tail)} → ${escapeHtml(b.buyer ?? "a customer")}${b.orderNumber ? ` · ${escapeHtml(b.orderNumber)}` : ""}${when}`;
+    }),
+    ...(blocked.length > 8 ? [`…and ${blocked.length - 8} more`] : []),
+    "",
+    `<i>If you allow this, the ${unit}(s) go back on sale and can be delivered to someone else — the first customer keeps their copy in 📦 My Orders, so two people would hold the same one.</i>`,
+    ...(unit === "account" ? ["<i>For accounts the stored password is also replaced with the one you just pasted.</i>"] : []),
+  ];
+  const kb = new InlineKeyboard()
+    .add(sbtn(`✅ Allow — add ${blocked.length} anyway`, cb("adm", "stockyes"), "danger")).row()
+    .add(sbtn("❌ Reject — leave them out", cb("adm", "stockno"), "primary"));
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+}
+
+/** Everything delivered on an order, in the clear — for support, and audit-logged. */
+async function orderDeliveriesView(ctx: Ctx, orderId: string): Promise<void> {
+  const r = await adminRevealOrder(orderId, String(ctx.from?.id ?? "bot-admin"));
+  const kb = new InlineKeyboard().text("◀️ Back to order", cb("adm", "ord", orderId)).row().text("🏠 Panel", cb("adm", "home"));
+  if (!r) { await show(ctx, "Order not found.", kb, true); return; }
+  if (r.items.length === 0) {
+    await show(ctx, `🧾 <b>${escapeHtml(r.orderNumber)}</b> — nothing has been delivered on this order yet.`, kb, true);
+    return;
+  }
+  const lines = [`🔓 <b>Delivered on ${escapeHtml(r.orderNumber)}</b>`, `👤 ${escapeHtml(r.userLabel)}`, ""];
+  r.items.forEach((it, i) => {
+    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(it.variantName)}`;
+    lines.push(`<b>${i + 1}.</b> 📦 ${escapeHtml(it.productName)}${vn}${it.replaced ? "  ♻️ <i>replaced</i>" : ""}`);
+    const p = it.payload;
+    if (p.key) {
+      const rows = p.key.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      for (const row of rows) {
+        const c = splitCredential(row);
+        if (c) {
+          lines.push(`   👤 <code>${escapeHtml(c.id)}</code>`);
+          lines.push(`   🔐 <code>${escapeHtml(c.pw)}</code>`);
+          if (c.twofa) lines.push(`   🔢 <code>${escapeHtml(c.twofa)}</code>`);
+        } else if (isDeliveredLink(row)) {
+          lines.push(`   🔗 <code>${escapeHtml(row)}</code>`);
+        } else {
+          lines.push(`   🔑 <code>${escapeHtml(row)}</code>`);
+        }
+      }
+    }
+    if (p.username) lines.push(`   👤 <code>${escapeHtml(p.username)}</code>`);
+    if (p.password) lines.push(`   🔐 <code>${escapeHtml(p.password)}</code>`);
+    if (p.twofa) lines.push(`   🔢 <code>${escapeHtml(p.twofa)}</code>`);
+    if (p.text) lines.push(`   📄 ${escapeHtml(p.text)}`);
+    if (it.fulfilledAt) lines.push(`   🕐 ${it.fulfilledAt.toISOString().slice(0, 16).replace("T", " ")}`);
+    lines.push("");
+  });
+  lines.push("<i>This is exactly what the customer received. Every reveal is recorded in the audit log.</i>");
+  // A big order can exceed Telegram's 4096 — send the overflow as its own message.
+  const text = lines.join("\n");
+  if (text.length <= 3900) { await show(ctx, text, kb, true); return; }
+  await show(ctx, `${text.slice(0, 3900)}\n…`, kb, true);
+  await ctx.reply(text.slice(3900).slice(0, 3900), { parse_mode: "HTML" }).catch(() => undefined);
 }
 
 async function orderView(ctx: Ctx, orderId: string): Promise<void> {
@@ -512,6 +614,10 @@ async function orderView(ctx: Ctx, orderId: string): Promise<void> {
     ...o.items.map((i) => `• ${escapeHtml(i.name)} · ${escapeHtml(i.variant)} ×${i.qty}`),
   ];
   const kb = new InlineKeyboard();
+  // Support's first question is always "what did they actually get?" — one tap.
+  if (o.items.some((i) => i.fulfilled)) {
+    kb.add(sbtn("🔓 Show delivered items", cb("adm", "odel", o.id), "primary")).row();
+  }
   if (o.status === "PENDING_PAYMENT") {
     kb.text("✅ Confirm payment", cb("adm", "confirm", o.id)).row();
     kb.text("🔎 Verify by Order ID", cb("adm", "txn", o.id)).row();
@@ -2329,6 +2435,39 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "orders": return ordersView(ctx, true);
     case "recent": return ordersView(ctx, false);
     case "ord": return orderView(ctx, id);
+    case "odel": return orderDeliveriesView(ctx, id);
+    case "stockyes": {
+      const pend = ctx.session.pendingStock;
+      ctx.session.pendingStock = undefined;
+      if (!pend) { await ctx.reply("That request expired — paste the stock again."); return; }
+      let lines: string[] = [];
+      try { lines = JSON.parse(decryptSecret(pend.enc, loadConfig().ENCRYPTION_MASTER_KEY)) as string[]; } catch { lines = []; }
+      if (lines.length === 0) { await ctx.reply("Couldn't read that batch — paste the stock again."); return; }
+      const f = await addStock(pend.variantId, lines, { force: true, actorLabel: String(ctx.from?.id ?? "bot-admin") });
+      const u = f.type === "DIGITAL_ACCOUNT" ? "account" : "key";
+      await ctx.reply(
+        f.relisted > 0
+          ? `♻️ Put <b>${f.relisted}</b> ${u}(s) back on sale. Recorded in the audit log.`
+          : `Nothing changed — those ${u}(s) could not be re-listed.`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+    case "stockno":
+      ctx.session.pendingStock = undefined;
+      await ctx.reply("👍 Left them out — nothing was changed.");
+      return;
+    case "osearch":
+      ctx.session.awaiting = "admin_order_search";
+      await askStep(ctx, [
+        "🔎 <b>Find an order</b>",
+        "",
+        "Send any one of:",
+        "• order number — <code>GIS-2026-000123</code> (or just <code>000123</code>)",
+        "• the customer — <code>@username</code> or their Telegram ID",
+        "• a product name — <code>netflix</code>",
+      ].join("\n"));
+      return;
     case "prods": return productsView(ctx, id ? Number.parseInt(id, 10) || 1 : 1);
     case "prodsrch":
       ctx.session.awaiting = "admin_prod_search";
@@ -3649,6 +3788,11 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_order_search") {
+    await orderSearchResults(ctx, text.trim().slice(0, 60));
+    return true;
+  }
+
   if (awaiting === "admin_addkeys") {
     const variantId = ctx.session.admVariantId ?? "";
     ctx.session.admVariantId = undefined;
@@ -3660,6 +3804,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered ${unit}(s) — back on sale, not duplicated`);
     if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> already in stock (duplicate)`);
     await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
+    if (r.blocked.length > 0) { await askReAddBlocked(ctx, variantId, r.blocked, unit); return true; }
     await sendPanel(ctx, false);
     return true;
   }
