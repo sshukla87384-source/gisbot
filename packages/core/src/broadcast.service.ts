@@ -37,13 +37,17 @@ async function deliver(broadcast: {
   pin: boolean;
   segmentQuery: unknown;
 }): Promise<number> {
-  const sq = broadcast.segmentQuery as { segment?: BroadcastSegment; html?: boolean; style?: string } | null;
+  const sq = broadcast.segmentQuery as { segment?: BroadcastSegment; html?: boolean; style?: string; buttonIcon?: string } | null;
   const segment = (sq?.segment ?? "all") as BroadcastSegment;
   const ids = await targetTelegramIds(segment);
   const text = sq?.html ? broadcast.body : renderText(broadcast.title, broadcast.body);
   const btnStyle = (sq?.style === "primary" || sq?.style === "danger" || sq?.style === "success" ? sq.style : "success") as "primary" | "success" | "danger";
+  // Carried on the broadcast row so a SCHEDULED send keeps the icon too.
+  const buttonIcon = typeof sq?.buttonIcon === "string" && /^\d+$/.test(sq.buttonIcon) ? sq.buttonIcon : undefined;
   const buttons: OutboxButton[] | undefined =
-    broadcast.buttonText && broadcast.buttonUrl ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: btnStyle }] : undefined;
+    broadcast.buttonText && broadcast.buttonUrl
+      ? [{ text: broadcast.buttonText, url: broadcast.buttonUrl, style: btnStyle, ...(buttonIcon ? { iconCustomEmojiId: buttonIcon } : {}) }]
+      : undefined;
   // One pipelined bulk-add per 500 recipients, at low priority so a marketing
   // blast never sits in front of a paid delivery on the shared outbox queue.
   const sent = await enqueueTelegramBulk(
@@ -64,6 +68,8 @@ export interface BroadcastInput {
   buttonText?: string;
   buttonUrl?: string;
   buttonStyle?: string;
+  /** Custom-emoji id shown as the button's icon (Bot API 9.4). */
+  buttonIcon?: string;
   pin?: boolean;
   bodyIsHtml?: boolean;
   createdById: string;
@@ -79,7 +85,7 @@ export async function sendBroadcast(opts: BroadcastInput): Promise<{ broadcastId
       buttonText: opts.buttonText ?? null,
       buttonUrl: opts.buttonUrl ?? null,
       pin: opts.pin ?? false,
-      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false, style: opts.buttonStyle ?? "success" } as never,
+      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false, style: opts.buttonStyle ?? "success", buttonIcon: opts.buttonIcon ?? null } as never,
       status: "RUNNING",
       createdById: opts.createdById,
       startedAt: new Date(),
@@ -106,7 +112,7 @@ export async function scheduleBroadcast(
       buttonText: opts.buttonText ?? null,
       buttonUrl: opts.buttonUrl ?? null,
       pin: opts.pin ?? false,
-      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false, style: opts.buttonStyle ?? "success" } as never,
+      segmentQuery: { segment: opts.segment, html: opts.bodyIsHtml ?? false, style: opts.buttonStyle ?? "success", buttonIcon: opts.buttonIcon ?? null } as never,
       status: "SCHEDULED",
       scheduledAt: opts.scheduledAt,
       recurrence,
@@ -199,7 +205,11 @@ export async function announceProduct(
   const cheapest = pick.length > 0 ? pick.reduce((a, b) => (b.minor < a.minor ? b : a)) : null;
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "🆕 ";
+  // Premium <tg-emoji> when the operator used one — it used to be stripped from
+  // the name and replaced with a flat glyph, so the emoji they chose never
+  // reached the announcement.
+  const iconHtml = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name);
+  const icon = iconHtml ? `${iconHtml} ` : "🆕 ";
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
   // Lead with the news rather than the product name. "Just added & in stock"
@@ -217,6 +227,9 @@ export async function announceProduct(
 
   // The emoji goes on the button too. It is the thing a customer recognises at
   // a glance in a busy chat, and the button is often all they look at.
+  // Label keeps the plain glyph (button LABELS are plain text — no entities);
+  // the premium one rides along as the button's icon, which is how the icon
+  // appears on a button at all.
   const btnEmoji = productEmoji(p.iconEmoji, p.name);
   const buttonText = `${btnEmoji ? `${btnEmoji} ` : ""}${onSale ? "🛒 Buy now — 🔥 Deal" : "🛒 Buy now"}`.slice(0, 64);
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
@@ -229,6 +242,7 @@ export async function announceProduct(
     imageUrl: p.imageUrl ?? undefined,
     buttonText: buttonUrl ? buttonText : undefined,
     buttonUrl,
+    buttonIcon: productEmojiId(p.nameHtml),
     pin: opts.pin ?? false,
     createdById: opts.createdById,
   });
@@ -274,7 +288,7 @@ export async function announceFlashSale(
   const left = saleTimeLeft(p.saleEndsAt);
 
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+  const icon = (() => { const h = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name); return h ? `${h} ` : ""; })();
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
   const hook = (await getFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
@@ -300,6 +314,7 @@ export async function announceFlashSale(
     imageUrl: p.imageUrl ?? undefined,
     buttonText: buttonUrl ? "🛒 Grab the deal 🔥" : undefined,
     buttonUrl,
+    buttonIcon: productEmojiId(p.nameHtml),
     pin: opts.pin ?? false,
     createdById: opts.createdById,
   });
@@ -332,9 +347,33 @@ export function productEmoji(iconEmoji: string | null, name: string): string {
   return m ? m[0] : "";
 }
 
+/**
+ * The product's emoji AS HTML for a message body \u2014 the premium <tg-emoji> when
+ * the operator used one, otherwise the plain glyph.
+ *
+ * Announcements used to render `productEmoji()` (a plain glyph) and then run
+ * stripLeadingEmoji() over the name, which deleted the <tg-emoji> tag the
+ * operator had actually chosen. So a premium emoji survived on the product page
+ * but was downgraded to a flat glyph in every broadcast \u2014 the one place most
+ * customers see. The tag is now carried through instead.
+ */
+export function productEmojiHtml(iconEmoji: string | null, nameHtml: string | null, name: string): string {
+  const tag = nameHtml?.match(/<tg-emoji[^>]*>[\s\S]*?<\/tg-emoji>/i);
+  if (tag) return tag[0];
+  return productEmoji(iconEmoji, name);
+}
+
+/** The custom-emoji id of the product's emoji, for a button's icon_custom_emoji_id. */
+export function productEmojiId(nameHtml: string | null): string | undefined {
+  return nameHtml?.match(/emoji-id="(\d+)"/)?.[1];
+}
+
 export function stripLeadingEmoji(html: string): string {
   let out = html.trimStart();
-  out = out.replace(/^<tg-emoji[^>]*>[\s\S]*?<\/tg-emoji>\s*/i, "");
+  // The tag may sit inside an opening element (<b><tg-emoji…>💎</tg-emoji> Name),
+  // which the old anchored pattern missed — so the icon was prepended on top of
+  // an emoji that was still there, and the customer saw it twice.
+  out = out.replace(/^(<[a-z]+[^>]*>)?\s*<tg-emoji[^>]*>[\s\S]*?<\/tg-emoji>\s*/i, "$1");
   // An opening tag such as <b> is kept in place while the emoji after it goes.
   const m = out.match(/^(<[a-z]+[^>]*>)?\s*((?:[\p{Extended_Pictographic}\uFE0F\u200D])+)\s*/u);
   if (m) out = (m[1] ?? "") + out.slice(m[0].length);
@@ -364,6 +403,10 @@ export async function announceRestock(
   // Same fallback as the launch post, so a product whose emoji lives in its
   // name is not blank here while showing one there.
   const restockEmoji = productEmoji(p.iconEmoji, p.name);
+  // Message body gets the premium tag; the button label keeps the plain glyph
+  // and carries the premium one as its icon.
+  const restockEmojiHtml = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name);
+  const iconHtml = restockEmojiHtml ? `${restockEmojiHtml} ` : "";
   const iconTxt = restockEmoji ? `${restockEmoji} ` : "";
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const usdt = cheapestMinor !== null ? (Number.isInteger(cheapestMinor / 100) ? (cheapestMinor / 100).toFixed(1) : (cheapestMinor / 100).toFixed(2)) : "";
@@ -382,9 +425,9 @@ export async function announceRestock(
         `📣 <b>New Update!</b>`,
         "",
         `We just added a new product:`,
-        `${iconTxt}${nameDisp} — Stock: ${currentStock}`,
+        `${iconHtml}${nameDisp} — Stock: ${currentStock}`,
       ].join("\n")
-    : `📣 <b>${qtyAdded} new stock added for</b> ${iconTxt}${nameDisp}`;
+    : `📣 <b>${qtyAdded} new stock added for</b> ${iconHtml}${nameDisp}`;
   const btnLabel = `${iconTxt}${stripLeadingEmoji(p.name)} - ${usdt} USDT (Stock: ${currentStock})`.slice(0, 64);
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
@@ -397,6 +440,7 @@ export async function announceRestock(
     buttonText: buttonUrl ? btnLabel : undefined,
     buttonUrl,
     buttonStyle: "success",
+    buttonIcon: productEmojiId(p.nameHtml),
     createdById: opts.createdById,
   });
   return { announced: true, targets: res.targets };
@@ -418,7 +462,7 @@ export async function announcePriceChange(
 
   const cfg = loadConfig();
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+  const icon = (() => { const h = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name); return h ? `${h} ` : ""; })();
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const sym = currency === "INR" ? "₹" : "$";
   const money = (m: number) => `${sym}${(m / 100).toFixed(2)}`;
@@ -463,6 +507,7 @@ export async function announcePriceChange(
     createdById: "system",
     buttonText: buttonUrl ? (dropped ? `⚡ Grab at ${money(newMinor)}` : `🛒 Buy — ${money(newMinor)}`) : undefined,
     buttonUrl,
+    buttonIcon: productEmojiId(p.nameHtml),
     buttonStyle: dropped ? "success" : "primary",
   });
   return { announced: true, targets: res.targets };
@@ -515,7 +560,7 @@ export async function announceCatalogue(
       .map((v) => (v.prices[0] ? effectivePriceMinor(v.prices[0].amountMinor, p) : null))
       .filter((n): n is number => n !== null);
     const price = priced.length > 0 ? `${sym}${(Math.min(...priced) / 100).toFixed(2)}` : "—";
-    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    const icon = (() => { const h = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name); return h ? `${h} ` : ""; })();
     const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
     const stockTxt = unlimited ? "∞" : String(units);
     rows.push(`${icon}${nameDisp}\n🎁 <b>${stockTxt}</b> in stock · <b>${price}</b>`);
