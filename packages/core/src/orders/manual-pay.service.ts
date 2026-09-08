@@ -11,7 +11,7 @@ import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
-import { clearPaymentPrompts } from "./pay-prompt.service.js";
+import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
@@ -447,11 +447,14 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
 
   // The "send this amount to this Pay ID" card is now wrong — the order is paid.
   await clearPaymentPrompts(orderId).catch(() => undefined);
+  await clearChatClutter(outcome.telegramId).catch(() => undefined);
 
   if (outcome.telegramId !== null) {
     await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode)}. Delivering now… 🚀`);
     const celeb = loadConfig().CELEBRATION_EMOJI;
-    if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb);
+    // Plays its fullscreen animation, then removes itself rather than sitting
+    // between the customer and their keys.
+    if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
       await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange), { buttons: deliveryButtons(credsOf(d.payload)) });

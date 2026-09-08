@@ -8,6 +8,7 @@ import {
   type OutboxJob,
   primeFxRate,
   getPromoFlags,
+  enqueueTelegramDelete,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -96,6 +97,10 @@ async function main(): Promise<void> {
           msg = await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML", reply_markup });
         } else {
           msg = await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML", reply_markup });
+        }
+        // Scheduled tidy-up: the id only exists here, on the send.
+        if (job.data.deleteAfterSec && msg?.message_id) {
+          await enqueueTelegramDelete(job.data.telegramId, msg.message_id, job.data.deleteAfterSec * 1000).catch(() => undefined);
         }
         if (job.data.pin && msg?.message_id) {
           // Pinning can fail (e.g. bot lacks rights in groups); never fail the job for it.

@@ -39,6 +39,13 @@ export interface OutboxJob {
   text: string;
   /** Delete this message instead of sending anything (payment prompts, once the order is done). */
   deleteMessageId?: number;
+  /**
+   * Tidy this message away N seconds after it is sent. For the standalone
+   * celebration emoji: it plays its animation, then stops sitting between the
+   * customer and their keys. The worker knows the message id, so this is the
+   * one clean way to schedule it.
+   */
+  deleteAfterSec?: number;
   photo?: string; // optional image URL → sent as photo with text as caption
   buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
   pin?: boolean; // pin the sent message in the chat
@@ -48,6 +55,8 @@ export interface OutboxOptions {
   photo?: string;
   buttons?: OutboxButton[];
   pin?: boolean;
+  /** Self-delete this message N seconds after sending (see OutboxJob). */
+  deleteAfterSec?: number;
   /** Send later (ms). Used by the after-sale follow-up. */
   delayMs?: number;
 }
@@ -110,6 +119,7 @@ export async function enqueueTelegramMessage(
     ...(opts.photo ? { photo: opts.photo } : {}),
     ...(opts.buttons && opts.buttons.length > 0 ? { buttons: opts.buttons } : {}),
     ...(opts.pin ? { pin: true } : {}),
+    ...(opts.deleteAfterSec ? { deleteAfterSec: opts.deleteAfterSec } : {}),
   } satisfies OutboxJob, opts.delayMs && opts.delayMs > 0 ? { delay: Math.min(opts.delayMs, 7 * 24 * 3600_000) } : undefined);
 }
 
@@ -158,12 +168,12 @@ export async function enqueueTelegramBulk(
  * call fails and the worker drops it, which is the right outcome — there is
  * nothing to clean up that the customer still cares about.
  */
-export async function enqueueTelegramDelete(telegramId: bigint | string, messageId: number): Promise<void> {
+export async function enqueueTelegramDelete(telegramId: bigint | string, messageId: number, delayMs = 0): Promise<void> {
   await getQueue(QUEUE_NAMES.outbox).add("send", {
     telegramId: telegramId.toString(),
     text: "",
     deleteMessageId: messageId,
-  } satisfies OutboxJob, { priority: 20 });
+  } satisfies OutboxJob, { priority: 20, ...(delayMs > 0 ? { delay: delayMs } : {}) });
 }
 
 /** Send a text file (e.g. a large order's keys) as a Telegram document, with a caption. */

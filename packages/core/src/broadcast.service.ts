@@ -4,7 +4,7 @@ import { prisma } from "@gis/database";
 import { enqueueTelegramBulk, enqueueTelegramMessage, type OutboxButton } from "./queues.js";
 import { effectivePriceMinor, isSaleActive } from "./pricing.js";
 import { getProductView } from "./catalog/catalog.service.js";
-import { getFlashHeadline } from "./admin.service.js";
+import { nextFlashHeadline } from "./admin.service.js";
 
 export type BroadcastSegment = "all" | "customers" | "resellers";
 export type BroadcastRecurrence = "none" | "daily" | "weekly";
@@ -291,7 +291,7 @@ export async function announceFlashSale(
   const icon = (() => { const h = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name); return h ? `${h} ` : ""; })();
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
   const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
-  const hook = (await getFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
+  const hook = (await nextFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
   const lines = [
     hook,
     "━━━━━━━━━━━━━━━━━━━━",

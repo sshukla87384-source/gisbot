@@ -13,6 +13,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   convertMinor,
   clearPaymentPrompts,
   resetPricesForSoldOut,
+  syncAllSuppliers,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -309,6 +310,9 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     // A sold-out product must not keep advertising a sale price, and its
     // temporary customer prices go with it.
     every(300, "saleoos", 290, async () => { await resetPricesForSoldOut(); }),
+    // Supplier stock and prices, every 5 minutes: what they sold out of comes
+    // off our shelves, and a price rise follows through with the markup.
+    every(300, "supsync", 290, async () => { await syncAllSuppliers(); }),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     every(86_400, "reconcile", 86_390, reconcileWallets),
     every(120, "binancepoll", 110, binancePoll),
