@@ -14,17 +14,68 @@ interface SupplierRow { id: string; name: string; baseUrl: string; apiKeyEnc: st
 export interface SupplierProduct { ref: string; name: string; description: string; note: string; priceMinor: number; stock: number | null; variantRef?: string }
 
 /**
- * Send the key every common way at once. `apikey` matters for Supabase Edge
- * Functions — their gateway rejects a request without it before your function
- * ever runs, which looks exactly like a broken endpoint.
+ * Auth styles, tried one at a time.
+ *
+ * Sending the key every common way AT ONCE looks convenient and is how this
+ * used to work, but a server that reads `Authorization` first and fails to
+ * parse it answers 401 even though the `X-API-Key` it documents was right
+ * there in the same request. The supplier then looks broken and the operator
+ * has nothing to go on. So: try the styles in turn, and remember the one that
+ * worked on the supplier row (`docsConfig.authStyle`) so every later call —
+ * products, balance, order — uses it directly.
  */
-const authHeaders = (key: string): Record<string, string> => ({
-  Authorization: `Bearer ${key}`,
-  "X-API-Key": key,
-  apikey: key, // Supabase gateway
-  "X-Api-Token": key,
-  Accept: "application/json",
-});
+export type AuthStyle = "x-api-key" | "bearer" | "apikey" | "x-api-token" | "query";
+
+const AUTH_STYLES: AuthStyle[] = ["x-api-key", "bearer", "apikey", "x-api-token", "query"];
+
+function headersFor(style: AuthStyle, key: string): Record<string, string> {
+  const base = { Accept: "application/json" };
+  switch (style) {
+    case "bearer": return { ...base, Authorization: `Bearer ${key}` };
+    case "apikey": return { ...base, apikey: key }; // Supabase gateway
+    case "x-api-token": return { ...base, "X-Api-Token": key };
+    case "query": return base; // key rides in the query string instead
+    default: return { ...base, "X-API-Key": key };
+  }
+}
+
+/** A "query" style supplier wants ?api_key=… rather than a header. */
+function withKeyParam(url: string, style: AuthStyle, key: string): string {
+  if (style !== "query") return url;
+  return `${url}${url.includes("?") ? "&" : "?"}api_key=${encodeURIComponent(key)}`;
+}
+
+const styleOf = (s: SupplierRow): AuthStyle => {
+  const st = (s.docsConfig as DocsConfig | null)?.authStyle;
+  return AUTH_STYLES.includes(st as AuthStyle) ? (st as AuthStyle) : "x-api-key";
+};
+
+/** Headers for a supplier, using the style already proven to work (or the default). */
+const authHeaders = (key: string, style: AuthStyle = "x-api-key"): Record<string, string> => headersFor(style, key);
+
+/**
+ * Find the auth style this supplier accepts, and store it. Called whenever a
+ * request comes back 401/403 with the style we assumed.
+ */
+export async function detectAuthStyle(s: SupplierRow, path = "/products"): Promise<AuthStyle | null> {
+  const key = decKey(s);
+  for (const style of AUTH_STYLES) {
+    for (const url of urlCandidates(s.baseUrl, path)) {
+      try {
+        const res = await fetch(withKeyParam(url, style, key), {
+          headers: headersFor(style, key),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.status === 401 || res.status === 403 || res.status === 404) continue;
+        if (!res.ok) continue;
+        const doc = (s.docsConfig ?? {}) as DocsConfig;
+        await prisma.supplier.update({ where: { id: s.id }, data: { docsConfig: { ...doc, authStyle: style } as never } }).catch(() => undefined);
+        return style;
+      } catch { /* next */ }
+    }
+  }
+  return null;
+}
 
 /** URL candidates: as given, and with an /api/v1 prefix if the base has no version segment. */
 function urlCandidates(baseUrl: string, path: string): string[] {
@@ -34,11 +85,21 @@ function urlCandidates(baseUrl: string, path: string): string[] {
 }
 
 /** Fetch that tolerates a missing /api/v1 prefix (retries the versioned URL on 404). */
-async function supFetch(s: SupplierRow, path: string, init: RequestInit = {}): Promise<Response> {
-  const headers = { ...authHeaders(decKey(s)), ...(init.headers as Record<string, string> | undefined) };
+async function supFetch(s: SupplierRow, path: string, init: RequestInit = {}, retryAuth = true): Promise<Response> {
+  const key = decKey(s);
+  const style = styleOf(s);
+  const headers = { ...headersFor(style, key), ...(init.headers as Record<string, string> | undefined) };
   let last: Response | null = null;
   for (const url of urlCandidates(s.baseUrl, path)) {
-    const res = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(8000) });
+    const res = await fetch(withKeyParam(url, style, key), { ...init, headers, signal: AbortSignal.timeout(8000) });
+    if (res.status === 401 || res.status === 403) {
+      // Wrong style, not a wrong key: find the right one once, then retry.
+      if (retryAuth && (await detectAuthStyle(s, path))) {
+        const fresh = await prisma.supplier.findUnique({ where: { id: s.id } });
+        if (fresh) return supFetch(fresh as unknown as SupplierRow, path, init, false);
+      }
+      return res;
+    }
     if (res.status !== 404) return res;
     last = res;
   }
@@ -168,7 +229,7 @@ function withQuery(baseUrl: string, params: Record<string, string | number>): st
 
 /** GET the supplier base URL with ?action=… (no path probing). */
 async function actionGet(s: SupplierRow, params: Record<string, string | number>): Promise<Response> {
-  return fetch(withQuery(s.baseUrl, params), { headers: authHeaders(decKey(s)), signal: AbortSignal.timeout(8000) });
+  return fetch(withKeyParam(withQuery(s.baseUrl, params), styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)), signal: AbortSignal.timeout(8000) });
 }
 
 /** Some APIs (including ours) quote prices in integer MINOR units. */
@@ -223,7 +284,7 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
     for (const attempt of [doc.productsPath, `${doc.productsPath}?all=true`]) {
       try {
         const url = `${(doc.baseUrl ?? s.baseUrl).replace(/\/$/, "")}${attempt}`;
-        const res = await fetch(url, { headers: authHeaders(decKey(s)) });
+        const res = await fetch(withKeyParam(url, styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)) });
         const text = await res.text().catch(() => "");
         if (!res.ok) { note(`docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
         let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
@@ -403,7 +464,7 @@ export async function placeSupplierOrder(
       try {
         const res = await fetch(`${s.baseUrl.replace(/\/$/, "")}${path}`, {
           method: "POST",
-          headers: { ...authHeaders(decKey(s)), "Content-Type": "application/json", "Idempotency-Key": extId },
+          headers: { ...authHeaders(decKey(s), styleOf(s)), "Content-Type": "application/json", "Idempotency-Key": extId },
           body: JSON.stringify({ variantId: variantRef, quantity: qty }),
           signal: AbortSignal.timeout(12_000),
         });
@@ -509,7 +570,7 @@ export async function normalizeSupplierBase(supplierId: string): Promise<{ chang
   await prisma.supplier.update({ where: { id: supplierId }, data: { baseUrl: stripped } });
   for (const u of specUrls) {
     try {
-      const res = await fetch(u, { headers: authHeaders(decKey(sup)), signal: AbortSignal.timeout(8000) });
+      const res = await fetch(withKeyParam(u, styleOf(sup), decKey(sup)), { headers: authHeaders(decKey(sup), styleOf(sup)), signal: AbortSignal.timeout(8000) });
       if (!res.ok) continue;
       const body = await res.text();
       if (!/"paths"\s*:/.test(body)) continue;
@@ -548,6 +609,35 @@ export async function syncSupplierProducts(supplierId: string): Promise<SyncResu
   } finally {
     await getRedis().del(lockKey).catch(() => undefined);
   }
+}
+
+/**
+ * Re-sync every active supplier: prices, stock, and the visibility that follows
+ * from stock.
+ *
+ * Until now a sync only happened when an admin tapped 🔄, so a supplier's
+ * sell-out or price rise reached this shop whenever somebody remembered to
+ * look — the shop kept selling what the supplier no longer had, at a price the
+ * supplier no longer charged. This is the sweep that makes the connection mean
+ * something. Suppliers are done one at a time, and each is skipped if its own
+ * lock is held, so a manual sync and this never collide.
+ */
+export async function syncAllSuppliers(): Promise<{ suppliers: number; updated: number; added: number; failed: number }> {
+  const rows = await prisma.supplier.findMany({ where: { active: true }, select: { id: true } });
+  let updated = 0, added = 0, failed = 0, suppliers = 0;
+  for (const r of rows) {
+    try {
+      const res = await syncSupplierProducts(r.id);
+      if (res.busy) continue;
+      suppliers++;
+      updated += res.updated;
+      added += res.added;
+      failed += res.failed;
+    } catch {
+      failed++;
+    }
+  }
+  return { suppliers, updated, added, failed };
 }
 
 async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult> {
@@ -892,6 +982,8 @@ export async function autoFulfillSupplierItems(orderId: string): Promise<number>
 export interface DocsConfig {
   baseUrl?: string;
   authHeader?: string; // "Authorization: Bearer" | "X-API-Key"
+  /** The auth style proven to work against this supplier (see detectAuthStyle). */
+  authStyle?: string;
   productsPath?: string;
   orderPath?: string;
   balancePath?: string;
@@ -1039,7 +1131,7 @@ export async function autoFetchSupplierDocs(supplierId: string): Promise<{ ok: b
     const url = `${origin}${path}`;
     try {
       const res = await fetch(url, {
-        headers: { ...authHeaders(decKey(sup)), Accept: "text/plain,application/json,text/html" },
+        headers: { ...authHeaders(decKey(sup), styleOf(sup)), Accept: "text/plain,application/json,text/html" },
         signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) { tried.push(`${path} → ${res.status}`); continue; }

@@ -6,7 +6,7 @@ import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegra
 import { accrueCommissionTx } from "./commission.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
-import { clearPaymentPrompts } from "./pay-prompt.service.js";
+import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { logWallet } from "../logs.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
@@ -284,7 +284,10 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
 
   // Post-commit side effects (queued — retries safe).
   // The "pay this amount" card is stale the moment the payment lands.
-  if (outcome.kind === "fulfilled") await clearPaymentPrompts(orderId).catch(() => undefined);
+  if (outcome.kind === "fulfilled") {
+    await clearPaymentPrompts(orderId).catch(() => undefined);
+    await clearChatClutter(outcome.telegramId).catch(() => undefined);
+  }
   if (outcome.kind === "mismatch") {
     await enqueueAdminAlert(`🚨 Amount mismatch on ${outcome.orderNumber} — order set to MANUAL_REVIEW`);
   } else if (outcome.kind === "fulfilled") {

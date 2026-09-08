@@ -102,6 +102,7 @@ import {
   setHideSoldOut,
   adminRevealOrder,
   searchOrders,
+  listUserOrders,
   splitCredential,
   isDeliveredLink,
   type BlockedStockLine,
@@ -1024,12 +1025,43 @@ async function usersListView(ctx: Ctx): Promise<void> {
   await show(ctx, users.length ? "📋 <b>Recent users</b>\nTap one to manage." : "No users yet.", kb, true);
 }
 
+/** One customer's whole order history — every order opens with its delivered items. */
+async function userOrdersView(ctx: Ctx, userId: string, page: number): Promise<void> {
+  const u = await getUserById(userId);
+  const res = await listUserOrders(userId, page, 8);
+  const kb = new InlineKeyboard();
+  for (const o of res.items) {
+    const when = o.createdAt.toISOString().slice(0, 10);
+    kb.text(`${o.orderNumber} · ${fmt(o.totalMinor, o.currency)} · ${o.status.slice(0, 10)} · ${when}`, cb("adm", "ord", o.id)).row();
+  }
+  if (res.pages > 1) {
+    const row: Array<[string, string]> = [];
+    if (res.page > 1) row.push(["◀️", cb("adm", "uord", `${userId}~${res.page - 1}`)]);
+    row.push([`${res.page}/${res.pages}`, cb("adm", "uord", `${userId}~${res.page}`)]);
+    if (res.page < res.pages) row.push(["▶️", cb("adm", "uord", `${userId}~${res.page + 1}`)]);
+    for (const [label, data] of row) kb.text(label, data);
+    kb.row();
+  }
+  kb.text("◀️ Back", cb("adm", "uinfo", userId));
+  const lines = res.total === 0
+    ? [`📦 <b>${escapeHtml(u?.label ?? "Customer")}</b> has no orders yet.`]
+    : [
+        `📦 <b>${escapeHtml(u?.label ?? "Customer")}</b> — ${res.total} order(s)`,
+        "",
+        ...res.items.map((o) => `🧾 <b>${escapeHtml(o.orderNumber)}</b> — ${o.status}\n   📦 ${escapeHtml(o.firstItem.slice(0, 30))}${o.itemCount > 1 ? ` +${o.itemCount - 1}` : ""} · ${fmt(o.totalMinor, o.currency)}`),
+        "",
+        "<i>Tap an order to see exactly what was delivered.</i>",
+      ];
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
 async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
   const u = await getUserById(userId);
   if (!u) { await ctx.reply("User not found."); return usersMenuView(ctx); }
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add Balance", cb("adm", "uadd", u.id), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", u.id), "danger")).row()
     .add(sbtn("🧾 Wallet history", cb("adm", "uhist", u.id), "primary")).row()
+    .add(sbtn(`📦 Order history (${u.orders})`, cb("adm", "uord", u.id), "primary")).row()
     .add(sbtn("🕒 BNPL limit", cb("adm", "ubnpl", u.id), "primary"), sbtn("🔒 Close BNPL", cb("adm", "ubnplclose", u.id), "danger")).row()
     .add(u.status === "BANNED" ? sbtn("✅ Unban User", cb("adm", "uunban", u.id), "success") : sbtn("🚫 Ban User", cb("adm", "uban", u.id), "danger")).row()
     .text("◀️ Back", cb("adm", "ufund"));
@@ -1920,12 +1952,25 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "flashhead": {
       const cur = (await getFlashHeadline()).trim();
       ctx.session.awaiting = "admin_flash_headline";
-      await askStep(ctx, ["🔥 <b>Flash sale headline</b>", "The hook shown at the top of every flash-sale announcement (premium emoji OK).", cur ? `\nCurrent:\n${cur}` : "\nUsing the default hook.", "\nSend a new headline, or <code>-</code> to reset to default."].join("\n"));
+      await askStep(ctx, [
+        "🔥 <b>Flash sale headline</b>",
+        "The hook at the top of every sale announcement (premium emoji OK).",
+        "",
+        "💡 Send <b>several lines</b> and the bot rotates them — a different hook on every sale, so regulars keep reading them.",
+        cur ? `\nCurrent:\n${cur}` : "\nUsing the built-in rotating hooks.",
+        "\nSend one or more headlines, or <code>-</code> to go back to the built-in set.",
+      ].join("\n"));
       return;
     }
     case "m_users": return usersMenuView(ctx);
     case "uview": return usersListView(ctx);
     case "uinfo": return userDetailView(ctx, id);
+    case "uord": {
+      // "<userId>~<page>" — the userId is a cuid, so this stays inside the
+      // 64-byte callback-data limit.
+      const [uid, pg] = id.split("~");
+      return userOrdersView(ctx, uid ?? "", Number.parseInt(pg ?? "1", 10) || 1);
+    }
     case "logs": return logsMenuView(ctx);
     case "logv": return logsView(ctx, id);
     case "logclr": {

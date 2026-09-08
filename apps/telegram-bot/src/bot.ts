@@ -83,6 +83,8 @@ import {
   confirmStarsPayment,
   getVariantAvailable,
   rememberPaymentPrompt,
+  rememberChatClutter,
+  clearChatClutter,
   registerPostTarget,
   removePostTargetByChat,
   resolveUserByTelegramId,
@@ -436,7 +438,10 @@ export function createBot(): Bot<Ctx> {
       default: break;
     }
     // Standalone single emoji → Telegram plays a fullscreen animation for the user.
-    if (config.CELEBRATION_EMOJI) await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
+    if (config.CELEBRATION_EMOJI) {
+      const em = await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
+      if (em && ctx.chat) await rememberChatClutter(ctx.chat.id, em.message_id);
+    }
     const who = greetName(ctx.user);
     const welcomeLines = [
       `👋 <b>Welcome, ${who}!</b> 🙏`,
@@ -448,12 +453,16 @@ export function createBot(): Bot<Ctx> {
     }
     const welcomeText = welcomeLines.join("\n");
     const emojiPrefix = config.CUSTOM_EMOJI_ID ? `<tg-emoji emoji-id="${config.CUSTOM_EMOJI_ID}">✨</tg-emoji> ` : "";
+    // Remembered so the greeting does not sit above a customer's delivered keys
+    // for ever — it is cleared on their next delivery.
+    let welcomeMsg;
     try {
-      await ctx.reply(`${emojiPrefix}${welcomeText}`, { parse_mode: "HTML" });
+      welcomeMsg = await ctx.reply(`${emojiPrefix}${welcomeText}`, { parse_mode: "HTML" });
     } catch {
       // Telegram rejects custom emoji the bot doesn't own — fall back to plain text.
-      await ctx.reply(welcomeText, { parse_mode: "HTML" });
+      welcomeMsg = await ctx.reply(welcomeText, { parse_mode: "HTML" }).catch(() => undefined);
     }
+    if (welcomeMsg && ctx.chat) await rememberChatClutter(ctx.chat.id, welcomeMsg.message_id);
     ctx.session.isNewUser = false;
     return render(ctx, await views.menuView(ctx.user), false);
   });
@@ -918,7 +927,7 @@ export function createBot(): Bot<Ctx> {
       ctx.session.payRetries = tries;
       if (tries < 3) ctx.session.awaiting = "binance_txnid";
       else ctx.session.binanceOrderId = undefined;
-      return ctx.reply(
+      const pending = await ctx.reply(
         [
           note ? `${note}` : "⏳ <b>We couldn't auto-verify that yet.</b>",
           "",
@@ -928,6 +937,9 @@ export function createBot(): Bot<Ctx> {
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
       );
+      // Once the payment IS confirmed this line is only in the way.
+      if (ctx.chat) await rememberChatClutter(ctx.chat.id, pending.message_id);
+      return pending;
     }
     if (awaiting === "buy_qty") {
       const variantId = ctx.session.buyVariantId ?? "";
@@ -1332,6 +1344,9 @@ export function createBot(): Bot<Ctx> {
             { parse_mode: "HTML" },
           );
           await deliverAll(ctx, result.deliveries, result.orderNumber);
+          // Served — the pre-purchase greeting and any "we're checking" notices
+          // have done their job.
+          if (ctx.chat) await clearChatClutter(ctx.chat.id);
           if (result.pendingManualItems > 0) {
             await ctx.reply(
               `⏳ <b>${result.pendingManualItems} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`,
@@ -1530,7 +1545,7 @@ export function createBot(): Bot<Ctx> {
             await createTicket(user.id, "PAYMENT_ISSUE", `Binance payment issue on order ${oid} — customer tapped "need help".`).catch(() => undefined);
           }
           ctx.session.awaiting = "binance_txnid"; // they can still paste the ID
-          await ctx.reply(
+          const notice = await ctx.reply(
             [
               "🆘 <b>Our team has been notified</b>",
               "",
@@ -1540,6 +1555,8 @@ export function createBot(): Bot<Ctx> {
             ].join("\n"),
             { parse_mode: "HTML" },
           );
+          // Once the payment IS confirmed this notice is only in the way.
+          if (ctx.chat) await rememberChatClutter(ctx.chat.id, notice.message_id);
           break;
         }
         case "ord:binancepaid": {

@@ -168,6 +168,33 @@ export async function adminRevealOrder(
   };
 }
 
+/** Every order one customer has ever placed, newest first — for the admin. */
+export async function listUserOrders(userId: string, page = 1, pageSize = 8): Promise<{ items: OrderSearchHit[]; page: number; pages: number; total: number }> {
+  const where = { userId };
+  const total = await prisma.order.count({ where });
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const p = Math.min(Math.max(1, page), pages);
+  const rows = await prisma.order.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    skip: (p - 1) * pageSize,
+    take: pageSize,
+    include: {
+      items: { select: { productNameSnap: true } },
+      user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
+    },
+  });
+  return {
+    items: rows.map((o) => ({
+      id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor,
+      currency: o.currency, createdAt: o.createdAt, itemCount: o.items.length,
+      userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
+      firstItem: o.items[0]?.productNameSnap ?? "",
+    })),
+    page: p, pages, total,
+  };
+}
+
 export interface OrderSearchHit {
   id: string;
   orderNumber: string;
@@ -1342,6 +1369,45 @@ export async function adjustUserWalletById(
 export async function getFlashHeadline(): Promise<string> {
   const row = await prisma.setting.findUnique({ where: { key: "flash.headline" } });
   return typeof row?.value === "string" ? row.value : "";
+}
+
+/**
+ * Hooks for a sale post, rotated so the same customers do not see the identical
+ * line every single time — a headline that never changes stops being read after
+ * the second sale. The operator can paste their own set (one per line) in
+ * 🔥 Flash Sale Headline; these are the fallback.
+ */
+const DEFAULT_FLASH_HOOKS = [
+  "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡",
+  "🚨 <b>PRICE DROP — for a few hours only</b> 🚨",
+  "🎯 <b>Today's deal is live</b> — and it will not last",
+  "💥 <b>Big discount, small window</b> 💥",
+  "⏰ <b>Sale started — the clock is running</b> ⏰",
+  "🔥 <b>Cheapest it has been</b> — grab it before it is gone",
+  "🎉 <b>Flash sale unlocked</b> 🎉",
+  "🏃 <b>Quick — this price ends soon</b> 💨",
+];
+
+/**
+ * The next hook to use, different from the last one. Round-robin through a
+ * Redis counter so consecutive posts never repeat; falls back to the first
+ * line if Redis is unavailable.
+ */
+export async function nextFlashHeadline(): Promise<string> {
+  const configured = (await getFlashHeadline().catch(() => ""))
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const pool = configured.length > 0 ? configured : DEFAULT_FLASH_HOOKS;
+  if (pool.length === 1) return pool[0] as string;
+  let idx = 0;
+  try {
+    const { getRedis } = await import("./redis.js");
+    idx = (await getRedis().incr("flashhook:idx")) % pool.length;
+  } catch {
+    idx = Math.floor(Math.random() * pool.length);
+  }
+  return pool[idx] ?? (pool[0] as string);
 }
 export async function setFlashHeadline(html: string): Promise<void> {
   const v = html.slice(0, 400);
