@@ -64,6 +64,9 @@ async function main(): Promise<void> {
                     ? { text: b.text, callback_data: b.callbackData }
                     : { text: b.text, url: b.url };
                 if (styled && b.style && !b.copyText) base.style = b.style;
+                // Bot API 9.4 icon_custom_emoji_id: the ONLY way a premium emoji
+                // reaches a button, since button labels are plain text.
+                if (styled && b.iconCustomEmojiId && !b.copyText) base.icon_custom_emoji_id = b.iconCustomEmojiId;
                 return base;
               })
           : undefined;
@@ -115,7 +118,33 @@ async function main(): Promise<void> {
           // key like ABCD-<XY>-Z has <XY> eaten by any tag regex, so the
           // customer would receive a corrupted key, which is worse than a
           // slightly ugly one.
-          const plain = job.data.text;
+          // FIRST, though, try the one downgrade that keeps the message intact:
+          // drop the premium <tg-emoji> wrappers down to their plain glyph.
+          // Telegram only lets a bot send custom emoji when its owner has
+          // Premium (Bot API 9.4), so a shop whose owner does not gets EVERY
+          // announcement rejected — and the plain-text fallback below would
+          // then show the raw <tg-emoji …> tags to customers. One retry with
+          // the tags unwrapped is the difference between a normal-looking post
+          // and either nothing or markup soup.
+          const unwrapped = job.data.text.replace(/<tg-emoji[^>]*>([\s\S]*?)<\/tg-emoji>/gi, "$1");
+          // The button's icon_custom_emoji_id is the same privilege, so it goes
+          // in the same retry — otherwise the message is fixed and the keyboard
+          // still fails it.
+          const noIconMarkup = replyMarkup
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ? { inline_keyboard: (replyMarkup.inline_keyboard as any[][]).map((row) => row.map(({ icon_custom_emoji_id: _drop, ...b }) => b)) }
+            : undefined;
+          if (unwrapped !== job.data.text && !job.data.document && !job.data.photo) {
+            try {
+              await telegram.sendMessage(job.data.telegramId, unwrapped, { parse_mode: "HTML", reply_markup: noIconMarkup as never });
+              // eslint-disable-next-line no-console
+              console.error("outbox: custom emoji rejected, sent with plain glyphs", { telegramId: job.data.telegramId, error: e.description });
+              return;
+            } catch {
+              // Not the emoji (or the keyboard is at fault too) — carry on below.
+            }
+          }
+          const plain = unwrapped;
           const chunks: string[] = [];
           for (let i = 0; i < plain.length; i += 4000) chunks.push(plain.slice(i, i + 4000));
           // The KEYBOARD is a 400 cause too, not just the text (an over-long
