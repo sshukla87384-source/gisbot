@@ -97,6 +97,8 @@ import {
   deleteCategory,
   createProductFull,
   getAdminOrder,
+  getHideSoldOut,
+  setHideSoldOut,
   getAdminStats,
   rejectManualOrder,
   getRedis,
@@ -397,6 +399,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
+      [["😴 Sold-out products", cb("adm", "hidesold"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
@@ -687,13 +690,16 @@ async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
   const kb = new InlineKeyboard();
   kb.text("➕ Add custom price", cb("adm", "cpadd", productId)).row();
   for (const r of rows) {
-    kb.text(`✖️ ${r.label} · ${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
+    const sym = r.currency === "INR" ? "₹" : "$";
+    kb.text(`✖️ ${r.label} · ${sym}${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
   }
   kb.text("◀️ Back", cb("adm", "prod", productId));
   const lines = [
     `💲 <b>Custom pricing</b> — ${p ? escapeHtml(p.name) : "product"}`,
     "",
     rows.length ? "Set special prices for specific customers (direct, API, or both). Tap a row to remove it." : "No custom prices yet. Tap ➕ to add one.",
+    "",
+    "<i>A custom price is permanent — it stays until you remove it here, and is not touched by sales or restocks.</i>",
   ];
   await show(ctx, lines.join("\n"), kb, true);
 }

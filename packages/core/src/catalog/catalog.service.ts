@@ -96,6 +96,25 @@ export const UNLIMITED_STOCK = Number.MAX_SAFE_INTEGER;
  * single biggest source of latency: a 100-product page issued ~105 sequential
  * COUNTs.
  */
+/** Setting: hide sold-out products from the shop list until they are restocked. */
+const HIDE_SOLD_OUT_KEY = "shop.hide_sold_out";
+
+export async function getHideSoldOut(): Promise<boolean> {
+  const row = await prisma.setting.findUnique({ where: { key: HIDE_SOLD_OUT_KEY } });
+  // Default ON: a shop full of ❌ rows reads as abandoned, and every tap on one
+  // is a dead end.
+  return row?.value === undefined || row?.value === null ? true : Boolean(row.value);
+}
+
+export async function setHideSoldOut(on: boolean): Promise<void> {
+  await prisma.setting.upsert({
+    where: { key: HIDE_SOLD_OUT_KEY },
+    create: { key: HIDE_SOLD_OUT_KEY, value: on },
+    update: { value: on },
+  });
+  await invalidate("cat:*");
+}
+
 export async function stockMapFor(
   rows: Array<{ id: string; type: string; supplierId: string | null; supplierStock: number | null; reusable: boolean; reusableStock: number | null; manual: boolean; manualStock: number | null; variantIds: string[] }>,
 ): Promise<Map<string, number>> {
@@ -191,6 +210,19 @@ export async function listProducts(opts: {
   locale?: string;
   /** Several categories at once — a parent tile includes its children. */
   categoryIds?: string[];
+  /**
+   * Invert the sold-out filter: list ONLY what is out of stock. This is the
+   * shop's "😴 Sold out" shelf, which is also the one place a customer can ask
+   * to be told when something is back — so hiding sold-out products from the
+   * main list must never make them unreachable.
+   */
+  soldOutOnly?: boolean;
+  /**
+   * Ignore the shop's hide-sold-out setting and list everything. The reseller
+   * API sets this: a partner syncing a catalogue needs to see that an item
+   * exists and is at 0, not have it vanish and reappear.
+   */
+  includeSoldOut?: boolean;
 }): Promise<Paged<ProductListItem>> {
   const { categoryId, search, featuredOnly, currency, page, userId, channel = "DIRECT" } = opts;
   const categoryIds = opts.categoryIds && opts.categoryIds.length > 0 ? opts.categoryIds : null;
@@ -209,7 +241,14 @@ export async function listProducts(opts: {
   const userPart = hasOverrides ? (userId ?? "-") : "-";
   // Hash the search term so an attacker cannot grow the keyspace with long strings.
   const searchPart = search ? `s${sha256Hex(search).slice(0, 12)}` : "";
-  const cacheKey = `cat:prods:${categoryIds ? `m${sha256Hex(categoryIds.slice().sort().join(",")).slice(0, 10)}` : (categoryId ?? "all")}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}`;
+  const soldOutOnly = opts.soldOutOnly === true;
+  // Hiding is a shop-wide setting; the sold-out shelf ignores it by definition.
+  // Cached with the catalogue: this runs on every shop open, and the toggle
+  // invalidates "cat:*" when it changes.
+  const hideSoldOut = soldOutOnly || opts.includeSoldOut === true
+    ? false
+    : await cached("cat:hidesold", 60, getHideSoldOut).catch(() => true);
+  const cacheKey = `cat:prods:${categoryIds ? `m${sha256Hex(categoryIds.slice().sort().join(",")).slice(0, 10)}` : (categoryId ?? "all")}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}:${soldOutOnly ? "so" : hideSoldOut ? "h" : "x"}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
@@ -218,27 +257,57 @@ export async function listProducts(opts: {
       ...(featuredOnly ? { isFeatured: true } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
     };
-    const total = await prisma.product.count({ where });
-    const pages = Math.max(1, Math.ceil(total / size));
-    const products = await prisma.product.findMany({
-      where,
-      orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
-      skip: (page - 1) * size,
-      take: size,
-      include: {
-        variants: {
-          where: { isActive: true, deletedAt: null },
-          include: { prices: { where: { currency, tier: { name: "RETAIL" } } } },
-        },
-      },
-    });
+    // Stock is counted per variant, not stored on the product, so a WHERE clause
+    // cannot express "in stock". When visibility depends on it we take a bounded
+    // window, decide, and paginate in memory — one page of 20 out of a catalogue
+    // capped at 500 candidates, all of it behind the 60 s cache.
+    // The two findMany calls are written out in full rather than sharing a
+    // spread argument: Prisma infers the row type from the literal, and a spread
+    // widens it until `p.variants` stops existing.
+    const stockDecides = hideSoldOut || soldOutOnly;
+    let products = stockDecides
+      ? await prisma.product.findMany({
+          where,
+          orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
+          take: 500,
+          include: {
+            variants: {
+              where: { isActive: true, deletedAt: null },
+              include: { prices: { where: { currency, tier: { name: "RETAIL" } } } },
+            },
+          },
+        })
+      : await prisma.product.findMany({
+          where,
+          orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
+          skip: (page - 1) * size,
+          take: size,
+          include: {
+            variants: {
+              where: { isActive: true, deletedAt: null },
+              include: { prices: { where: { currency, tier: { name: "RETAIL" } } } },
+            },
+          },
+        });
+    const stockMap = await stockMapFor(
+      products.map((p) => ({ id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock, reusable: p.reusableSecretEnc !== null, reusableStock: p.reusableStock, manual: p.fulfillmentMode === "MANUAL", manualStock: p.manualStock, variantIds: p.variants.map((v) => v.id) })),
+    );
+    let total: number;
+    let pages: number;
+    if (stockDecides) {
+      const hasStock = (p: (typeof products)[number]): boolean => p.variants.some((v) => (stockMap.get(v.id) ?? 0) > 0);
+      products = products.filter((p) => (soldOutOnly ? !hasStock(p) : hasStock(p)));
+      total = products.length;
+      pages = Math.max(1, Math.ceil(total / size));
+      products = products.slice((page - 1) * size, page * size);
+    } else {
+      total = await prisma.product.count({ where });
+      pages = Math.max(1, Math.ceil(total / size));
+    }
 
     const overrideMap = userId
       ? await resolveUserPriceMap(userId, products.map((p) => p.id), channel, currency)
       : new Map<string, number>();
-    const stockMap = await stockMapFor(
-      products.map((p) => ({ id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock, reusable: p.reusableSecretEnc !== null, reusableStock: p.reusableStock, manual: p.fulfillmentMode === "MANUAL", manualStock: p.manualStock, variantIds: p.variants.map((v) => v.id) })),
-    );
     const items: ProductListItem[] = [];
     for (const p of products) {
       const onSale = isSaleActive(p);
