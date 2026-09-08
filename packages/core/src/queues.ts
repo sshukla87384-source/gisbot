@@ -25,6 +25,14 @@ export interface OutboxButton {
   /** One-tap clipboard copy (Telegram copy_text button). */
   copyText?: string;
   style?: "primary" | "success" | "danger";
+  /**
+   * Custom (premium) emoji shown as the button's icon — Bot API 9.4
+   * `icon_custom_emoji_id`. Button LABELS are plain text and can never contain a
+   * custom emoji, so this field is the only way to get one onto a button; the
+   * in-bot shop already uses it (sbtn), broadcasts now do too.
+   * Telegram renders it only for bots allowed to use custom emoji at all.
+   */
+  iconCustomEmojiId?: string;
 }
 export interface OutboxJob {
   telegramId: string;

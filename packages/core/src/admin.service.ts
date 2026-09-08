@@ -104,6 +104,121 @@ export async function getAdminOrder(orderId: string): Promise<
   };
 }
 
+export interface AdminRevealedItem {
+  orderItemId: string;
+  productName: string;
+  variantName: string;
+  fulfilledAt: Date | null;
+  /** Superseded by a replacement — the value no longer works. */
+  replaced: boolean;
+  payload: { kind?: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string; text?: string };
+}
+
+/**
+ * Everything actually delivered on one order, in the clear, for an admin.
+ *
+ * Support cannot answer "what link did I get?" from a masked last-4, and the
+ * only people who could see a delivered value were the customer and whoever
+ * typed it in by hand. Every call is audit-logged with the admin's id, exactly
+ * as the customer's own reveal is — an admin reading a customer's credentials
+ * is a real event and has to leave a trace.
+ */
+export async function adminRevealOrder(
+  orderId: string,
+  /** Who looked — a Telegram id or handle. Recorded on the audit entry. */
+  actorLabel = "bot-admin",
+): Promise<{ orderNumber: string; userLabel: string; items: AdminRevealedItem[] } | null> {
+  const o = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: { orderBy: [{ fulfilledAt: "asc" }, { id: "asc" }] },
+      user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
+    },
+  });
+  if (!o) return null;
+  const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const items: AdminRevealedItem[] = [];
+  for (const i of o.items) {
+    if (!i.deliveryPayloadEncrypted) continue;
+    let payload: AdminRevealedItem["payload"] = {};
+    // One unreadable payload (rotated key, corrupt row) must not blank the
+    // whole screen — show the item and say it cannot be read.
+    try { payload = JSON.parse(decryptSecret(i.deliveryPayloadEncrypted, masterKey)); } catch { payload = { text: "⚠️ could not be decrypted" }; }
+    items.push({
+      orderItemId: i.id,
+      productName: i.productNameSnap,
+      variantName: i.variantNameSnap,
+      fulfilledAt: i.fulfilledAt,
+      replaced: i.replacedAt !== null,
+      payload,
+    });
+  }
+  // actorId is a foreign key to User; a Telegram id is not one, and passing it
+  // would make every audit insert fail silently. The label goes in `after`.
+  await prisma.auditLog.create({
+    data: {
+      actorType: "ADMIN", action: "delivery.reveal.admin",
+      entityType: "Order", entityId: orderId, after: { items: items.length, by: actorLabel },
+    },
+  }).catch(() => undefined);
+  return {
+    orderNumber: o.orderNumber,
+    userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
+    items,
+  };
+}
+
+export interface OrderSearchHit {
+  id: string;
+  orderNumber: string;
+  status: string;
+  totalMinor: number;
+  currency: string;
+  createdAt: Date;
+  itemCount: number;
+  userLabel: string;
+  firstItem: string;
+}
+
+/**
+ * Find orders by whatever the admin happens to have: order number (full or the
+ * tail), @handle, Telegram id, or a product name. One box, because in practice
+ * an admin is holding one of those four and should not have to pick a mode.
+ */
+export async function searchOrders(query: string, limit = 10): Promise<OrderSearchHit[]> {
+  const q = query.trim().replace(/^#/, "");
+  if (q.length < 2) return [];
+  const handle = q.replace(/^@/, "");
+  const digits = /^\d{5,}$/.test(q) ? q : null;
+  const rows = await prisma.order.findMany({
+    where: {
+      OR: [
+        { orderNumber: { contains: q, mode: "insensitive" } },
+        { user: { telegramHandle: { contains: handle, mode: "insensitive" } } },
+        ...(digits ? [{ user: { telegramId: BigInt(digits) } }] : []),
+        { items: { some: { productNameSnap: { contains: q, mode: "insensitive" } } } },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.min(limit, 25),
+    include: {
+      items: { select: { productNameSnap: true } },
+      user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
+    },
+  });
+  return rows.map((o) => ({
+    id: o.id,
+    orderNumber: o.orderNumber,
+    status: o.status,
+    totalMinor: o.totalMinor,
+    currency: o.currency,
+    createdAt: o.createdAt,
+    itemCount: o.items.length,
+    userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
+    firstItem: o.items[0]?.productNameSnap ?? "",
+  }));
+}
+
 export async function adminCancelOrder(orderId: string): Promise<void> {
   await prisma.order.updateMany({
     where: { id: orderId, status: { in: ["PENDING_PAYMENT"] } },
@@ -369,7 +484,30 @@ export async function listVariantsBrief(productId: string): Promise<VariantBrief
 }
 
 /** Bulk-add license keys to a variant (one per line). Returns counts. */
-export async function addLicenseKeys(variantId: string, rawKeys: string[]): Promise<{ added: number; skipped: number; relisted: number }> {
+/** A pasted line that is already in a customer's hands — offered back to the admin to decide. */
+export interface BlockedStockLine {
+  /** Last 4 characters, so a decision can be made without printing the secret. */
+  tail: string;
+  /** The pasted line itself, so the admin can confirm and re-add it. Never logged. */
+  value: string;
+  orderNumber: string | null;
+  buyer: string | null;
+  deliveredAt: Date | null;
+}
+
+export interface AddStockResult {
+  added: number;
+  skipped: number;
+  relisted: number;
+  /** Held by a LIVE order — not added, waiting on the admin's decision. */
+  blocked: BlockedStockLine[];
+}
+
+export async function addLicenseKeys(
+  variantId: string,
+  rawKeys: string[],
+  opts: { force?: boolean } = {},
+): Promise<AddStockResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   let added = 0, skipped = 0, relisted = 0;
 
@@ -385,7 +523,7 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
     seen.add(keyHash);
     incoming.push({ value, keyHash });
   }
-  if (incoming.length === 0) return { added, skipped, relisted };
+  if (incoming.length === 0) return { added, skipped, relisted, blocked: [] };
 
   const existing = await prisma.licenseKey.findMany({
     where: { variantId, keyHash: { in: incoming.map((k) => k.keyHash) } },
@@ -398,13 +536,18 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
   const heldItems = heldOrderItemIds.length > 0
     ? await prisma.orderItem.findMany({
         where: { id: { in: heldOrderItemIds } },
-        select: { id: true, order: { select: { status: true } } },
+        select: {
+          id: true, fulfilledAt: true,
+          order: { select: { status: true, orderNumber: true, user: { select: { telegramHandle: true, firstName: true, telegramId: true } } } },
+        },
       })
     : [];
   const orderStatusByItem = new Map(heldItems.map((i) => [i.id, i.order.status]));
+  const heldByItem = new Map(heldItems.map((i) => [i.id, i]));
 
   const toCreate: Array<{ variantId: string; keyEncrypted: string; keyHash: string; supplier: string }> = [];
   const toRelist: string[] = [];
+  const blocked: BlockedStockLine[] = [];
   for (const k of incoming) {
     const ex = byHash.get(k.keyHash);
     if (!ex) {
@@ -421,7 +564,22 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
     if (ex.orderItemId) {
       const st = orderStatusByItem.get(ex.orderItemId);
       const dead = st === undefined || ["CANCELLED", "EXPIRED", "REFUNDED"].includes(st);
-      if (!dead) { skipped++; continue; } // still owned by a real customer
+      // A key a real customer still holds used to be dropped in silence, so
+      // re-pasting it looked like nothing happened. Hand it back to the caller
+      // as a decision instead — and only put it on the shelf when the admin
+      // has said yes, knowing whose it was.
+      if (!dead && !opts.force) {
+        const held = heldByItem.get(ex.orderItemId);
+        const u = held?.order.user;
+        blocked.push({
+          tail: k.value.length > 4 ? k.value.slice(-4) : k.value,
+          value: k.value,
+          orderNumber: held?.order.orderNumber ?? null,
+          buyer: u ? (u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? ""))) : null,
+          deliveredAt: held?.fulfilledAt ?? null,
+        });
+        continue;
+      }
     }
     toRelist.push(ex.id);
   }
@@ -449,13 +607,18 @@ export async function addLicenseKeys(variantId: string, rawKeys: string[]): Prom
     }
     await invalidate("cat:*");
   }
-  return { added, skipped, relisted };
+  return { added, skipped, relisted, blocked };
 }
 
 /** Add digital-account stock (username/password lines) for a DIGITAL_ACCOUNT variant. */
-export async function addAccountStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number; relisted: number }> {
+export async function addAccountStock(
+  variantId: string,
+  rawLines: string[],
+  opts: { force?: boolean } = {},
+): Promise<AddStockResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   let added = 0, skipped = 0, relisted = 0;
+  const blocked: BlockedStockLine[] = [];
   for (const raw of rawLines) {
     const line = raw.trim();
     if (!line) continue;
@@ -497,10 +660,30 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
       // their password silently rewritten underneath them.
       const holders = await prisma.accountAssignment.findMany({
         where: { accountId: existing.id },
-        select: { orderItem: { select: { order: { select: { status: true } } } } },
+        select: {
+          orderItem: {
+            select: {
+              fulfilledAt: true,
+              order: { select: { status: true, orderNumber: true, user: { select: { telegramHandle: true, firstName: true, telegramId: true } } } },
+            },
+          },
+        },
       });
-      const live = holders.some((h) => !["CANCELLED", "EXPIRED", "REFUNDED"].includes(h.orderItem.order.status));
-      if (live) { skipped++; continue; }
+      const liveHolder = holders.find((h) => !["CANCELLED", "EXPIRED", "REFUNDED"].includes(h.orderItem.order.status));
+      // As with keys: a live holder is a decision for the admin, not a silent
+      // skip. Forcing wipes their slot and rewrites the password, so the
+      // confirmation names the customer before any of that happens.
+      if (liveHolder && !opts.force) {
+        const u = liveHolder.orderItem.order.user;
+        blocked.push({
+          tail: username.length > 4 ? username.slice(-4) : username,
+          value: line,
+          orderNumber: liveHolder.orderItem.order.orderNumber,
+          buyer: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId ?? "")),
+          deliveredAt: liveHolder.orderItem.fulfilledAt,
+        });
+        continue;
+      }
       await prisma.digitalAccount.update({
         where: { id: existing.id },
         data: {
@@ -541,15 +724,38 @@ export async function addAccountStock(variantId: string, rawLines: string[]): Pr
     }
     await invalidate("cat:*");
   }
-  return { added, skipped, relisted };
+  return { added, skipped, relisted, blocked };
 }
 
-/** Type-aware stock add: license keys for LICENSE_KEY variants, accounts for DIGITAL_ACCOUNT. */
-export async function addStock(variantId: string, rawLines: string[]): Promise<{ added: number; skipped: number; relisted: number; type: string }> {
+/**
+ * Type-aware stock add: license keys for LICENSE_KEY variants, accounts for
+ * DIGITAL_ACCOUNT. `force` re-lists values a live order still holds — only ever
+ * passed after the admin has been shown whose they are and has said yes.
+ */
+export async function addStock(
+  variantId: string,
+  rawLines: string[],
+  opts: { force?: boolean; actorLabel?: string } = {},
+): Promise<AddStockResult & { type: string }> {
   const v = await prisma.productVariant.findUnique({ where: { id: variantId }, include: { product: { select: { type: true } } } });
   const type = v?.product.type ?? "LICENSE_KEY";
-  if (type === "DIGITAL_ACCOUNT") return { ...(await addAccountStock(variantId, rawLines)), type };
-  return { ...(await addLicenseKeys(variantId, rawLines)), type };
+  const res = type === "DIGITAL_ACCOUNT"
+    ? await addAccountStock(variantId, rawLines, opts)
+    : await addLicenseKeys(variantId, rawLines, opts);
+  if (opts.force && res.relisted > 0) {
+    await prisma.auditLog.create({
+      data: {
+        actorType: "ADMIN", action: "inventory.relist.forced",
+        entityType: "ProductVariant", entityId: variantId,
+        after: {
+          relisted: res.relisted,
+          by: opts.actorLabel ?? "bot-admin",
+          note: "re-listed values still held by a live order, at the admin's confirmation",
+        },
+      },
+    }).catch(() => undefined);
+  }
+  return { ...res, type };
 }
 
 // ───────────── In-bot product-creation wizard helpers ─────────────

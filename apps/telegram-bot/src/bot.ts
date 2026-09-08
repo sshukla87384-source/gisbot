@@ -108,7 +108,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, session } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
-import { adminCommand, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
+import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
 import { t } from "./i18n.js";
@@ -572,6 +572,9 @@ export function createBot(): Bot<Ctx> {
       if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered`);
       if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> (duplicate or unreadable)`);
       await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
+      // Same decision as a pasted batch: values a live order still holds are
+      // offered back rather than dropped into the "skipped" count.
+      if (r.blocked.length > 0) await askReAddBlocked(ctx, variantId, r.blocked, unit);
     } catch (e) {
       void logError("stockUpload", e, { variantId });
       await ctx.reply("❌ Couldn't read that file. Send a plain <b>.txt</b> with one item per line.", { parse_mode: "HTML" });

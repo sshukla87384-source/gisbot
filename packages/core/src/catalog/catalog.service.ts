@@ -192,7 +192,20 @@ export async function listCategories(parentId: string | null): Promise<CategoryN
 export async function getVariantAvailable(variantId: string): Promise<number> {
   const v = await prisma.productVariant.findUnique({
     where: { id: variantId },
-    include: { product: { select: { type: true, supplierId: true, supplierStock: true } } },
+    // variantStock() decides on reusable/manual FIRST, so those fields have to
+    // be selected here. Without them a "same item for everyone" product fell
+    // through to counting LicenseKey rows — of which it has none by design —
+    // so the buy screen reported 0 and the quantity picker offered only "1",
+    // however large a quantity the admin had set.
+    include: {
+      product: {
+        select: {
+          type: true, supplierId: true, supplierStock: true,
+          reusableSecretEnc: true, reusableStock: true,
+          fulfillmentMode: true, manualStock: true,
+        },
+      },
+    },
   });
   if (!v) return 0;
   return variantStock(variantId, v.product.type, v.product);

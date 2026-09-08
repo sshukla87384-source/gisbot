@@ -495,6 +495,25 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
   const out: string[] = [`🎉🎊 <b>Your order is delivered!</b> 🥳  (${items.length} item${items.length === 1 ? "" : "s"})`];
   if (orderNumber) out.push(`🧾 Order <b>${esc(orderNumber)}</b>`);
   out.push("");
+  // Anything identical for every unit is said ONCE, at the bottom. Repeating
+  // "Password can be changed", the 2fa.live hint and a copy-all line under each
+  // of ten accounts tripled the length of the message and buried the
+  // credentials themselves — the only part the customer is looking for.
+  const copyAll: string[] = [];
+  let anyTwofa = false;
+  const policies = new Set<boolean>();
+  const mixedPolicy = (): boolean => policies.size > 1;
+  // Only an item that actually hands over a LOGIN has a password policy. A
+  // license-key order has no password at all, so it must not be told anything
+  // about changing one.
+  const deliversLogin = (it: DeliveryLine): boolean => {
+    const p = it.payload;
+    if (p.password) return true;
+    if (!p.key) return false;
+    const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+    return rows.length > 0 && rows.map(splitCredential).every((c) => c !== null);
+  };
+  items.forEach((it) => { if (deliversLogin(it)) policies.add(it.allowPwChange === true); });
   items.forEach((it, i) => {
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(it.variantName)}`;
     out.push(`<b>${i + 1}.</b> 📦 <b>${esc(it.productName)}</b>${vn}`);
@@ -508,9 +527,11 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
           if (rows.length > 1) out.push(`   <b>${k + 1})</b>`);
           out.push(`   👤 ID: <code>${esc(c.id)}</code>`);
           out.push(`   🔐 Password: <code>${esc(c.pw)}</code>`);
-          if (c.twofa) out.push(`   🔢 2FA secret: <code>${esc(c.twofa)}</code>  <i>(paste at 2fa.live)</i>`);
+          if (c.twofa) { anyTwofa = true; out.push(`   🔢 2FA secret: <code>${esc(c.twofa)}</code>`); }
+          copyAll.push(`${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`);
         });
-        out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
+        // Only when the order mixes both policies does each item need its own.
+        if (mixedPolicy()) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
       } else if (rows.length > 1) {
         for (const r of rows) out.push(...(isDeliveredLink(r) ? linkLines(r, "   ") : [`   🔑 <code>${esc(r)}</code>`]));
       } else if (isDeliveredLink(rows[0] ?? p.key)) {
@@ -525,12 +546,28 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
     const cTwo = fx?.twofa ?? p.twofa;
     if (cName) out.push(`   👤 ID: <code>${esc(cName)}</code>`);
     if (cPass) out.push(`   🔐 Password: <code>${esc(cPass)}</code>`);
-    if (cTwo) out.push(`   🔢 2FA secret: <code>${esc(cTwo)}</code>  <i>(paste at 2fa.live)</i>`);
-    if (cName && cPass) out.push(`   📋 <code>${esc(cName)}|${esc(cPass)}${cTwo ? `|${esc(cTwo)}` : ""}</code>`);
-    if (p.password) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
+    if (cTwo) { anyTwofa = true; out.push(`   🔢 2FA secret: <code>${esc(cTwo)}</code>`); }
+    if (cName && cPass) copyAll.push(`${cName}|${cPass}${cTwo ? `|${cTwo}` : ""}`);
+    if (p.password && mixedPolicy()) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
     if (p.expiresAt) out.push(`   ⏳ ${p.expiresAt.slice(0, 10)}`);
     out.push("");
   });
+  // Said once, for the whole order.
+  const blank = (): void => { if (out[out.length - 1] !== "") out.push(""); };
+  if (anyTwofa) out.push('🔢 <b>2FA:</b> paste a 2FA secret at <a href="https://2fa.live">2fa.live</a> to get its 6-digit code.');
+  if (!mixedPolicy() && policies.size === 1) {
+    // Plural follows the number of LOGINS, not of items: one account bought
+    // alongside three license keys still reads "This account is yours".
+    const many = items.filter(deliversLogin).length > 1;
+    out.push([...policies][0] === true
+      ? `🔓 ${many ? "These accounts are" : "This account is"} yours — you're welcome to change the password${many ? "s" : ""}.`
+      : `🔒 Please do <b>not</b> change the account password${many ? "s" : ""}.`);
+  }
+  if (copyAll.length > 0) {
+    blank();
+    out.push("📋 <b>Copy all credentials:</b>", ...copyAll.map((l) => `<code>${esc(l)}</code>`));
+  }
+  blank();
   out.push("💾 <b>Saved in 📦 My Orders</b> — reopen it any time from 📦 View my orders.", "Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
   return out.join("\n");
 }
