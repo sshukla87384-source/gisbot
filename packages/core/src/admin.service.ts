@@ -8,6 +8,7 @@ import { announceRestock } from "./broadcast.service.js";
 import { invalidate, cached } from "./redis.js";
 import { usdtRate, priceInrFromUsd, priceUsdFromInr } from "./fx.js";
 import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./orders/assign.js";
+import { clearPaymentPrompts } from "./orders/pay-prompt.service.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -223,6 +224,8 @@ export async function adminCancelOrder(orderId: string): Promise<void> {
     where: { id: orderId, status: { in: ["PENDING_PAYMENT"] } },
     data: { status: "CANCELLED", cancelledAt: new Date() },
   });
+  // Nothing left to pay — take the instruction card out of the customer's chat.
+  await clearPaymentPrompts(orderId).catch(() => undefined);
 }
 
 /** Reject a pending manual order and notify the buyer. */
@@ -233,6 +236,7 @@ export async function rejectManualOrder(orderId: string): Promise<{ ok: boolean;
   });
   if (!order || order.status !== "PENDING_PAYMENT") return { ok: false };
   await prisma.order.update({ where: { id: orderId }, data: { status: "CANCELLED", cancelledAt: new Date() } });
+  await clearPaymentPrompts(orderId).catch(() => undefined);
   if (order.user.telegramId !== null) {
     await enqueueTelegramMessage(
       order.user.telegramId,
@@ -416,7 +420,60 @@ export async function clearFlashSale(productId: string): Promise<void> {
     where: { id: productId },
     data: { salePercentBp: null, saleStartsAt: null, saleEndsAt: null },
   });
+  await invalidate("cat:*");
 }
+
+/**
+ * Drop the sale price of every product that has sold out.
+ *
+ * A discount is a reason to buy now; on an empty shelf it is just a promise the
+ * shop cannot keep, and when stock is added back the old percentage would come
+ * along with it — the operator restocks at a price they never re-approved.
+ * Run from the worker every few minutes, because stock reaches zero through
+ * checkout, replacement and expiry alike, not through one code path.
+ */
+export async function resetSalesForSoldOut(): Promise<number> {
+  const onSale = await prisma.product.findMany({
+    where: { salePercentBp: { not: null }, status: "ACTIVE", deletedAt: null },
+    select: {
+      id: true, name: true, type: true, supplierId: true, supplierStock: true, saleEndsAt: true,
+      reusableSecretEnc: true, reusableStock: true, fulfillmentMode: true, manualStock: true,
+      variants: { where: { isActive: true, deletedAt: null }, select: { id: true } },
+    },
+  });
+  if (onSale.length === 0) return 0;
+  const { stockMapFor } = await import("./catalog/catalog.service.js");
+  const stock = await stockMapFor(
+    onSale.map((p) => ({
+      id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock,
+      reusable: p.reusableSecretEnc !== null, reusableStock: p.reusableStock,
+      manual: p.fulfillmentMode === "MANUAL", manualStock: p.manualStock,
+      variantIds: p.variants.map((v) => v.id),
+    })),
+  );
+  const now = new Date();
+  let cleared = 0;
+  for (const p of onSale) {
+    const soldOut = p.variants.reduce((n, v) => n + (stock.get(v.id) ?? 0), 0) === 0;
+    // A finished sale was only ever hidden at read time (isSaleActive compares
+    // the window), so the row kept its stale percentage and the admin screen kept
+    // offering "🔥 End sale" for a sale that had ended hours ago. Clear it for real.
+    const expired = p.saleEndsAt !== null && p.saleEndsAt <= now;
+    if (!soldOut && !expired) continue;
+    await clearFlashSale(p.id);
+    cleared++;
+    await prisma.auditLog.create({
+      data: {
+        actorType: "SYSTEM", action: soldOut ? "product.sale.reset_sold_out" : "product.sale.reset_expired",
+        entityType: "Product", entityId: p.id, after: { name: p.name },
+      },
+    }).catch(() => undefined);
+  }
+  if (cleared > 0) await invalidate("cat:*");
+  return cleared;
+}
+
+
 
 export interface VariantBrief { id: string; name: string; sku: string; defaultCostMinor: number | null }
 export async function listVariantsBrief(productId: string): Promise<VariantBrief[]> {
@@ -828,11 +885,31 @@ export async function setVip(userId: string, isVip: boolean): Promise<void> {
 
 export type PriceChannel = "BOTH" | "DIRECT" | "API";
 
-export async function setUserPrice(userId: string, productId: string, amountMinor: number, channel: PriceChannel = "BOTH"): Promise<void> {
+/**
+ * Set a customer's own price for a product. It has no expiry — it stands until
+ * an admin removes it.
+ *
+ * The currency is the missing piece this used to skip: `UserPrice.currency`
+ * defaults to USD in the schema, and nothing ever wrote it, so an admin who
+ * followed the prompt ("send the amount in the customer's currency") and typed
+ * 499 for an INR customer stored $4.99 — which then came back converted to about
+ * ₹450. The price the operator set was never the price anyone paid. It now
+ * follows the customer's own currency unless the caller states otherwise.
+ */
+export async function setUserPrice(
+  userId: string,
+  productId: string,
+  amountMinor: number,
+  channel: PriceChannel = "BOTH",
+  currency?: "USD" | "INR",
+): Promise<void> {
+  const cur = currency
+    ?? ((await prisma.user.findUnique({ where: { id: userId }, select: { currency: true } }))?.currency as "USD" | "INR" | undefined)
+    ?? "USD";
   await prisma.userPrice.upsert({
     where: { userId_productId_channel: { userId, productId, channel } },
-    create: { userId, productId, amountMinor, channel },
-    update: { amountMinor },
+    create: { userId, productId, amountMinor, channel, currency: cur },
+    update: { amountMinor, currency: cur },
   });
   await invalidate("cat:*");
 }
@@ -850,11 +927,11 @@ export async function listUserPrices(userId: string): Promise<Array<{ productId:
 }
 
 /** All per-user custom prices set for one product (for the admin product view). */
-export async function listProductUserPrices(productId: string): Promise<Array<{ userId: string; label: string; amountMinor: number; channel: PriceChannel }>> {
+export async function listProductUserPrices(productId: string): Promise<Array<{ userId: string; label: string; amountMinor: number; currency: string; channel: PriceChannel }>> {
   const rows = await prisma.userPrice.findMany({ where: { productId }, orderBy: { updatedAt: "desc" } });
   const users = await prisma.user.findMany({ where: { id: { in: rows.map((r) => r.userId) } }, select: { id: true, telegramHandle: true, firstName: true, telegramId: true } });
   const labelOf = new Map(users.map((u) => [u.id, u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId))]));
-  return rows.map((r) => ({ userId: r.userId, label: labelOf.get(r.userId) ?? r.userId, amountMinor: r.amountMinor, channel: r.channel as PriceChannel }));
+  return rows.map((r) => ({ userId: r.userId, label: labelOf.get(r.userId) ?? r.userId, amountMinor: r.amountMinor, currency: r.currency as string, channel: r.channel as PriceChannel }));
 }
 
 /** Set the public (RETAIL) price for ALL variants of a product, in USD and/or INR. This is the price everyone sees. */

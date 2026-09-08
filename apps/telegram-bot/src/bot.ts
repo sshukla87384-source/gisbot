@@ -82,6 +82,7 @@ import {
   createStarsCheckout,
   confirmStarsPayment,
   getVariantAvailable,
+  rememberPaymentPrompt,
   registerPostTarget,
   removePostTargetByChat,
   resolveUserByTelegramId,
@@ -1175,6 +1176,9 @@ export function createBot(): Bot<Ctx> {
         case "shp:home":
           await render(ctx, await views.shopHomeView(user, intArg(args, 0, 1)), true);
           break;
+        case "shp:soldout":
+          await render(ctx, await views.soldOutView(user, intArg(args, 0, 1)), true);
+          break;
         case "shp:root":
           await render(ctx, await views.categoriesView(null), true);
           break;
@@ -1459,6 +1463,11 @@ export function createBot(): Bot<Ctx> {
           const bz = await createBinanceManualCheckout(user.id, { useWallet: args[0] === "w" });
           ctx.session.binanceOrderId = bz.orderId;
           ctx.session.payRetries = 0;
+          // The card lives in this message once edited; remember it so whatever
+          // finishes the order can take it out of the chat.
+          if (ctx.chat && ctx.callbackQuery?.message?.message_id) {
+            await rememberPaymentPrompt(bz.orderId, ctx.chat.id, ctx.callbackQuery.message.message_id);
+          }
           // Arm the paste right away: the next message they send is treated as the Order ID.
           ctx.session.awaiting = "binance_txnid";
           await ctx.editMessageText(
@@ -1649,14 +1658,19 @@ export function createBot(): Bot<Ctx> {
             // on screen after delivery invites a second payment to the same
             // order, and buries the delivered items under a dead screen.
             ctx.session.upiQrMsgId = qrMsg.message_id;
+            if (ctx.chat) await rememberPaymentPrompt(up.orderId, ctx.chat.id, qrMsg.message_id);
           } catch {
             // QR generation or photo send failed — still show the payment details.
+            // These fallbacks used to store no id at all, so their card stayed on
+            // screen for ever; they are recorded like the QR now.
             try {
-              await ctx.reply(caption, { parse_mode: "HTML", reply_markup: upiKb });
+              const m = await ctx.reply(caption, { parse_mode: "HTML", reply_markup: upiKb });
+              if (ctx.chat) await rememberPaymentPrompt(up.orderId, ctx.chat.id, m.message_id);
             } catch {
-              await ctx.reply(caption.replace(/<[^>]+>/g, ""), {
+              const m = await ctx.reply(caption.replace(/<[^>]+>/g, ""), {
                 reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
-              });
+              }).catch(() => undefined);
+              if (ctx.chat && m) await rememberPaymentPrompt(up.orderId, ctx.chat.id, m.message_id);
             }
           }
           break;

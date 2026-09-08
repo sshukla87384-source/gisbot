@@ -77,6 +77,9 @@ export class DeveloperController {
       featuredOnly: query.featured === "true",
       userId: req.apiKey?.ownerUserId ?? undefined,
       channel: "API" as const,
+      // Partners sync the whole catalogue; a sold-out product must stay in the
+      // feed (with stock 0) rather than disappear from their side.
+      includeSoldOut: true,
     };
     let truncated = false;
     let res = await listProducts({ ...baseOpts, page: wantAll ? 1 : page, pageSize: wantAll ? 200 : limit });

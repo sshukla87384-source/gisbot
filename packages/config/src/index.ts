@@ -6,6 +6,16 @@ import { z } from "zod";
  * Optional gateway/email/S3 groups gate feature enablement at runtime
  * (e.g. Razorpay appears as a payment option only when its vars are set).
  */
+/** "false"/"0"/"no"/"off" (any case) mean false; empty/unset means the default. */
+const envBool = (def: boolean) =>
+  z
+    .string()
+    .optional()
+    .transform((v) => {
+      if (v === undefined || v.trim() === "") return def;
+      return !["false", "0", "no", "off"].includes(v.trim().toLowerCase());
+    });
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -36,7 +46,9 @@ const envSchema = z
     PUBLIC_API_URL: z.string().url().optional(), // payment redirects / webhook base + media serving
     BOT_USERNAME: z.string().optional(), // for t.me deep-link buttons in announcements
     STORE_NAME: z.string().default("The Crazy Store"), // brand name shown to customers
-    BUTTON_STYLES_ENABLED: z.coerce.boolean().default(true), // native colored buttons (Bot API style: primary/success/danger)
+    // z.coerce.boolean() is JS truthiness: the STRING "false" coerces to TRUE,
+    // so these switches could only ever be turned on. Parsed by hand instead.
+    BUTTON_STYLES_ENABLED: envBool(true), // native colored buttons + custom-emoji icons (Bot API 9.4)
     CUSTOM_EMOJI_ID: z.string().optional(), // premium custom emoji id (only works if the bot OWNS the emoji pack)
     CUSTOM_EMOJI_JSON: z.string().optional(), // {"wallet":"5..","cart":"5.."} — centralized custom emoji registry
     CELEBRATION_EMOJI: z.string().default("🎉"), // built-in emoji sent standalone → Telegram animates it for everyone
@@ -55,7 +67,7 @@ const envSchema = z
     NOWPAYMENTS_IPN_SECRET: z.string().optional(),
     // UPI (manual — customer pays to this VPA/ID, admin confirms)
     // Telegram Stars checkout (native ⭐ invoice)
-    STARS_ENABLED: z.coerce.boolean().default(false),
+    STARS_ENABLED: envBool(false),
     STARS_PER_USD: z.coerce.number().positive().default(100), // Stars charged per 1 USD of order value
     UPI_ID: z.string().optional(),
     UPI_PAYEE_NAME: z.string().optional(),

@@ -37,6 +37,8 @@ export interface OutboxButton {
 export interface OutboxJob {
   telegramId: string;
   text: string;
+  /** Delete this message instead of sending anything (payment prompts, once the order is done). */
+  deleteMessageId?: number;
   photo?: string; // optional image URL → sent as photo with text as caption
   buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
   pin?: boolean; // pin the sent message in the chat
@@ -145,6 +147,23 @@ export async function enqueueTelegramBulk(
     queued += slice.length;
   }
   return queued;
+}
+
+/**
+ * Delete a message the bot sent earlier. Goes through the outbox because the
+ * services that finish an order (webhooks, cron, the admin panel) run in the
+ * worker and have no grammY context of their own.
+ *
+ * Telegram only lets a bot delete its own message for 48 hours; past that the
+ * call fails and the worker drops it, which is the right outcome — there is
+ * nothing to clean up that the customer still cares about.
+ */
+export async function enqueueTelegramDelete(telegramId: bigint | string, messageId: number): Promise<void> {
+  await getQueue(QUEUE_NAMES.outbox).add("send", {
+    telegramId: telegramId.toString(),
+    text: "",
+    deleteMessageId: messageId,
+  } satisfies OutboxJob, { priority: 20 });
 }
 
 /** Send a text file (e.g. a large order's keys) as a Telegram document, with a caption. */

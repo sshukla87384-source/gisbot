@@ -11,6 +11,8 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   pollBinancePayments,
   pollUpiCredits,
   convertMinor,
+  clearPaymentPrompts,
+  resetSalesForSoldOut,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -66,14 +68,19 @@ async function sweepReservationsAndOrders(): Promise<void> {
   // Rotating promo post, if the admin enabled it.
   await runAutoPromo().catch(() => undefined);
 
+  // Collect the ids first: an expired order's "pay this amount" card has to be
+  // taken out of the customer's chat, and updateMany does not say which rows it
+  // touched.
+  const expiring = await prisma.order.findMany({
+    where: { status: "PENDING_PAYMENT", expiresAt: { lt: now }, walletUsedMinor: 0 },
+    select: { id: true },
+    take: 500,
+  });
   const expired = await prisma.order.updateMany({
-    where: {
-      status: "PENDING_PAYMENT",
-      expiresAt: { lt: now },
-      walletUsedMinor: 0,
-    },
+    where: { id: { in: expiring.map((o) => o.id) } },
     data: { status: "EXPIRED" },
   });
+  for (const o of expiring) await clearPaymentPrompts(o.id).catch(() => undefined);
   if (keys.count + accounts.count + expired.count > 0) {
     await prisma.auditLog.create({
       data: {
@@ -299,6 +306,8 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(60, "broadcasts", 55, runScheduledBroadcasts),
     every(600, "holds", 590, releaseHolds),
     every(3600, "lowstock", 3590, lowStockAlerts),
+    // A sold-out product must not keep advertising a sale price.
+    every(300, "saleoos", 290, async () => { await resetSalesForSoldOut(); }),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     every(86_400, "reconcile", 86_390, reconcileWallets),
     every(120, "binancepoll", 110, binancePoll),

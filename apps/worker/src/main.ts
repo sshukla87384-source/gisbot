@@ -44,6 +44,12 @@ async function main(): Promise<void> {
   const outboxWorker = new Worker<OutboxJob>(
     QUEUE_NAMES.outbox,
     async (job) => {
+      // A delete job carries no text — do it and stop. Failures here are
+      // expected (message older than 48 h, already gone) and must not retry.
+      if (job.data.deleteMessageId) {
+        await telegram.deleteMessage(job.data.telegramId, job.data.deleteMessageId).catch(() => undefined);
+        return;
+      }
       let replyMarkup: any;
       try {
         const styled = config.BUTTON_STYLES_ENABLED;

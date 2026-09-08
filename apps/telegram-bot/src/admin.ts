@@ -97,6 +97,8 @@ import {
   deleteCategory,
   createProductFull,
   getAdminOrder,
+  getHideSoldOut,
+  setHideSoldOut,
   adminRevealOrder,
   searchOrders,
   splitCredential,
@@ -402,6 +404,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
+      [["😴 Sold-out products", cb("adm", "hidesold"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
@@ -793,13 +796,16 @@ async function customPriceView(ctx: Ctx, productId: string): Promise<void> {
   const kb = new InlineKeyboard();
   kb.text("➕ Add custom price", cb("adm", "cpadd", productId)).row();
   for (const r of rows) {
-    kb.text(`✖️ ${r.label} · ${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
+    const sym = r.currency === "INR" ? "₹" : "$";
+    kb.text(`✖️ ${r.label} · ${sym}${(r.amountMinor / 100).toFixed(2)} · ${chLabel(r.channel)}`, cb("adm", "cprm", `${r.userId}~${r.channel.slice(0, 1)}`)).row();
   }
   kb.text("◀️ Back", cb("adm", "prod", productId));
   const lines = [
     `💲 <b>Custom pricing</b> — ${p ? escapeHtml(p.name) : "product"}`,
     "",
     rows.length ? "Set special prices for specific customers (direct, API, or both). Tap a row to remove it." : "No custom prices yet. Tap ➕ to add one.",
+    "",
+    "<i>A custom price is permanent — it stays until you remove it here, and is not touched by sales or restocks.</i>",
   ];
   await show(ctx, lines.join("\n"), kb, true);
 }
@@ -2436,6 +2442,27 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "recent": return ordersView(ctx, false);
     case "ord": return orderView(ctx, id);
     case "odel": return orderDeliveriesView(ctx, id);
+    case "hidesold": {
+      const on = await getHideSoldOut();
+      const kb = new InlineKeyboard()
+        .add(sbtn(on ? "\u{1F441} Show them in the shop" : "\u{1F648} Hide them from the shop", cb("adm", "hidesoldset", on ? "0" : "1"), on ? "primary" : "success")).row()
+        .text("\u25C0\uFE0F Back", cb("adm", "m_content"));
+      await show(ctx, [
+        "\u{1F634} <b>Sold-out products</b>",
+        "",
+        on
+          ? "\u{1F648} <b>Hidden</b> \u2014 a product disappears from the shop the moment its stock hits 0, and comes back by itself when you add stock."
+          : "\u{1F441} <b>Shown</b> \u2014 sold-out products stay on the shelves marked \u274C.",
+        "",
+        "<i>Either way customers can open the \u{1F634} Sold out list from the shop and tap \u{1F514} Notify me, so nothing is lost by hiding them.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "hidesoldset": {
+      await setHideSoldOut(id === "1");
+      await ctx.answerCallbackQuery({ text: id === "1" ? "Hidden from the shop" : "Shown in the shop" }).catch(() => undefined);
+      return handleAdminCallback(ctx, "hidesold", []);
+    }
     case "stockyes": {
       const pend = ctx.session.pendingStock;
       ctx.session.pendingStock = undefined;

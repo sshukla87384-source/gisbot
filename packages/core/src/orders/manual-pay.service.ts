@@ -11,6 +11,7 @@ import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
+import { clearPaymentPrompts } from "./pay-prompt.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
@@ -443,6 +444,9 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
   );
 
   if (outcome.kind === "skip") return { status: "already_processed", delivered: 0 };
+
+  // The "send this amount to this Pay ID" card is now wrong — the order is paid.
+  await clearPaymentPrompts(orderId).catch(() => undefined);
 
   if (outcome.telegramId !== null) {
     await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode)}. Delivering now… 🚀`);

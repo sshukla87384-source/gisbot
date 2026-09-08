@@ -80,8 +80,31 @@ function outMark(p: { inStock: boolean }): string {
   return p.inStock ? "" : "❌ ";
 }
 
+/** The sold-out shelf: what is not for sale right now, with a way to be notified. */
+export async function soldOutView(user: BotUser, page: number): Promise<View> {
+  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale, soldOutOnly: true });
+  const kb = new InlineKeyboard();
+  for (const p of result.items) {
+    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
+    kb.add(sbtn(`${icon}${p.name}`, cb("shp", "prod", p.id), "danger", p.iconCustomEmojiId ?? undefined)).row();
+  }
+  paginationRow(kb, "shp", "soldout", result.page, result.pages);
+  kb.row().text("🛍 Back to shop", cb("shp", "home", 1));
+  backToMenuRow(kb);
+  return {
+    text: result.items.length > 0
+      ? "😴 <b>Sold out right now</b>\n<i>Open one and tap 🔔 Notify me — you'll get a message the moment it is back.</i>"
+      : "🎉 Nothing is sold out — everything in the shop is available.",
+    kb,
+  };
+}
+
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale });
+  // Sold-out products are hidden from the shelves by default, so this count is
+  // the only way back to them — and their card is the one place a customer can
+  // ask to be told when the item returns.
+  const soldOut = await listProducts({ currency: user.currency as Currency, page: 1, pageSize: 1, userId: user.id, locale: user.locale, soldOutOnly: true }).catch(() => null);
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
@@ -92,6 +115,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
+  if (soldOut && soldOut.total > 0) kb.text(`😴 Sold out (${soldOut.total})`, cb("shp", "soldout", 1)).row();
   kb.text("📂 All Categories", cb("shp", "root"));
   backToMenuRow(kb);
   return {
