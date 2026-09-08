@@ -162,17 +162,35 @@ export const DELIVERY_BUTTONS: OutboxButton[] = [
 ];
 
 /**
+ * Telegram's hard limit on a copy_text button payload (Bot API: 1-256 chars).
+ * Exceeding it makes Telegram reject the ENTIRE sendMessage with 400 — so a
+ * long delivered value (e.g. a 380-character sign-in link) used to take the
+ * whole delivery message down with it and the paid customer received nothing
+ * in chat, with the value only reachable through 📦 My Orders.
+ */
+export const TELEGRAM_COPY_TEXT_MAX = 256;
+
+/** A value can only ride in a copy_text button when Telegram will accept it. */
+export function isCopyable(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= TELEGRAM_COPY_TEXT_MAX;
+}
+
+/**
  * Delivery buttons with one-tap copy for the credentials that were delivered.
  * Pass the already-repaired values so the clipboard matches what is displayed.
+ *
+ * Values too long for a copy_text button are simply not given one — the value
+ * itself is always in the message body, where it can be tapped to copy.
  */
 export function deliveryButtons(creds?: { id?: string; pw?: string; twofa?: string; key?: string }): OutboxButton[] {
   const out: OutboxButton[] = [];
-  if (creds?.id) out.push({ text: "📋 Copy ID", copyText: creds.id });
-  if (creds?.pw) out.push({ text: "📋 Copy password", copyText: creds.pw });
-  if (creds?.twofa) out.push({ text: "📋 Copy 2FA secret", copyText: creds.twofa });
+  if (isCopyable(creds?.id)) out.push({ text: "📋 Copy ID", copyText: creds.id });
+  if (isCopyable(creds?.pw)) out.push({ text: "📋 Copy password", copyText: creds.pw });
+  if (isCopyable(creds?.twofa)) out.push({ text: "📋 Copy 2FA secret", copyText: creds.twofa });
   if (creds?.id && creds.pw) {
-    out.push({ text: "📋 Copy ALL credentials", copyText: `${creds.id}|${creds.pw}${creds.twofa ? `|${creds.twofa}` : ""}` });
-  } else if (creds?.key) {
+    const all = `${creds.id}|${creds.pw}${creds.twofa ? `|${creds.twofa}` : ""}`;
+    if (isCopyable(all)) out.push({ text: "📋 Copy ALL credentials", copyText: all });
+  } else if (isCopyable(creds?.key)) {
     out.push({ text: "📋 Copy key", copyText: creds.key });
   }
   return [...out, ...DELIVERY_BUTTONS];

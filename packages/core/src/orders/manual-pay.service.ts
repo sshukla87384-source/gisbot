@@ -9,7 +9,7 @@ import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
@@ -349,6 +349,24 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         if (item.fulfilledAt) continue;
         const type = item.variant.product.type;
         const guide = item.variant.product.activationGuide;
+        // "Same link for everyone" first: it delivers on ANY product type and in
+        // MANUAL mode too, exactly as it does on the wallet rail. Checked before
+        // the manual/type gate below, which used to swallow it.
+        try {
+          const reusable = await fulfillReusableItemTx(tx, item, masterKey);
+          if (reusable) {
+            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload: reusable, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+            await accrueCommissionTx(tx, item, order.currency);
+            continue;
+          }
+        } catch (e) {
+          awaitingStock++;
+          if (!(isCoreError(e) && e.code === "OUT_OF_STOCK")) {
+            // eslint-disable-next-line no-console
+            console.error("reusable fulfilment failed", { orderItemId: item.id, error: String(e).slice(0, 300) });
+          }
+          continue;
+        }
         if (item.fulfillmentMode === "MANUAL" || (type !== "LICENSE_KEY" && type !== "DIGITAL_ACCOUNT")) {
           pendingManual++;
           continue;
