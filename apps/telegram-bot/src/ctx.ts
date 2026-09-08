@@ -227,6 +227,8 @@ export interface SessionData {
   priceUserId?: string;
   priceUserLabel?: string;
   priceAmountMinor?: number;
+  /** Channel picked for a custom price, held while the admin chooses how long it stands. */
+  priceChannel?: string;
   pubUsdMinor?: number;
   admManualItemId?: string;
   bcBody?: string;

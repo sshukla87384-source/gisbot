@@ -432,6 +432,65 @@ export async function clearFlashSale(productId: string): Promise<void> {
  * Run from the worker every few minutes, because stock reaches zero through
  * checkout, replacement and expiry alike, not through one code path.
  */
+/**
+ * Drop every TEMPORARY customer-specific price on products that have sold out.
+ *
+ * A special rate is agreed against a particular batch — "this lot, this price".
+ * When the shelf empties and is refilled at whatever the price is by then, the
+ * old private rate should not quietly follow the customer into the new stock;
+ * they go back to the public price like everyone else. An override the admin
+ * marked PERMANENT is exactly the opposite intention, so it is left alone.
+ *
+ * Runs inside the same sweep as the sale reset, over the same product list.
+ */
+async function dropTemporaryUserPrices(): Promise<number> {
+  // Start from the overrides, not from the sale: a customer price can sit on any
+  // product, most of which are not discounted at all.
+  const held = await prisma.userPrice.findMany({
+    where: { permanent: false },
+    select: { productId: true },
+    distinct: ["productId"],
+  });
+  if (held.length === 0) return 0;
+  const products = await prisma.product.findMany({
+    where: { id: { in: held.map((h) => h.productId) }, deletedAt: null },
+    select: {
+      id: true, type: true, supplierId: true, supplierStock: true,
+      reusableSecretEnc: true, reusableStock: true, fulfillmentMode: true, manualStock: true,
+      variants: { where: { isActive: true, deletedAt: null }, select: { id: true } },
+    },
+  });
+  if (products.length === 0) return 0;
+  const { stockMapFor } = await import("./catalog/catalog.service.js");
+  const stock = await stockMapFor(
+    products.map((p) => ({
+      id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock,
+      reusable: p.reusableSecretEnc !== null, reusableStock: p.reusableStock,
+      manual: p.fulfillmentMode === "MANUAL", manualStock: p.manualStock,
+      variantIds: p.variants.map((v) => v.id),
+    })),
+  );
+  const soldOutProductIds = products
+    .filter((p) => p.variants.reduce((n, v) => n + (stock.get(v.id) ?? 0), 0) === 0)
+    .map((p) => p.id);
+  if (soldOutProductIds.length === 0) return 0;
+  const doomed = await prisma.userPrice.findMany({
+    where: { productId: { in: soldOutProductIds }, permanent: false },
+    select: { id: true, userId: true, productId: true },
+  });
+  if (doomed.length === 0) return 0;
+  await prisma.userPrice.deleteMany({ where: { id: { in: doomed.map((d) => d.id) } } });
+  await prisma.auditLog.create({
+    data: {
+      actorType: "SYSTEM", action: "userprice.reset_sold_out",
+      entityType: "Product", entityId: soldOutProductIds[0] ?? null,
+      after: { removed: doomed.length, products: soldOutProductIds.length },
+    },
+  }).catch(() => undefined);
+  await invalidate("cat:*");
+  return doomed.length;
+}
+
 export async function resetSalesForSoldOut(): Promise<number> {
   const onSale = await prisma.product.findMany({
     where: { salePercentBp: { not: null }, status: "ACTIVE", deletedAt: null },
@@ -471,6 +530,17 @@ export async function resetSalesForSoldOut(): Promise<number> {
   }
   if (cleared > 0) await invalidate("cat:*");
   return cleared;
+}
+
+/**
+ * One sweep, two jobs: reset sale prices on sold-out (or finished) products,
+ * and drop temporary customer-specific prices on sold-out products. Both exist
+ * so a restock never resurrects a price nobody re-approved.
+ */
+export async function resetPricesForSoldOut(): Promise<{ sales: number; customPrices: number }> {
+  const sales = await resetSalesForSoldOut();
+  const customPrices = await dropTemporaryUserPrices().catch(() => 0);
+  return { sales, customPrices };
 }
 
 
@@ -902,14 +972,15 @@ export async function setUserPrice(
   amountMinor: number,
   channel: PriceChannel = "BOTH",
   currency?: "USD" | "INR",
+  permanent = false,
 ): Promise<void> {
   const cur = currency
     ?? ((await prisma.user.findUnique({ where: { id: userId }, select: { currency: true } }))?.currency as "USD" | "INR" | undefined)
     ?? "USD";
   await prisma.userPrice.upsert({
     where: { userId_productId_channel: { userId, productId, channel } },
-    create: { userId, productId, amountMinor, channel, currency: cur },
-    update: { amountMinor, currency: cur },
+    create: { userId, productId, amountMinor, channel, currency: cur, permanent },
+    update: { amountMinor, currency: cur, permanent },
   });
   await invalidate("cat:*");
 }
@@ -927,11 +998,16 @@ export async function listUserPrices(userId: string): Promise<Array<{ productId:
 }
 
 /** All per-user custom prices set for one product (for the admin product view). */
-export async function listProductUserPrices(productId: string): Promise<Array<{ userId: string; label: string; amountMinor: number; currency: string; channel: PriceChannel }>> {
+export async function setUserPricePermanent(userId: string, productId: string, channel: PriceChannel, permanent: boolean): Promise<void> {
+  await prisma.userPrice.updateMany({ where: { userId, productId, channel }, data: { permanent } });
+  await invalidate("cat:*");
+}
+
+export async function listProductUserPrices(productId: string): Promise<Array<{ userId: string; label: string; amountMinor: number; currency: string; channel: PriceChannel; permanent: boolean }>> {
   const rows = await prisma.userPrice.findMany({ where: { productId }, orderBy: { updatedAt: "desc" } });
   const users = await prisma.user.findMany({ where: { id: { in: rows.map((r) => r.userId) } }, select: { id: true, telegramHandle: true, firstName: true, telegramId: true } });
   const labelOf = new Map(users.map((u) => [u.id, u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? String(u.telegramId))]));
-  return rows.map((r) => ({ userId: r.userId, label: labelOf.get(r.userId) ?? r.userId, amountMinor: r.amountMinor, currency: r.currency as string, channel: r.channel as PriceChannel }));
+  return rows.map((r) => ({ userId: r.userId, label: labelOf.get(r.userId) ?? r.userId, amountMinor: r.amountMinor, currency: r.currency as string, channel: r.channel as PriceChannel, permanent: r.permanent === true }));
 }
 
 /** Set the public (RETAIL) price for ALL variants of a product, in USD and/or INR. This is the price everyone sees. */
