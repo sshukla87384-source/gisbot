@@ -107,6 +107,8 @@ export interface SessionData {
     | "wallet_inr_amount"
     | "wallet_inr_utr"
     | "admin_bnpl_user"
+    | "admin_bnpl_add"
+    | "admin_bnpl_deduct"
     | "admin_sup_docs"
     | "admin_fup_text"
     | "admin_fup_delay"
