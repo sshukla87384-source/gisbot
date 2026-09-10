@@ -1,6 +1,7 @@
 export * from "./crypto.js";
 export * from "./money.js";
 export * from "./callback.js";
+export * from "./duration.js";
 export * from "./errors.js";
 
 export const PAGE_SIZE = 6;

@@ -23,7 +23,8 @@ import {
   getProductReusableSecret,
   setTranslateCreds,
   getTranslateProvider,
-  setProductWarrantyDays,
+  setProductWarrantyHours,
+  setVariantValidityHours,
   listReplacementRequests,
   getReplacementRequest,
   approveReplacement,
@@ -73,6 +74,7 @@ import {
   setReferralRate,
   setBnplLimit,
   adjustBnplLimit,
+  settleBnplManual,
   getBnplStatus,
   getCustomEmojiRegistry,
   setCustomEmojiEntry,
@@ -244,7 +246,7 @@ import {
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
 import { CLAIM_WINDOW_MIN } from "@gis/core";
-import { cb, encryptSecret, decryptSecret } from "@gis/shared";
+import { cb, effectiveHours, encryptSecret, decryptSecret, formatDuration, parseDurationHours } from "@gis/shared";
 import { InlineKeyboard, InputFile } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
@@ -255,6 +257,22 @@ import { setDynamicEmojis } from "./emoji.js";
 
 const ATTEMPT_WINDOW_SEC = 15 * 60;
 const MAX_ATTEMPTS = 5;
+
+/**
+ * Every duration an admin types is read the same way, so the two screens that
+ * ask for one cannot drift apart. A bare number means HOURS — the prompt says
+ * so plainly, because the old prompts asked for days and someone typing "6"
+ * out of habit would otherwise get a window four times too short.
+ */
+const DURATION_PROMPT = (lead: string): string =>
+  [
+    `${lead}.`,
+    "",
+    "A plain number = <b>hours</b>. You can also write:",
+    "<code>36</code> → 36 hours · <code>3d</code> → 3 days · <code>2d 6h</code> → 54 hours · <code>1w</code> → 1 week",
+    "",
+    "Send <code>0</code> for <b>no limit</b>.",
+  ].join("\n");
 
 const sessionKey = (tgId: number | bigint | string): string => `botadmin:${tgId}`;
 
@@ -677,8 +695,10 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
   else kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
   if (p.type === "DIGITAL_ACCOUNT") kb.text(`🔐 Password change: ${p.allowPwChange ? "✅ Allowed → disallow" : "🚫 Not allowed → allow"}`, cb("adm", "ppw", p.id)).row();
-  kb.add(sbtn(`🛡 Warranty: ${p.warranty ? `✅ ON${p.warrantyDays ? ` (${p.warrantyDays}d)` : " (no limit)"} → turn OFF` : "🚫 OFF → turn ON"}`, cb("adm", "pwar", p.id), p.warranty ? "success" : "danger")).row();
-  if (p.warranty) kb.text(`⏱ Warranty days${p.warrantyDays ? `: ${p.warrantyDays}` : ": unlimited"}`, cb("adm", "pwardays", p.id)).row();
+  const warWindow = effectiveHours(p.warrantyHours, p.warrantyDays);
+  kb.add(sbtn(`🛡 Warranty: ${p.warranty ? `✅ ON (${formatDuration(warWindow)}) → turn OFF` : "🚫 OFF → turn ON"}`, cb("adm", "pwar", p.id), p.warranty ? "success" : "danger")).row();
+  if (p.warranty) kb.text(`⏱ Warranty window: ${formatDuration(warWindow)}`, cb("adm", "pwardays", p.id)).row();
+  kb.text("⏳ Validity of what is delivered", cb("adm", "pvalid", p.id)).row();
   kb.text("📣 Post to groups", cb("adm", "gpost", p.id)).row();
   kb.text("💵 Edit price", cb("adm", "pprice", p.id)).text("💲 Custom pricing", cb("adm", "cprice", p.id)).row();
   kb.text("💰 My cost (for margin)", cb("adm", "pcost", p.id)).row();
@@ -1065,6 +1085,7 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
     .add(sbtn(`📦 Order history (${u.orders})`, cb("adm", "uord", u.id), "primary")).row()
     .add(sbtn("🕒 Set BNPL limit", cb("adm", "ubnpl", u.id), "primary"), sbtn("🔒 Close BNPL", cb("adm", "ubnplclose", u.id), "danger")).row()
     .add(sbtn("➕ Add limit", cb("adm", "ubnpladd", u.id), "success"), sbtn("➖ Deduct limit", cb("adm", "ubnpldeduct", u.id), "danger")).row()
+    .add(sbtn("💵 Mark BNPL paid", cb("adm", "ubnplpaid", u.id), "success")).row()
     .add(u.status === "BANNED" ? sbtn("✅ Unban User", cb("adm", "uunban", u.id), "success") : sbtn("🚫 Ban User", cb("adm", "uban", u.id), "danger")).row()
     .text("◀️ Back", cb("adm", "ufund"));
   await show(ctx, [
@@ -2127,6 +2148,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.userTarget = id; ctx.session.awaiting = "admin_bnpl_deduct";
       await askStep(ctx, "➖ Amount to <b>deduct</b> from their BNPL credit limit (e.g. <code>10</code>). The limit stops at 0:");
       return;
+    case "ubnplpaid": {
+      const st = await getBnplStatus(id).catch(() => null);
+      if (!st || st.outstandingMinor <= 0) { await ctx.reply("This customer owes nothing on BNPL."); return userDetailView(ctx, id); }
+      ctx.session.userTarget = id; ctx.session.awaiting = "admin_bnpl_settle";
+      await askStep(ctx, [
+        `💵 They owe <b>${(st.outstandingMinor / 100).toFixed(2)} ${st.currency}</b>.`,
+        "",
+        "Send how much they paid you <b>outside the bot</b> (cash, UPI, transfer) — e.g. <code>30</code>.",
+        "Send <code>all</code> to clear the whole amount.",
+        "",
+        "<i>This only reduces what they owe. Their wallet is not touched, and their credit limit stays as it is.</i>",
+      ].join("\n"));
+      return;
+    }
     case "ubnplclose": {
       const kb = new InlineKeyboard()
         .add(sbtn("🔒 Close limit only", cb("adm", "ubnpldo", `${id}~keep`), "primary")).row()
@@ -2656,7 +2691,35 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "pwardays":
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_warrantydays";
-      await askStep(ctx, "⏱ Send the <b>replacement window in days</b> (e.g. <code>7</code>), or <code>0</code> for no time limit:");
+      await askStep(ctx, DURATION_PROMPT("⏱ Send the <b>replacement window</b>"));
+      return;
+    case "pvalid": {
+      // Validity lives on the variant, so a "1 Month" and a "3 Months" variant
+      // of the same product can expire differently. One variant → skip the picker.
+      const vs = await listVariantsBrief(id);
+      if (vs.length === 0) { await ctx.reply("No variants on this product."); return productView(ctx, id); }
+      if (vs.length === 1) {
+        ctx.session.admVariantId = vs[0]!.id;
+        ctx.session.admProductId = id;
+        ctx.session.awaiting = "admin_variant_validity";
+        await askStep(ctx, DURATION_PROMPT("⏳ Send how long the delivered key/account stays <b>valid</b>"));
+        return;
+      }
+      const kb = new InlineKeyboard();
+      for (const v of vs) kb.text(`${v.name} · ${formatDuration(v.validityHours)}`, cb("adm", "pvaldo", v.id)).row();
+      kb.text("◀️ Back", cb("adm", "prod", id));
+      await show(ctx, [
+        "⏳ <b>Validity of what is delivered</b>",
+        "",
+        "Pick a variant. Validity starts when the item is delivered.",
+        "<i>A key that carries its own expiry date from the supplier keeps that date — this only applies when it has none.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "pvaldo":
+      ctx.session.admVariantId = id;
+      ctx.session.awaiting = "admin_variant_validity";
+      await askStep(ctx, DURATION_PROMPT("⏳ Send how long the delivered key/account stays <b>valid</b>"));
       return;
     case "pcost": {
       // Cost lives on the variant; most products have one, so skip the picker.
@@ -4356,6 +4419,36 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await userDetailView(ctx, uid);
     return true;
   }
+  if (awaiting === "admin_bnpl_settle") {
+    const uid = ctx.session.userTarget ?? ""; ctx.session.userTarget = undefined;
+    if (!uid) { await ctx.reply("That customer expired — open their profile again."); return true; }
+    const raw = text.trim().toLowerCase();
+    const all = raw === "all" || raw === "full" || raw === "sab" || raw === "pura";
+    const val = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
+    if (!all && (!Number.isFinite(val) || val <= 0)) {
+      ctx.session.userTarget = uid; ctx.session.awaiting = "admin_bnpl_settle";
+      await askStep(ctx, "Send a positive amount, e.g. <code>30</code> — or <code>all</code> to clear the whole balance:");
+      return true;
+    }
+    const r = await settleBnplManual(uid, all ? null : Math.round(val * 100), ctx.user?.id ?? null).catch(() => null);
+    if (!r) { await ctx.reply("Couldn't record that payment."); return true; }
+    // What actually cleared, not what was typed: paying more than is owed
+    // settles the debt and no more.
+    const paid = r.settledMinor / 100;
+    const over = !all && paid < val;
+    await ctx.reply(
+      [
+        `💵 Recorded <b>${paid.toFixed(2)} ${r.currency}</b> as paid.`,
+        over ? "<i>(they owed less than that — only the balance was cleared)</i>" : "",
+        r.outstandingMinor === 0
+          ? "✅ Nothing outstanding now."
+          : `🕒 Still owed: <b>${(r.outstandingMinor / 100).toFixed(2)}</b> · available: <b>${(r.availableMinor / 100).toFixed(2)}</b>`,
+      ].filter(Boolean).join("\n"),
+      { parse_mode: "HTML" },
+    );
+    await userDetailView(ctx, uid);
+    return true;
+  }
   if (awaiting === "admin_sup_docs") {
     const sid = ctx.session.supTarget ?? ""; ctx.session.supTarget = undefined;
     if (!sid) { await ctx.reply("That supplier expired — open Vendor APIs again."); return true; }
@@ -4695,10 +4788,37 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
   if (awaiting === "admin_p_warrantydays") {
     const pid = ctx.session.admProductId ?? "";
-    const d = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
-    await setProductWarrantyDays(pid, Number.isFinite(d) && d > 0 ? d : null);
-    await ctx.reply(Number.isFinite(d) && d > 0 ? `⏱ Replacement window set to <b>${d} day(s)</b>.` : "⏱ Warranty has <b>no time limit</b> now.", { parse_mode: "HTML" });
+    if (!pid) { await ctx.reply("That product expired — open it again."); return true; }
+    const hours = parseDurationHours(text);
+    if (hours === undefined) {
+      // Keep the target so a typo costs one message, not the whole flow.
+      ctx.session.admProductId = pid; ctx.session.awaiting = "admin_p_warrantydays";
+      await askStep(ctx, DURATION_PROMPT("❌ Didn't understand that. Send the <b>replacement window</b>"));
+      return true;
+    }
+    await setProductWarrantyHours(pid, hours);
+    await ctx.reply(hours ? `⏱ Replacement window set to <b>${formatDuration(hours)}</b>.` : "⏱ Warranty has <b>no time limit</b> now.", { parse_mode: "HTML" });
     await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_variant_validity") {
+    const vid = ctx.session.admVariantId ?? ""; ctx.session.admVariantId = undefined;
+    const pid = ctx.session.admProductId ?? "";
+    if (!vid) { await ctx.reply("That variant expired — open the product again."); return true; }
+    const hours = parseDurationHours(text);
+    if (hours === undefined) {
+      ctx.session.admVariantId = vid; ctx.session.awaiting = "admin_variant_validity";
+      await askStep(ctx, DURATION_PROMPT("❌ Didn't understand that. Send how long it stays <b>valid</b>"));
+      return true;
+    }
+    await setVariantValidityHours(vid, hours);
+    await ctx.reply(
+      hours
+        ? `⏳ Validity set to <b>${formatDuration(hours)}</b> from delivery.\n<i>Applies to items delivered from now on; already-delivered items keep the expiry they were given.</i>`
+        : "⏳ Validity cleared — we set no expiry of our own on this variant.",
+      { parse_mode: "HTML" },
+    );
+    if (pid) await productView(ctx, pid);
     return true;
   }
   if (awaiting === "admin_totp_confirm") {

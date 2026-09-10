@@ -1,6 +1,6 @@
 import { prisma, type Currency } from "@gis/database";
 import { sha256Hex } from "@gis/shared";
-import { CoreError, PAGE_SIZE } from "@gis/shared";
+import { CoreError, effectiveHours, PAGE_SIZE } from "@gis/shared";
 import { translateMany } from "../translate.service.js";
 import { convertMinor, convertPriceMinor } from "../fx.js";
 import { cached, invalidate } from "../redis.js";
@@ -80,6 +80,8 @@ export interface ProductView {
   supplierBacked: boolean;
   warranty: boolean;
   warrantyDays: number | null;
+  /** Replacement window in hours — precise; warrantyDays is this rounded up. */
+  warrantyHours: number | null;
   /** true when THIS customer has a personal price on this product. */
   hasCustomPrice: boolean;
   buyButtonText: string | null;
@@ -490,6 +492,7 @@ async function getProductViewUncached(productId: string, currency: Currency, use
     supplierBacked: p.supplierId !== null,
     warranty: p.warranty,
     warrantyDays: p.warrantyDays,
+    warrantyHours: effectiveHours(p.warrantyHours, p.warrantyDays),
     hasCustomPrice: override !== null,
     buyButtonText: p.buyButtonText,
     buttonStyle: p.buttonStyle,

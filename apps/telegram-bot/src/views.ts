@@ -45,7 +45,7 @@ import {
 import { prisma, type Currency } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { PROVIDER_LABELS, listEnabledProviders } from "@gis/payments";
-import { cb, decryptSecret } from "@gis/shared";
+import { cb, decryptSecret, formatDuration } from "@gis/shared";
 import { InlineKeyboard } from "grammy";
 import type { BotUser } from "./ctx.js";
 import { backToMenuRow, navRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
@@ -1170,7 +1170,9 @@ export async function replaceSelectView(user: BotUser, orderId: string, selected
         const unit = u.unitTotal > 1 ? ` — unit ${u.unitNumber}/${u.unitTotal}` : "";
         const tail = u.tail ? ` <code>…${escapeHtml(u.tail)}</code>` : "";
         const st = u.route === "claim"
-          ? `🛡 In warranty${u.daysLeft !== null ? ` · ${u.daysLeft}d left` : ""} — replacement claim`
+          // Below a day, show hours: "1d left" on a 6-hour window was a lie
+          // that only became visible when the cover silently ran out.
+          ? `🛡 In warranty${u.hoursLeft !== null ? ` · ${formatDuration(u.hoursLeft)} left` : ""} — replacement claim`
           : u.route === "ticket"
             ? `🏷 ${escapeHtml(u.reason ?? "Out of warranty")} — support ticket`
             : `🚫 ${escapeHtml(u.reason ?? "Not eligible")}`;

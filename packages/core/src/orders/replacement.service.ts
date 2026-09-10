@@ -1,6 +1,6 @@
 import { loadConfig } from "@gis/config";
 import { prisma, type Prisma } from "@gis/database";
-import { decryptSecret } from "@gis/shared";
+import { decryptSecret, effectiveHours, formatDuration } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
 import { escHtml, noteOnTicket, openTicket, setTicketStatus } from "../support/ticket.service.js";
 import { adminReplaceOrderItem, type ReplacementDetail } from "./manual-pay.service.js";
@@ -30,6 +30,12 @@ export interface ReplaceableItem {
   route: "claim" | "ticket" | "blocked";
   /** Days of cover left, counted from the FIRST delivery. Null when untimed. */
   daysLeft: number | null;
+  /**
+   * Hours of cover left — the precise figure. `daysLeft` is this rounded up, so
+   * a 6-hour window used to show "1d left" for its entire life and then expire
+   * with no warning. Display prefers this below a day.
+   */
+  hoursLeft: number | null;
 }
 
 /**
@@ -66,7 +72,7 @@ interface EligibilityInput {
   warrantyStartAt: Date | null;
   fulfilledAt: Date | null;
   replacedAt: Date | null;
-  variant: { product: { warranty: boolean; warrantyDays: number | null } };
+  variant: { product: { warranty: boolean; warrantyDays: number | null; warrantyHours: number | null } };
   replacements: Array<{ status: string }>;
   /** Replacements already granted across this unit's whole chain. */
   chainApproved?: number;
@@ -77,34 +83,38 @@ interface EligibilityInput {
  * The warranty window is measured from `warrantyStartAt` — the FIRST delivery —
  * so a replacement continues the original cover instead of restarting it.
  */
-function evaluate(r: EligibilityInput): Pick<ReplaceableItem, "eligible" | "reason" | "route" | "daysLeft"> {
+function evaluate(r: EligibilityInput): Pick<ReplaceableItem, "eligible" | "reason" | "route" | "daysLeft" | "hoursLeft"> {
   const p = r.variant.product;
   const start = r.warrantyStartAt ?? r.fulfilledAt;
-  let daysLeft: number | null = null;
-  if (p.warranty && p.warrantyDays && start) {
-    const ageDays = (Date.now() - start.getTime()) / 86_400_000;
-    daysLeft = Math.max(0, Math.ceil(p.warrantyDays - ageDays));
+  // Hours are the unit the window is measured in; days are derived for display
+  // and for callers written before hours existed.
+  const windowHours = effectiveHours(p.warrantyHours, p.warrantyDays);
+  let hoursLeft: number | null = null;
+  if (p.warranty && windowHours && start) {
+    const ageHours = (Date.now() - start.getTime()) / 3_600_000;
+    hoursLeft = Math.max(0, Math.ceil(windowHours - ageHours));
   }
+  const daysLeft = hoursLeft === null ? null : Math.ceil(hoursLeft / 24);
 
   if (r.replacements.some((x) => x.status === "PENDING")) {
-    return { eligible: false, reason: "A request is already under review", route: "blocked", daysLeft };
+    return { eligible: false, reason: "A request is already under review", route: "blocked", daysLeft, hoursLeft };
   }
   // Already superseded — the replacement itself is the live unit now.
   if (r.replacedAt) {
-    return { eligible: false, reason: "Already replaced — a new one was issued", route: "ticket", daysLeft };
+    return { eligible: false, reason: "Already replaced — a new one was issued", route: "ticket", daysLeft, hoursLeft };
   }
   if (!p.warranty) {
-    return { eligible: false, reason: "Sold as-is — no warranty", route: "ticket", daysLeft: null };
+    return { eligible: false, reason: "Sold as-is — no warranty", route: "ticket", daysLeft: null, hoursLeft: null };
   }
   // Counted across the CHAIN, not just this row, so replacing a replacement
   // cannot restart the allowance.
   if ((r.chainApproved ?? 0) > 0 || r.replacements.some((x) => x.status === "APPROVED")) {
-    return { eligible: false, reason: "Already replaced once", route: "ticket", daysLeft };
+    return { eligible: false, reason: "Already replaced once", route: "ticket", daysLeft, hoursLeft };
   }
-  if (p.warrantyDays && start && daysLeft !== null && daysLeft <= 0) {
-    return { eligible: false, reason: `Warranty expired (${p.warrantyDays}d)`, route: "ticket", daysLeft: 0 };
+  if (windowHours && start && hoursLeft !== null && hoursLeft <= 0) {
+    return { eligible: false, reason: `Warranty expired (${formatDuration(windowHours)})`, route: "ticket", daysLeft: 0, hoursLeft: 0 };
   }
-  return { eligible: true, reason: null, route: "claim", daysLeft };
+  return { eligible: true, reason: null, route: "claim", daysLeft, hoursLeft };
 }
 
 /**
@@ -113,7 +123,7 @@ function evaluate(r: EligibilityInput): Pick<ReplaceableItem, "eligible" | "reas
  */
 const UNIT_INCLUDE: Prisma.OrderItemInclude = {
   order: { select: { orderNumber: true, id: true } },
-  variant: { include: { product: { select: { warranty: true, warrantyDays: true } } } },
+  variant: { include: { product: { select: { warranty: true, warrantyDays: true, warrantyHours: true } } } },
   replacements: { where: { status: { in: ["PENDING", "APPROVED"] } }, select: { id: true, status: true } },
 };
 
@@ -138,7 +148,7 @@ type UnitRow = {
   fulfilledAt: Date | null;
   warrantyStartAt: Date | null;
   order: { orderNumber: string; id: string };
-  variant: { product: { warranty: boolean; warrantyDays: number | null } };
+  variant: { product: { warranty: boolean; warrantyDays: number | null; warrantyHours: number | null } };
   replacements: Array<{ status: string }>;
 };
 

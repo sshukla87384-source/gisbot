@@ -7,7 +7,7 @@ import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 import { accrueCommissionTx } from "./commission.js";
-import { assignAccountSlot, assignLicenseKey, priceCart, type PricedLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, deliveryExpiry, priceCart, type PricedLine } from "./assign.js";
 
 /**
  * Wallet-funded checkout with automatic fulfillment (PRD §6.1, Security doc §5).
@@ -91,12 +91,16 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
               });
               if (dec.count === 0) throw new CoreError("OUT_OF_STOCK", `${line.productName} is sold out`);
             }
-            const payload = { kind: "LICENSE_KEY", key: line.reusableSecret };
+            // A shared value has no stock row, so its expiry can only come from
+            // the variant's validity.
+            const expiresAt = deliveryExpiry(null, line.validityHours);
+            const payload = { kind: "LICENSE_KEY", key: line.reusableSecret, expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
+                expiresAt,
                 costMinor: line.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
@@ -111,26 +115,30 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
           try {
             if (line.productType === "DIGITAL_ACCOUNT") {
               const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);
-              const payload = { kind: "DIGITAL_ACCOUNT", ...creds, expiresAt: creds.expiresAt?.toISOString() };
+              const expiresAt = deliveryExpiry(creds.expiresAt, line.validityHours);
+              const payload = { kind: "DIGITAL_ACCOUNT", ...creds, expiresAt: expiresAt?.toISOString() };
               await tx.orderItem.update({
                 where: { id: item.id },
                 data: {
                   fulfilledAt: new Date(),
                   warrantyStartAt: new Date(),
+                  expiresAt,
                   costMinor: creds.costMinor ?? line.defaultCostMinor,
                   deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
                 },
               });
-              deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "DIGITAL_ACCOUNT", secret: { username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
+              deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "DIGITAL_ACCOUNT", secret: { username: creds.username, password: creds.password, expiresAt: expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
               delivered = true;
             } else {
-              const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
+              const { key, expiresAt: stockExpiry, costMinor: cost } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
+              const expiresAt = deliveryExpiry(stockExpiry, line.validityHours);
               const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
               await tx.orderItem.update({
                 where: { id: item.id },
                 data: {
                   fulfilledAt: new Date(),
                   warrantyStartAt: new Date(),
+                  expiresAt,
                   costMinor: cost ?? line.defaultCostMinor,
                   deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
                 },
@@ -397,6 +405,75 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
   );
   void notifyOrderToAdmins(result.orderId, "Pay Later (BNPL)").catch(() => undefined);
   return result;
+}
+
+export interface BnplSettlement {
+  /** What was actually cleared — smaller than asked when the debt was smaller. */
+  settledMinor: number;
+  outstandingMinor: number;
+  limitMinor: number;
+  availableMinor: number;
+  currency: Currency;
+}
+
+/**
+ * Admin: record money the customer paid OUTSIDE the bot against their BNPL debt.
+ *
+ * Cash, UPI, a bank transfer straight to the operator — the money never touched
+ * the wallet, so `repayBnpl` (which debits the wallet) cannot represent it. The
+ * only tool an admin had was "Close BNPL + write off", which forgives the WHOLE
+ * balance: a customer who owed 49.99 and handed over 30 could either be recorded
+ * as still owing everything, or as owing nothing. Both are wrong, and the second
+ * quietly loses 19.99.
+ *
+ * Pass `amountMinor` for a part payment, or null/undefined to clear the lot.
+ * Amounts above the outstanding are clamped rather than pushing it negative —
+ * a customer must never end up with the shop owing THEM through this route.
+ *
+ * The row is locked FOR UPDATE, so two admins recording payments at the same
+ * moment cannot both read 49.99 and each subtract from it.
+ */
+export async function settleBnplManual(
+  userId: string,
+  amountMinor?: number | null,
+  actorId?: string | null,
+): Promise<BnplSettlement> {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ bnplOutstandingMinor: number; bnplLimitMinor: number; currency: Currency }>>`
+      SELECT "bnplOutstandingMinor", "bnplLimitMinor", "currency" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+    const u = rows[0];
+    if (!u) throw new CoreError("USER_NOT_FOUND");
+
+    const want = amountMinor === null || amountMinor === undefined ? u.bnplOutstandingMinor : Math.round(amountMinor);
+    if (want <= 0) throw new CoreError("VALIDATION_FAILED", "Amount must be greater than zero");
+    const settledMinor = Math.min(want, u.bnplOutstandingMinor);
+    const outstandingMinor = u.bnplOutstandingMinor - settledMinor;
+
+    if (settledMinor > 0) {
+      await tx.user.update({ where: { id: userId }, data: { bnplOutstandingMinor: outstandingMinor } });
+      // Money that arrived off-ledger leaves no other trace, so the audit row is
+      // the only record that this debt was reduced, by whom, and by how much.
+      await tx.auditLog.create({
+        data: {
+          actorId: actorId ?? null,
+          actorType: "ADMIN",
+          action: "bnpl.settle.manual",
+          entityType: "User",
+          entityId: userId,
+          before: { outstandingMinor: u.bnplOutstandingMinor },
+          after: { settledMinor, outstandingMinor, currency: u.currency },
+        },
+      });
+    }
+
+    return {
+      settledMinor,
+      outstandingMinor,
+      limitMinor: u.bnplLimitMinor,
+      availableMinor: Math.max(0, u.bnplLimitMinor - outstandingMinor),
+      currency: u.currency,
+    };
+  });
 }
 
 export interface BnplRepay { repaidMinor: number; outstandingMinor: number; currency: Currency }

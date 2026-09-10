@@ -1,10 +1,10 @@
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
-import { encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
+import { effectiveHours, encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { accrueCommissionTx } from "./commission.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, deliveryExpiry, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { logWallet } from "../logs.service.js";
@@ -168,13 +168,15 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         let deliveredThisItem = false;
         try {
           if (type === "LICENSE_KEY") {
-            const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
+            const { key, expiresAt: stockExpiry, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
+            const expiresAt = deliveryExpiry(stockExpiry, effectiveHours(item.variant.durationHours, item.variant.durationDays));
             const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
+                expiresAt,
                 costMinor: cost ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
@@ -184,17 +186,19 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
             }
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
+            const expiresAt = deliveryExpiry(creds.expiresAt, effectiveHours(item.variant.durationHours, item.variant.durationDays));
             const payload = {
               kind: "DIGITAL_ACCOUNT",
               username: creds.username,
               password: creds.password,
-              expiresAt: creds.expiresAt?.toISOString(),
+              expiresAt: expiresAt?.toISOString(),
             };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
+                expiresAt,
                 costMinor: creds.costMinor ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },

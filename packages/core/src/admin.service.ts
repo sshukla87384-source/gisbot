@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
-import { encryptSecret, decryptSecret, normalizeLicenseKey, sha256Hex } from "@gis/shared";
+import { effectiveHours, encryptSecret, decryptSecret, hoursToDays, normalizeLicenseKey, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
@@ -308,11 +308,11 @@ export async function adjustUserWallet(
   };
 }
 
-export interface ProductBrief { id: string; reusable?: boolean; reusableStock?: number | null; manualStock?: number | null; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null; bulkMinQty?: number | null; bulkPercentBp?: number | null }
+export interface ProductBrief { id: string; reusable?: boolean; reusableStock?: number | null; manualStock?: number | null; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; onSalePct: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPwChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null; warrantyHours: number | null; bulkMinQty?: number | null; bulkPercentBp?: number | null }
 
-type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null; bulkMinQty?: number | null; bulkPercentBp?: number | null };
+type PRow = { id: string; name: string; nameHtml: string | null; status: string; iconEmoji: string | null; salePercentBp: number | null; pinRank: number; fulfillmentMode: string; slug: string; type: string; allowPasswordChange: boolean; supplierId: string | null; warranty: boolean; warrantyDays: number | null; warrantyHours: number | null; bulkMinQty?: number | null; bulkPercentBp?: number | null };
 function toBrief(p: PRow): ProductBrief {
-  return { id: p.id, reusable: Boolean((p as unknown as { reusableSecretEnc?: string | null }).reusableSecretEnc), reusableStock: (p as unknown as { reusableStock?: number | null }).reusableStock ?? null, manualStock: (p as unknown as { manualStock?: number | null }).manualStock ?? null, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays, bulkMinQty: p.bulkMinQty ?? null, bulkPercentBp: p.bulkPercentBp ?? null };
+  return { id: p.id, reusable: Boolean((p as unknown as { reusableSecretEnc?: string | null }).reusableSecretEnc), reusableStock: (p as unknown as { reusableStock?: number | null }).reusableStock ?? null, manualStock: (p as unknown as { manualStock?: number | null }).manualStock ?? null, name: p.name, nameHtml: p.nameHtml, status: p.status, iconEmoji: p.iconEmoji, onSalePct: p.salePercentBp, pinRank: p.pinRank, fulfillmentMode: p.fulfillmentMode, slug: p.slug, type: p.type, allowPwChange: p.allowPasswordChange, supplierId: p.supplierId, warranty: p.warranty, warrantyDays: p.warrantyDays, warrantyHours: p.warrantyHours, bulkMinQty: p.bulkMinQty ?? null, bulkPercentBp: p.bulkPercentBp ?? null };
 }
 
 export async function getProductBriefById(id: string): Promise<ProductBrief | null> {
@@ -418,9 +418,29 @@ export async function setProductWarranty(productId: string, on: boolean): Promis
   await invalidate("cat:*");
 }
 
-/** Replacement window in days (null/0 = unlimited while warranty is on). */
-export async function setProductWarrantyDays(productId: string, days: number | null): Promise<void> {
-  await prisma.product.update({ where: { id: productId }, data: { warrantyDays: days && days > 0 ? days : null } });
+/**
+ * Replacement window in HOURS (null/0 = unlimited while warranty is on).
+ *
+ * `warrantyDays` is written alongside — rounded UP — because the public API and
+ * older readers still publish that field. Rounding down would tell a reseller
+ * a 6-hour window is zero days, i.e. no warranty at all.
+ */
+export async function setProductWarrantyHours(productId: string, hours: number | null): Promise<void> {
+  const h = hours && hours > 0 ? hours : null;
+  await prisma.product.update({
+    where: { id: productId },
+    data: { warrantyHours: h, warrantyDays: hoursToDays(h) },
+  });
+  await invalidate("cat:*");
+}
+
+/** Validity of what a variant delivers, in HOURS (null/0 = no expiry of ours). */
+export async function setVariantValidityHours(variantId: string, hours: number | null): Promise<void> {
+  const h = hours && hours > 0 ? hours : null;
+  await prisma.productVariant.update({
+    where: { id: variantId },
+    data: { durationHours: h, durationDays: hoursToDays(h) },
+  });
   await invalidate("cat:*");
 }
 
@@ -572,12 +592,12 @@ export async function resetPricesForSoldOut(): Promise<{ sales: number; customPr
 
 
 
-export interface VariantBrief { id: string; name: string; sku: string; defaultCostMinor: number | null }
+export interface VariantBrief { id: string; name: string; sku: string; defaultCostMinor: number | null; /** Validity of what this variant delivers, in hours; null = no expiry of ours. */ validityHours: number | null }
 export async function listVariantsBrief(productId: string): Promise<VariantBrief[]> {
   const rows = await prisma.productVariant.findMany({
     where: { productId, deletedAt: null }, orderBy: { sortOrder: "asc" },
   });
-  return rows.map((v) => ({ id: v.id, name: v.name, sku: v.sku, defaultCostMinor: v.defaultCostMinor ?? null }));
+  return rows.map((v) => ({ id: v.id, name: v.name, sku: v.sku, defaultCostMinor: v.defaultCostMinor ?? null, validityHours: effectiveHours(v.durationHours, v.durationDays) }));
 }
 
 /** Bulk-add license keys to a variant (one per line). Returns counts. */

@@ -167,6 +167,7 @@ export class DeveloperController {
         supplierBacked: p.supplierBacked,
         warranty: p.warranty,
         warrantyDays: p.warrantyDays,
+        warrantyHours: p.warrantyHours,
         rating: detailRating.count > 0 ? detailRating.avg : null,
         reviewCount: detailRating.count,
         variants: p.variants.map((v) => ({

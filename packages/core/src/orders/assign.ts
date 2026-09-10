@@ -1,7 +1,7 @@
 import type { Currency, Prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { convertMinor, convertPriceMinor } from "../fx.js";
-import { CoreError, decryptSecret, encryptSecret } from "@gis/shared";
+import { CoreError, decryptSecret, effectiveHours, encryptSecret } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
 
 /**
@@ -38,6 +38,30 @@ export interface PricedLine {
    * inventory row locks.
    */
   defaultCostMinor: number | null;
+  /**
+   * How long what we deliver stays valid, in hours, or null for "no expiry of
+   * our own". Resolved once here from the variant's hour column (falling back
+   * to the legacy day column) so delivery never re-reads or re-interprets it.
+   */
+  validityHours: number | null;
+}
+
+/**
+ * When a delivered unit stops working.
+ *
+ * A stock item that carries its own expiry (a key the supplier dated) wins —
+ * that date is a fact about the key itself. Otherwise the variant's validity
+ * runs from the moment of delivery, which is what makes a "6-hour trial"
+ * possible at all. Null means we know of no expiry.
+ */
+export function deliveryExpiry(
+  stockExpiresAt: Date | null | undefined,
+  validityHours: number | null | undefined,
+  at: Date = new Date(),
+): Date | null {
+  if (stockExpiresAt) return stockExpiresAt;
+  if (!validityHours || validityHours <= 0) return null;
+  return new Date(at.getTime() + validityHours * 3_600_000);
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
@@ -95,6 +119,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       reusableStock: v.product.reusableStock,
       manualStock: v.product.fulfillmentMode === "MANUAL" ? v.product.manualStock : null,
       defaultCostMinor: v.defaultCostMinor ?? null,
+      validityHours: effectiveHours(v.durationHours, v.durationDays),
       resellerId: v.product.resellerId,
       quantity: item.quantity,
       // Quantity is passed HERE, not only in the shop display. A bulk discount

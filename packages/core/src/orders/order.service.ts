@@ -1,6 +1,6 @@
 import { loadConfig } from "@gis/config";
 import { prisma, type OrderStatus } from "@gis/database";
-import { CoreError, decryptSecret } from "@gis/shared";
+import { CoreError, decryptSecret, effectiveHours } from "@gis/shared";
 
 export interface OrderListItem {
   /** True when this order exists only to hold a warranty/goodwill replacement. */
@@ -59,6 +59,10 @@ export interface VaultItem {
   isReplacementFor?: string | null;
   warranty?: boolean;
   warrantyDaysLeft?: number | null;
+  /** Precise cover left. `warrantyDaysLeft` is this rounded up to whole days. */
+  warrantyHoursLeft?: number | null;
+  /** When what was delivered stops working. Null = no expiry we know of. */
+  expiresAt?: Date | null;
 }
 
 /** License vault — everything ever delivered to this user (Bot UX doc §7). */
@@ -107,8 +111,8 @@ export async function listOrderItems(userId: string, orderId: string): Promise<V
       id: true, productNameSnap: true, variantNameSnap: true, fulfilledAt: true,
       deliveryPayloadEncrypted: true, replacedAt: true, replacedByItemId: true,
       replaces: { select: { id: true, productNameSnap: true } },
-      variant: { select: { product: { select: { warranty: true, warrantyDays: true } } } },
-      warrantyStartAt: true,
+      variant: { select: { product: { select: { warranty: true, warrantyDays: true, warrantyHours: true } } } },
+      warrantyStartAt: true, expiresAt: true,
     },
   });
   const key = loadConfig().ENCRYPTION_MASTER_KEY;
@@ -133,10 +137,12 @@ export async function listOrderItems(userId: string, orderId: string): Promise<V
     }
     const prod = r.variant.product;
     const start = r.warrantyStartAt ?? r.fulfilledAt;
-    let warrantyDaysLeft: number | null = null;
-    if (prod.warranty && prod.warrantyDays && start) {
-      warrantyDaysLeft = Math.max(0, Math.ceil(prod.warrantyDays - (Date.now() - start.getTime()) / 86_400_000));
+    const windowHours = effectiveHours(prod.warrantyHours, prod.warrantyDays);
+    let warrantyHoursLeft: number | null = null;
+    if (prod.warranty && windowHours && start) {
+      warrantyHoursLeft = Math.max(0, Math.ceil(windowHours - (Date.now() - start.getTime()) / 3_600_000));
     }
+    const warrantyDaysLeft = warrantyHoursLeft === null ? null : Math.ceil(warrantyHoursLeft / 24);
     return {
       orderItemId: r.id,
       productName: r.productNameSnap,
@@ -152,6 +158,8 @@ export async function listOrderItems(userId: string, orderId: string): Promise<V
       isReplacementFor: r.replaces?.id ?? null,
       warranty: prod.warranty,
       warrantyDaysLeft,
+      warrantyHoursLeft,
+      expiresAt: r.expiresAt,
     };
   });
 }

@@ -515,7 +515,13 @@ model Product {
   reusableStock     Int?     // how many times it may still be sold; null = unlimited
   manualStock       Int?     // optional sellable quantity for MANUAL products; null = unlimited
   warranty        Boolean @default(false) // does this product come with a replacement warranty?
+  /// Legacy day-granular window. Kept so older rows and the public API keep
+  /// working; `warrantyHours` wins whenever it is set.
   warrantyDays    Int?    // replacement window in days (null = no time limit while warranty is on)
+  /// Replacement window in HOURS — the source of truth. Day-only products sold
+  /// short-lived accounts as "1 day" because there was nothing smaller.
+  /// null = fall back to warrantyDays; both null = no time limit while warranty is on.
+  warrantyHours   Int?
   salePercentBp   Int? // flash-sale discount in basis points (1000 = 10% off)
   saleStartsAt    DateTime?
   saleEndsAt      DateTime?
@@ -551,7 +557,11 @@ model ProductVariant {
   sku              String            @unique
   fulfillmentMode  FulfillmentMode? // override product default
   subscriptionPlan SubscriptionPlan?
-  durationDays     Int? // validity of key/account after delivery
+  durationDays     Int? // legacy: validity of key/account after delivery, in days
+  /// Validity after delivery in HOURS — the source of truth. Lets a variant be
+  /// a 6-hour trial, not just a whole number of days.
+  /// null = fall back to durationDays; both null = no expiry of our own.
+  durationHours    Int?
   downloadAssetId  String?
   downloadAsset    DownloadAsset?    @relation(fields: [downloadAssetId], references: [id])
   downloadLimit    Int               @default(3)
@@ -777,6 +787,14 @@ model OrderItem {
   /// When the FIRST delivery happened. A replacement does not reset this, so the
   /// warranty window continues from the original purchase.
   warrantyStartAt DateTime?
+  /// When what was delivered stops working: the stock item's own expiry when it
+  /// has one, otherwise delivery time plus the variant's validity.
+  ///
+  /// The same value goes into the encrypted payload the customer sees, but that
+  /// is encrypted and therefore unqueryable — nothing could ask "what expires
+  /// this week?", so expiry reminders and renewals had nothing to stand on.
+  /// null = never expires, or delivered before this column existed.
+  expiresAt       DateTime?
   /// Cost of the unit actually delivered, snapshotted at delivery in USD minor
   /// units. Snapshotted because supplier costs change and history must not.
   costMinor       Int?
@@ -803,6 +821,9 @@ model OrderItem {
   @@index([orderId])
   @@index([variantId])
   @@index([resellerIdSnap])
+  /// "What expires in the next N days, and has not been replaced?" — the query
+  /// an expiry reminder runs on every tick, so it must not scan the table.
+  @@index([expiresAt, replacedAt])
 }
 
 model Invoice {
