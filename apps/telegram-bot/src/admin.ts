@@ -72,6 +72,7 @@ import {
   getReferralConfig,
   setReferralRate,
   setBnplLimit,
+  adjustBnplLimit,
   getBnplStatus,
   getCustomEmojiRegistry,
   setCustomEmojiEntry,
@@ -1062,7 +1063,8 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
     .add(sbtn("➕ Add Balance", cb("adm", "uadd", u.id), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", u.id), "danger")).row()
     .add(sbtn("🧾 Wallet history", cb("adm", "uhist", u.id), "primary")).row()
     .add(sbtn(`📦 Order history (${u.orders})`, cb("adm", "uord", u.id), "primary")).row()
-    .add(sbtn("🕒 BNPL limit", cb("adm", "ubnpl", u.id), "primary"), sbtn("🔒 Close BNPL", cb("adm", "ubnplclose", u.id), "danger")).row()
+    .add(sbtn("🕒 Set BNPL limit", cb("adm", "ubnpl", u.id), "primary"), sbtn("🔒 Close BNPL", cb("adm", "ubnplclose", u.id), "danger")).row()
+    .add(sbtn("➕ Add limit", cb("adm", "ubnpladd", u.id), "success"), sbtn("➖ Deduct limit", cb("adm", "ubnpldeduct", u.id), "danger")).row()
     .add(u.status === "BANNED" ? sbtn("✅ Unban User", cb("adm", "uunban", u.id), "success") : sbtn("🚫 Ban User", cb("adm", "uban", u.id), "danger")).row()
     .text("◀️ Back", cb("adm", "ufund"));
   await show(ctx, [
@@ -1073,7 +1075,9 @@ async function userDetailView(ctx: Ctx, userId: string): Promise<void> {
     `Orders: <b>${u.orders}</b>`,
     ...(await (async () => {
       const b = await getBnplStatus(u.id).catch(() => null);
-      if (!b || (b.limitMinor === 0 && b.outstandingMinor === 0)) return [] as string[];
+      if (!b) return [] as string[];
+      // Shown even at zero, so an admin tapping ➕/➖ can see the limit move.
+      if (b.limitMinor === 0 && b.outstandingMinor === 0) return ["🕒 BNPL limit: <b>none</b>"];
       return [
         `🕒 BNPL limit: <b>${(b.limitMinor / 100).toFixed(2)}</b> · owed: <b>${(b.outstandingMinor / 100).toFixed(2)}</b> · available: <b>${(b.availableMinor / 100).toFixed(2)}</b>`,
       ];
@@ -2114,6 +2118,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "ubnpl":
       ctx.session.userTarget = id; ctx.session.awaiting = "admin_bnpl_user";
       await askStep(ctx, "🕒 Send the <b>BNPL credit limit</b> for this customer (their currency, e.g. <code>50</code>). Send <code>0</code> to remove the limit:");
+      return;
+    case "ubnpladd":
+      ctx.session.userTarget = id; ctx.session.awaiting = "admin_bnpl_add";
+      await askStep(ctx, "➕ Amount to <b>add</b> to their BNPL credit limit (their currency, e.g. <code>10</code>):");
+      return;
+    case "ubnpldeduct":
+      ctx.session.userTarget = id; ctx.session.awaiting = "admin_bnpl_deduct";
+      await askStep(ctx, "➖ Amount to <b>deduct</b> from their BNPL credit limit (e.g. <code>10</code>). The limit stops at 0:");
       return;
     case "ubnplclose": {
       const kb = new InlineKeyboard()
@@ -4313,6 +4325,34 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (!uid || !Number.isFinite(val) || val < 0) { await ctx.reply("Couldn't set that limit."); return true; }
     await setBnplLimit(uid, Math.round(val * 100));
     await ctx.reply(val > 0 ? `🕒 BNPL limit set to <b>${val.toFixed(2)}</b>.` : "🕒 BNPL limit removed.", { parse_mode: "HTML" });
+    await userDetailView(ctx, uid);
+    return true;
+  }
+  if (awaiting === "admin_bnpl_add" || awaiting === "admin_bnpl_deduct") {
+    const uid = ctx.session.userTarget ?? ""; ctx.session.userTarget = undefined;
+    const sign = awaiting === "admin_bnpl_add" ? 1 : -1;
+    const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
+    if (!uid) { await ctx.reply("That customer expired — open their profile again."); return true; }
+    if (!Number.isFinite(val) || val <= 0) {
+      // Keep the target so a typo costs one message, not the whole flow.
+      ctx.session.userTarget = uid; ctx.session.awaiting = awaiting;
+      await askStep(ctx, "Send a positive amount, e.g. <code>10</code>:");
+      return true;
+    }
+    const r = await adjustBnplLimit(uid, sign * Math.round(val * 100)).catch(() => null);
+    if (!r) { await ctx.reply("Couldn't update that customer."); return true; }
+    // `appliedMinor` is what actually moved: a deduction larger than the limit
+    // is clamped at 0 rather than going negative, and the admin should be told.
+    const moved = Math.abs(r.appliedMinor) / 100;
+    const short = sign < 0 && moved < val;
+    await ctx.reply(
+      [
+        sign > 0 ? `➕ Added <b>${moved.toFixed(2)}</b>.` : `➖ Deducted <b>${moved.toFixed(2)}</b>.`,
+        short ? "<i>(their limit was smaller — it is now 0)</i>" : "",
+        `🕒 BNPL limit: <b>${(r.limitMinor / 100).toFixed(2)} ${r.currency}</b> · owed: <b>${(r.outstandingMinor / 100).toFixed(2)}</b> · available: <b>${(r.availableMinor / 100).toFixed(2)}</b>`,
+      ].filter(Boolean).join("\n"),
+      { parse_mode: "HTML" },
+    );
     await userDetailView(ctx, uid);
     return true;
   }

@@ -300,6 +300,48 @@ export async function setBnplLimit(userId: string, limitMinor: number): Promise<
   await prisma.user.update({ where: { id: userId }, data: { bnplLimitMinor: Math.max(0, Math.round(limitMinor)) } });
 }
 
+export interface BnplLimitChange extends BnplStatus { previousLimitMinor: number; appliedMinor: number }
+
+/**
+ * Admin: move a user's BNPL credit limit up or down by `deltaMinor`.
+ *
+ * Setting an absolute limit was the only thing an admin could do, which meant
+ * topping someone up by 10 required reading their current limit first and
+ * doing the arithmetic by hand — and two admins doing that at once would
+ * overwrite each other. This reads the row `FOR UPDATE` and applies the delta
+ * inside the transaction, so concurrent adjustments add up instead of racing.
+ *
+ * The result is clamped at zero (a limit cannot go negative) and `appliedMinor`
+ * reports what actually moved, which is smaller than the requested deduction
+ * when the clamp bites.
+ *
+ * A limit below what the customer already owes is allowed on purpose: it stops
+ * further borrowing without erasing the existing debt. Available credit is
+ * already floored at zero, so nothing can be spent past it.
+ */
+export async function adjustBnplLimit(userId: string, deltaMinor: number): Promise<BnplLimitChange> {
+  const delta = Math.round(deltaMinor);
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ bnplLimitMinor: number; bnplOutstandingMinor: number; currency: Currency }>>`
+      SELECT "bnplLimitMinor", "bnplOutstandingMinor", "currency" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+    const u = rows[0];
+    if (!u) throw new CoreError("USER_NOT_FOUND");
+    const previousLimitMinor = u.bnplLimitMinor;
+    const limitMinor = Math.max(0, previousLimitMinor + delta);
+    if (limitMinor !== previousLimitMinor) {
+      await tx.user.update({ where: { id: userId }, data: { bnplLimitMinor: limitMinor } });
+    }
+    return {
+      previousLimitMinor,
+      appliedMinor: limitMinor - previousLimitMinor,
+      limitMinor,
+      outstandingMinor: u.bnplOutstandingMinor,
+      availableMinor: Math.max(0, limitMinor - u.bnplOutstandingMinor),
+      currency: u.currency,
+    };
+  });
+}
+
 /** Checkout on BNPL credit: deliver now, add to the user's outstanding balance. */
 export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
