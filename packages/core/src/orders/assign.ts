@@ -135,6 +135,8 @@ export interface ReusableItem {
   id: string;
   variant: {
     defaultCostMinor: number | null;
+    durationHours: number | null;
+    durationDays: number | null;
     product: { id: string; reusableSecretEnc: string | null; reusableStock: number | null };
   };
 }
@@ -157,7 +159,7 @@ export async function fulfillReusableItemTx(
   tx: Tx,
   item: ReusableItem,
   masterKey: string,
-): Promise<{ kind: "LICENSE_KEY"; key: string } | null> {
+): Promise<{ kind: "LICENSE_KEY"; key: string; expiresAt?: string } | null> {
   const product = item.variant.product;
   if (!product.reusableSecretEnc) return null;
   const secret = decryptSecret(product.reusableSecretEnc, masterKey);
@@ -169,12 +171,18 @@ export async function fulfillReusableItemTx(
     });
     if (dec.count === 0) throw new CoreError("OUT_OF_STOCK", "This product is sold out");
   }
-  const payload = { kind: "LICENSE_KEY" as const, key: secret };
+  // A shared value has no stock row, so its expiry can only come from the
+  // variant's validity — the wallet rail has always worked this out, but the
+  // gateway/UPI rails went through here and recorded no expiry at all, so a
+  // time-limited shared link never expired and never prompted a renewal.
+  const expiresAt = deliveryExpiry(null, effectiveHours(item.variant.durationHours, item.variant.durationDays));
+  const payload = { kind: "LICENSE_KEY" as const, key: secret, ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}) };
   await tx.orderItem.update({
     where: { id: item.id },
     data: {
       fulfilledAt: new Date(),
       warrantyStartAt: new Date(),
+      expiresAt,
       costMinor: item.variant.defaultCostMinor,
       deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
     },

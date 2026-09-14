@@ -8,17 +8,21 @@ cd "$(dirname "$0")/../.."
 set -a; . ./.env; set +a
 
 FAIL=""
+# Append a reason without producing a leading "; " when FAIL is still empty.
+add_fail() { FAIL="${FAIL:+${FAIL}; }$1"; }
 
-unhealthy="$(docker ps --filter health=unhealthy --format '{{.Names}}' || true)"
-[ -z "$unhealthy" ] || FAIL="unhealthy containers: ${unhealthy}"
+unhealthy="$(docker ps --filter health=unhealthy --format '{{.Names}}' | tr '\n' ' ' || true)"
+[ -z "$unhealthy" ] || add_fail "unhealthy containers: ${unhealthy}"
 
 if ! curl -fsS -m 5 "http://127.0.0.1:80/.well-known/acme-challenge/ping" -o /dev/null 2>/dev/null; then
   # 404 is fine (nginx up); connection refused is not.
-  curl -s -m 5 -o /dev/null "http://127.0.0.1:80" || FAIL="${FAIL}; nginx not answering on :80"
+  curl -s -m 5 -o /dev/null "http://127.0.0.1:80" || add_fail "nginx not answering on :80"
 fi
 
-DISK_USED="$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')"
-[ "$DISK_USED" -lt 85 ] || FAIL="${FAIL}; disk ${DISK_USED}% used"
+# Default to 0 so an unparsable df line cannot abort the script under `set -u`/-e.
+DISK_USED="$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}' || true)"
+DISK_USED="${DISK_USED:-0}"
+[ "$DISK_USED" -lt 85 ] || add_fail "disk ${DISK_USED}% used"
 
 if [ -n "$FAIL" ]; then
   echo "HEALTHCHECK FAIL: $FAIL"

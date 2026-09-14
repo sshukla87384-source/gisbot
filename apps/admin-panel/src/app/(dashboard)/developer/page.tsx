@@ -1,6 +1,6 @@
 "use client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Badge, Button, Card, Input, Label } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { apiData } from "@/lib/api";
@@ -12,9 +12,18 @@ interface ApiKey {
 }
 
 const ALL_SCOPES = ["catalog:read", "orders:read", "analytics:read"];
-const BASE = `${process.env.NEXT_PUBLIC_API_URL ?? ""}/api/v1/developer`;
+// The Docker build sets NEXT_PUBLIC_API_URL to the empty string when its build
+// ARG is unset (`??` does not catch that), which showed partners a relative
+// "/api/v1/developer" as the base URL of an API they call from outside.
+const ENV_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+const BASE = `${ENV_BASE}/api/v1/developer`;
 
 export default function DeveloperPage() {
+  // Filled in after mount so the server and first client render still match.
+  const [base, setBase] = useState(BASE);
+  useEffect(() => {
+    if (!ENV_BASE) setBase(`${window.location.origin}/api/v1/developer`);
+  }, []);
   const qc = useQueryClient();
   const toast = useToast();
   const [name, setName] = useState("");
@@ -58,8 +67,8 @@ export default function DeveloperPage() {
           Give partners programmatic, read-only access to your catalog and order status. Keys are scoped and rate-limited.
         </p>
         <div className="mt-2 space-y-1 text-sm">
-          <div>Base URL: <code className="rounded bg-slate-100 px-1">{BASE}</code></div>
-          <div>Docs: <a className="text-indigo-600 hover:underline" href={`${BASE}/docs`} target="_blank" rel="noreferrer">{BASE}/docs</a></div>
+          <div>Base URL: <code className="rounded bg-slate-100 px-1">{base}</code></div>
+          <div>Docs: <a className="text-indigo-600 hover:underline" href={`${base}/docs`} target="_blank" rel="noreferrer">{base}/docs</a></div>
           <div>Auth header: <code className="rounded bg-slate-100 px-1">X-API-Key: &lt;your key&gt;</code></div>
         </div>
       </Card>

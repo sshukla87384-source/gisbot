@@ -131,7 +131,7 @@ export async function updateTestimonial(id: string, patch: Partial<TestimonialIn
   if (patch.pinned !== undefined) data.pinned = patch.pinned;
   if (patch.sortOrder !== undefined) data.sortOrder = patch.sortOrder;
   if (patch.status !== undefined) data.status = patch.status;
-  if (data.customerName || data.body) {
+  if (data.customerName !== undefined || data.body !== undefined) {
     const cur = await prisma.testimonial.findUnique({ where: { id }, select: { customerName: true, body: true } });
     data.spamScore = spamScoreOf(String(data.customerName ?? cur?.customerName ?? ""), String(data.body ?? cur?.body ?? ""));
   }

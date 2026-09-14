@@ -29,15 +29,21 @@ export async function getAdminStats(): Promise<{
     prisma.order.count({ where: { paidAt: { gte: startOfDay } } }),
     prisma.order.count({ where: { status: "PENDING_PAYMENT" } }),
   ]);
+  // Stock lives in a different table per product type. The old query LEFT JOINed
+  // LicenseKey for both, so every DIGITAL_ACCOUNT variant counted zero keys and
+  // was permanently reported as low stock.
   const low = await prisma.$queryRaw<Array<{ c: bigint }>>`
     SELECT COUNT(*)::bigint AS c FROM (
       SELECT v."id"
       FROM "ProductVariant" v JOIN "Product" p ON p."id" = v."productId"
-      LEFT JOIN "LicenseKey" k ON k."variantId" = v."id" AND k."status" = 'AVAILABLE' AND k."deletedAt" IS NULL
       WHERE v."deletedAt" IS NULL AND v."isActive" = true AND p."status" = 'ACTIVE'
         AND p."type" IN ('LICENSE_KEY','DIGITAL_ACCOUNT')
-      GROUP BY v."id", v."lowStockThreshold"
-      HAVING COUNT(k."id") <= v."lowStockThreshold"
+        AND (CASE WHEN p."type" = 'LICENSE_KEY'
+              THEN (SELECT COUNT(*) FROM "LicenseKey" k
+                    WHERE k."variantId" = v."id" AND k."status" = 'AVAILABLE' AND k."deletedAt" IS NULL)
+              ELSE (SELECT COUNT(*) FROM "DigitalAccount" d
+                    WHERE d."variantId" = v."id" AND d."status" = 'AVAILABLE' AND d."deletedAt" IS NULL)
+             END) <= v."lowStockThreshold"
     ) t`;
   return {
     users,
@@ -344,6 +350,7 @@ export async function setProductPinRank(productId: string, pinRank: number): Pro
 
 export async function adminDeleteProduct(id: string): Promise<void> {
   await prisma.product.update({ where: { id }, data: { deletedAt: new Date(), status: "ARCHIVED" } });
+  await invalidate("cat:*");
 }
 
 export async function setProductName(productId: string, name: string, nameHtml: string | null = null): Promise<void> {
@@ -400,6 +407,7 @@ export async function setButton(key: ButtonLabelKey, label: string, icon: string
 
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { imageUrl } });
+  await invalidate("cat:*");
 }
 
 export async function setProductFulfillmentMode(productId: string, mode: "AUTOMATIC" | "MANUAL"): Promise<void> {
@@ -452,6 +460,9 @@ export async function setProductButton(productId: string, text: string | null, s
 
 export async function setProductStatus(productId: string, status: "ACTIVE" | "PAUSED" | "DRAFT" | "ARCHIVED"): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { status } });
+  // Without this a paused or archived product stayed listed AND buyable until
+  // the catalog cache aged out on its own.
+  await invalidate("cat:*");
 }
 
 export async function setFlashSale(productId: string, percent: number, endsAt: Date | null): Promise<void> {
@@ -460,6 +471,7 @@ export async function setFlashSale(productId: string, percent: number, endsAt: D
     where: { id: productId },
     data: { salePercentBp: bp, saleStartsAt: new Date(), saleEndsAt: endsAt },
   });
+  await invalidate("cat:*");
 }
 
 export async function clearFlashSale(productId: string): Promise<void> {
@@ -1232,7 +1244,9 @@ export async function setCustomEmojiEntry(name: string, id: string, glyph: strin
 
 export async function removeCustomEmojiEntry(name: string): Promise<void> {
   const cur = await getCustomEmojiRegistry();
-  delete cur[name];
+  // Keys are stored normalized by setCustomEmojiEntry, so deleting by the raw
+  // name silently did nothing for anything typed with capitals or padding.
+  delete cur[name.trim().toLowerCase().slice(0, 24)];
   await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
 }
 

@@ -472,6 +472,9 @@ async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): 
   const banner = ctx.session.admFlash;
   ctx.session.admFlash = undefined;
   if (banner) text = `${banner}\n\n${text}`;
+  // Telegram hard-caps a message at 4096 chars; over that the send fails and the
+  // admin sees nothing at all, which reads as a dead button.
+  if (text.length > 4096) text = `${text.slice(0, 4056)}\n\n<i>…truncated</i>`;
   const opts = { parse_mode: "HTML" as const, reply_markup: kb };
   if (edit && ctx.callbackQuery?.message) {
     try { await ctx.editMessageText(text, opts); return; } catch (err) {
@@ -3451,8 +3454,9 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "wdno": {
       const rejected = await readUpiTopupClaim(id);
       if (rejected?.utr) { await clearUpiUtrPending(rejected.utr); await dropUpiTopupClaim(id); }
-      if (!id) return;
-      await dmUser(id, "❌ <b>We could not verify that UPI payment.</b>\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => undefined);
+      const rejectTarget = rejected?.userId ?? id;
+      if (!rejectTarget) return;
+      await dmUser(rejectTarget, "❌ <b>We could not verify that UPI payment.</b>\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => undefined);
       await ctx.reply("❌ Rejected — the customer has been told.");
       return;
     }
@@ -3769,7 +3773,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         "📄 <b>Or upload a .txt file</b> — one item per line, up to 5000. Just send the file here.",
         "",
         "♻️ <b>Already delivered something (e.g. a test order)?</b> Just paste it again — it goes back on sale instead of creating a duplicate.",
-      ].join("\\n"), { parse_mode: "HTML" });
+      ].join("\n"), { parse_mode: "HTML" });
       return;
     }
     case "addp": {
@@ -4006,7 +4010,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const nameHtml = hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : undefined;
     ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), name, nameHtml };
     ctx.session.awaiting = "admin_p_desc";
-    await askStep(ctx, `<b>New product · Step 2/6</b>\nSend a <b>description</b> for “${name}” (or send <code>-</code> to skip):`);
+    await askStep(ctx, `<b>New product · Step 2/6</b>\nSend a <b>description</b> for “${escapeHtml(name)}” (or send <code>-</code> to skip):`);
     return true;
   }
 
@@ -4022,7 +4026,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const cat = await createCategoryQuick(text.slice(0, 120));
     ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), categoryId: cat.id };
     ctx.session.awaiting = "admin_p_priceinr";
-    await askStep(ctx, `✅ Category “${cat.name}” created.\n<b>Step 5/6</b>\nSend the <b>price in INR</b> (₹), e.g. <code>499</code>:`);
+    await askStep(ctx, `✅ Category “${escapeHtml(cat.name)}” created.\n<b>Step 5/6</b>\nSend the <b>price in INR</b> (₹), e.g. <code>499</code>:`);
     return true;
   }
 

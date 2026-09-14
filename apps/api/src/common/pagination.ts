@@ -2,7 +2,7 @@ import { z } from "zod";
 
 /** List query grammar (API spec §1.3): page/perPage/sort/search/filter[...]. */
 const listQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
   perPage: z.coerce.number().int().min(1).max(100).default(20),
   sort: z.string().max(200).optional(),
   search: z.string().max(200).optional(),

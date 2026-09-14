@@ -2,7 +2,9 @@ import { nextOrderNumber, prisma, type Currency, type PaymentProvider as Payment
 import { getProvider, type PaymentProviderId } from "@gis/payments";
 import { CoreError } from "@gis/shared";
 import { loadConfig } from "@gis/config";
+import { convertMinor } from "../fx.js";
 import { priceCart } from "./assign.js";
+import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 
 /**
  * Gateway checkout (PRD §6.1 steps 1-2): creates a PENDING_PAYMENT order with a
@@ -49,7 +51,7 @@ export async function createGatewayCheckout(
       {
         const stale = await tx.order.findMany({
           where: { userId, status: "PENDING_PAYMENT", walletUsedMinor: { gt: 0 } },
-          select: { id: true, orderNumber: true, walletUsedMinor: true },
+          select: { id: true, orderNumber: true, walletUsedMinor: true, currency: true },
         });
         for (const so of stale) {
           // SELECT ... FOR UPDATE, not findUnique. This writes an ABSOLUTE
@@ -59,10 +61,15 @@ export async function createGatewayCheckout(
             SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
           const sw = swRows[0];
           if (!sw) continue;
-          const back = sw.balanceMinor + BigInt(so.walletUsedMinor);
+          // walletUsedMinor is in the ORDER's currency; the wallet has its own.
+          // Refunding the raw number returned the wrong amount of money.
+          const backMinor = sw.currency === so.currency
+            ? so.walletUsedMinor
+            : convertMinor(so.walletUsedMinor, so.currency as Currency, sw.currency as Currency);
+          const back = sw.balanceMinor + BigInt(backMinor);
           await tx.walletTransaction.create({
             data: {
-              walletId: sw.id, type: "REFUND", amountMinor: BigInt(so.walletUsedMinor), balanceAfterMinor: back,
+              walletId: sw.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
               currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
               idempotencyKey: `refund-cancel:${so.id}`,
             },
@@ -77,7 +84,13 @@ export async function createGatewayCheckout(
       });
 
       const lines = await priceCart(tx, userId, user.currency);
-      const totalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+      const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
+      // The cart coupon applies on THIS rail too. It used to be ignored here, so
+      // a customer shown a discounted cart was charged the undiscounted total by
+      // the gateway.
+      const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+      const discountMinor = coupon?.discountMinor ?? 0;
+      const totalMinor = Math.max(0, subtotalMinor - discountMinor);
 
       const orderNumber = await nextOrderNumber(tx);
       const order = await tx.order.create({
@@ -86,11 +99,14 @@ export async function createGatewayCheckout(
           userId,
           status: "PENDING_PAYMENT",
           currency: user.currency,
-          subtotalMinor: totalMinor,
+          subtotalMinor,
+          discountMinor,
+          couponId: coupon?.couponId ?? null,
           totalMinor,
           expiresAt,
         },
       });
+      if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
 
       for (const line of lines) {
         const isUnitStocked = line.productType === "LICENSE_KEY" || line.productType === "DIGITAL_ACCOUNT";

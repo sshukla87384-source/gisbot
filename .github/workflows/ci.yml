@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -34,17 +37,41 @@ jobs:
       JWT_SECRET: ci-dummy-jwt-secret-at-least-32-characters
     steps:
       - uses: actions/checkout@v4
+      # No `version:` on purpose — action-setup@v4 reads the repo-root
+      # "packageManager" field, which is the single source of truth for the
+      # pnpm version (the Dockerfiles' PNPM_VERSION ARG must match it).
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+      - name: pnpm version is consistent across packageManager and the Dockerfiles
+        run: |
+          want="$(node -p "require('./package.json').packageManager.split('@')[1]")"
+          echo "packageManager pins pnpm@$want"
+          rc=0
+          for f in infrastructure/docker/Dockerfile.node infrastructure/docker/Dockerfile.admin; do
+            got="$(grep -oP '^ARG PNPM_VERSION=\K.*' "$f" || true)"
+            if [ "$got" != "$want" ]; then
+              echo "::error file=$f::PNPM_VERSION=$got does not match packageManager pnpm@$want"
+              rc=1
+            fi
+          done
+          exit $rc
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @gis/database exec prisma generate
       - run: pnpm -r typecheck
       - run: pnpm -r --if-present test
       - name: Verify migrations apply cleanly
-        run: pnpm --filter @gis/database exec prisma migrate deploy || pnpm --filter @gis/database exec prisma db push
+        # `migrate deploy || db push` used to hide BOTH a broken migration and
+        # the fact that there is no migration history at all. Decide explicitly.
+        run: |
+          if [ -d packages/database/prisma/migrations ]; then
+            pnpm --filter @gis/database exec prisma migrate deploy
+          else
+            echo "::warning::packages/database/prisma/migrations/ is missing - there is no migration history to verify. Falling back to 'prisma db push'. Create one with 'prisma migrate dev --name init'."
+            pnpm --filter @gis/database exec prisma db push
+          fi
 
   docker:
     needs: check

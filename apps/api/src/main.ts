@@ -41,6 +41,7 @@ async function bootstrap(): Promise<void> {
     .build();
   SwaggerModule.setup("api/v1/developer/docs", app, SwaggerModule.createDocument(app, devDoc, { include: [DeveloperModule] }));
 
+  app.enableShutdownHooks(); // SIGTERM/SIGINT → drain in-flight requests before exit
   await app.listen(config.API_PORT);
   Logger.log(`API listening on :${config.API_PORT}`, "Bootstrap");
 }

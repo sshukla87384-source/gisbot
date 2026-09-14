@@ -682,7 +682,7 @@ export function createBot(): Bot<Ctx> {
   bot.on("message:text", async (ctx) => {
     const awaiting = ctx.session.awaiting;
     ctx.session.awaiting = null;
-    if (awaiting && (awaiting.startsWith("admin_") || awaiting.startsWith("sale_"))) {
+    if (awaiting && (awaiting.startsWith("admin_") || awaiting.startsWith("sale_") || awaiting === "maint_msg")) {
       const handled = await handleAdminText(ctx, awaiting);
       if (handled) return;
     }
@@ -692,9 +692,9 @@ export function createBot(): Bot<Ctx> {
       if (!rid) return; // no pending review — fall through to normal handling
       ctx.session.reviewId = undefined;
       await addReviewComment(rid, body);
-      await enqueueAdminAlert(`💬 <b>Review comment</b> — ${escapeHtml(greetName(ctx.user))}\n\n${escapeHtml(body).slice(0, 600)}`).catch(() => undefined);
+      await enqueueAdminAlert(`💬 <b>Review comment</b> — ${greetName(ctx.user)}\n\n${escapeHtml(body).slice(0, 600)}`).catch(() => undefined);
       return ctx.reply(
-        `💖 <b>Thank you, ${escapeHtml(greetName(ctx.user))}!</b>\n\nYour words have been sent straight to our team. We truly appreciate you taking the time. 🙏✨`,
+        `💖 <b>Thank you, ${greetName(ctx.user)}!</b>\n\nYour words have been sent straight to our team. We truly appreciate you taking the time. 🙏✨`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home") },
       );
     }
@@ -2042,7 +2042,7 @@ export function createBot(): Bot<Ctx> {
             .text("⭐️⭐️⭐️⭐️", `rev:rate:${oid}:4`).row()
             .text("⭐️⭐️⭐️⭐️⭐️", `rev:rate:${oid}:5`);
           await ctx.reply(
-            `⭐ <b>How would you rate your order, ${escapeHtml(greetName(user))}?</b>\n\nTap the stars — it takes one second and really helps us. 🙏`,
+            `⭐ <b>How would you rate your order, ${greetName(user)}?</b>\n\nTap the stars — it takes one second and really helps us. 🙏`,
             { parse_mode: "HTML", reply_markup: kb },
           );
           break;
@@ -2066,7 +2066,7 @@ export function createBot(): Bot<Ctx> {
           const stars = "⭐️".repeat(rating);
           const warm = rating >= 4
             ? [
-                `🎉 <b>Thank you so much, ${escapeHtml(greetName(user))}!</b> 💖`,
+                `🎉 <b>Thank you so much, ${greetName(user)}!</b> 💖`,
                 "",
                 `${stars}`,
                 "",
@@ -2077,7 +2077,7 @@ export function createBot(): Bot<Ctx> {
                 "<i>Your review will appear publicly once our team checks it.</i>",
               ]
             : [
-                `🙏 <b>Thank you for the honest feedback, ${escapeHtml(greetName(user))}.</b>`,
+                `🙏 <b>Thank you for the honest feedback, ${greetName(user)}.</b>`,
                 "",
                 `${stars}`,
                 "",
@@ -2097,7 +2097,7 @@ export function createBot(): Bot<Ctx> {
             [
               `⭐ <b>New review — awaiting approval</b>`,
               `${stars} <b>${rating}/5</b>`,
-              `👤 ${escapeHtml(greetName(user))}`,
+              `👤 ${greetName(user)}`,
               `🆔 <code>${user.telegramId ?? "—"}</code>`,
               oid ? `🧾 Order <code>${escapeHtml(oid.slice(-8))}</code>` : "",
               "",
@@ -2152,7 +2152,7 @@ export function createBot(): Bot<Ctx> {
           break;
         }
         case "wch:onr": case "wch:onp": {
-          const kind = action === "wch:onr" ? "RESTOCK" : "PRICE_DROP";
+          const kind = route === "wch:onr" ? "RESTOCK" : "PRICE_DROP";
           const pid = args[0] ?? "";
           let base: number | undefined;
           if (kind === "PRICE_DROP") {
@@ -2169,7 +2169,7 @@ export function createBot(): Bot<Ctx> {
           break;
         }
         case "wch:offr": case "wch:offp": {
-          const kind = action === "wch:offr" ? "RESTOCK" : "PRICE_DROP";
+          const kind = route === "wch:offr" ? "RESTOCK" : "PRICE_DROP";
           await unwatchProduct(user.id, args[0] ?? "", kind);
           await ctx.answerCallbackQuery({ text: "Stopped notifying" });
           await render(ctx, await views.productView(user, args[0] ?? ""), true);
@@ -2444,7 +2444,13 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
   if (deliveries.length === 1) { await sendDelivery(ctx, deliveries[0]!); return; }
   const lines = deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
   const menu = new InlineKeyboard().text("🏠 Menu", "mnu:home");
-  if (deliveries.length > DELIVERY_FILE_THRESHOLD) {
+  // A combined message for 2..threshold items can still blow Telegram's 4096-char
+  // cap (long credential blocks, activation guides). Both sends below would then
+  // be rejected and the .catch() would swallow it — a customer who has PAID gets
+  // nothing at all. Over the cap we take the file route, which already has its
+  // own chunked-text fallback.
+  const combined = deliveries.length > DELIVERY_FILE_THRESHOLD ? "" : buildCombinedDeliveryText(lines, orderNumber);
+  if (deliveries.length > DELIVERY_FILE_THRESHOLD || combined.length > 4096) {
     const txt = buildDeliveryTxt(lines, orderNumber);
     try {
       const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
@@ -2467,8 +2473,8 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
       return;
     }
   }
-  await ctx.reply(buildCombinedDeliveryText(lines, orderNumber), { parse_mode: "HTML", reply_markup: menu }).catch(async () => {
-    await ctx.reply(buildCombinedDeliveryText(lines, orderNumber).replace(/<[^>]+>/g, ""), { reply_markup: menu }).catch(() => undefined);
+  await ctx.reply(combined, { parse_mode: "HTML", reply_markup: menu }).catch(async () => {
+    await ctx.reply(combined.replace(/<[^>]+>/g, ""), { reply_markup: menu }).catch(() => undefined);
   });
 }
 
@@ -2550,11 +2556,27 @@ async function sendRevealed(
   kb.text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
     .text("🏠 Menu", "mnu:home");
   const body = lines.join("\n");
+  // Telegram hard-caps a message at 4096 chars, and one item can carry dozens of
+  // credential rows. Truncating would drop secrets the customer has PAID for, so
+  // the body is split on line boundaries instead; the keyboard rides the last part.
+  const parts: string[] = [];
+  let buf = "";
+  for (const line of lines) {
+    if (buf && buf.length + line.length + 1 > 3900) { parts.push(buf); buf = ""; }
+    buf = buf ? `${buf}\n${line}` : line;
+  }
+  if (buf) parts.push(buf);
+  if (parts.length === 0) parts.push(body);
   // A delivery must never be lost to a formatting rejection: HTML → plain text
   // → plain text with no keyboard. The customer has PAID; ugly beats missing.
-  await ctx.reply(body, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
-    await ctx.reply(body.replace(/<[^>]+>/g, ""), { reply_markup: kb }).catch(async () => {
-      await ctx.reply(body.replace(/<[^>]+>/g, "")).catch(() => undefined);
+  for (let i = 0; i < parts.length; i++) {
+    const text = parts[i]!;
+    const last = i === parts.length - 1;
+    const markup = last ? { reply_markup: kb } : {};
+    await ctx.reply(text, { parse_mode: "HTML", ...markup }).catch(async () => {
+      await ctx.reply(text.replace(/<[^>]+>/g, ""), markup).catch(async () => {
+        await ctx.reply(text.replace(/<[^>]+>/g, "")).catch(() => undefined);
+      });
     });
-  });
+  }
 }

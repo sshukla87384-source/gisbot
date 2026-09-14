@@ -1,5 +1,6 @@
 import { prisma, type Currency, type WalletTxType } from "@gis/database";
 import { CoreError } from "@gis/shared";
+import { convertMinor } from "../fx.js";
 
 export interface WalletSummary {
   walletId: string;
@@ -110,10 +111,17 @@ export async function refundWalletForOrder(
     if (!w) return false;
     const already = await tx.walletTransaction.findFirst({ where: { idempotencyKey: `refund-cancel:${orderId}` } });
     if (already) return false;
-    const back = w.balanceMinor + BigInt(amountMinor);
+    // walletUsedMinor is in the ORDER's currency; the wallet has its own, and a
+    // currency switch after the order was placed makes them differ. Refunding
+    // the raw number then handed back INR-scaled minor units as dollars.
+    const ord = await tx.order.findUnique({ where: { id: orderId }, select: { currency: true } });
+    const backMinor = ord && ord.currency !== w.currency
+      ? convertMinor(amountMinor, ord.currency as Currency, w.currency as Currency)
+      : amountMinor;
+    const back = w.balanceMinor + BigInt(backMinor);
     await tx.walletTransaction.create({
       data: {
-        walletId: w.id, type: "REFUND", amountMinor: BigInt(amountMinor), balanceAfterMinor: back,
+        walletId: w.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
         currency: w.currency, orderId, referenceNote: `expired ${orderNumber}`,
         idempotencyKey: `refund-cancel:${orderId}`,
       },

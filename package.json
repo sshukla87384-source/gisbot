@@ -7,13 +7,28 @@
   },
   "scripts": {
     "dev:bot": "pnpm --filter @gis/telegram-bot dev",
+    "build": "turbo build",
     "typecheck": "turbo typecheck",
+    "test": "turbo test",
     "lint": "turbo lint",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
     "db:generate": "pnpm --filter @gis/database db:generate",
     "db:migrate": "pnpm --filter @gis/database db:migrate",
     "db:deploy": "pnpm --filter @gis/database db:deploy",
     "db:seed": "pnpm --filter @gis/database db:seed"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma"
+    ],
+    "ignoredBuiltDependencies": [
+      "@scarf/scarf"
+    ]
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

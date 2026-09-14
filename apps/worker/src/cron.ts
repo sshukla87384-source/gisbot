@@ -23,9 +23,18 @@ import { prisma } from "@gis/database";
  */
 
 async function withLock(key: string, ttlSec: number, fn: () => Promise<void>): Promise<void> {
-  const redis = getRedis();
-  const token = `${process.pid}:${Date.now()}`;
-  const acquired = await redis.set(`lock:${key}`, token, "EX", ttlSec, "NX");
+  let acquired: string | null = null;
+  try {
+    const redis = getRedis();
+    const token = `${process.pid}:${Date.now()}`;
+    acquired = await redis.set(`lock:${key}`, token, "EX", ttlSec, "NX");
+  } catch (e) {
+    // Every tick is fired as `void withLock(...)`, so a rejection here is an
+    // UNHANDLED rejection — i.e. one Redis blip taking the worker process down.
+    // eslint-disable-next-line no-console
+    console.error(`cron ${key} lock failed`, { error: String(e) });
+    return;
+  }
   if (!acquired) return;
   try {
     await fn();
@@ -53,6 +62,10 @@ async function sweepReservationsAndOrders(): Promise<void> {
   const dying = await prisma.order.findMany({
     where: { status: "PENDING_PAYMENT", expiresAt: { lt: now }, walletUsedMinor: { gt: 0 } },
     select: { id: true, userId: true, orderNumber: true, walletUsedMinor: true },
+    // Bounded like the expiry pass below: this loop runs one transaction per row
+    // on a 60 s tick holding a 55 s lock, so an unbounded backlog would overrun
+    // its own lock and have the next tick start on top of it.
+    take: 200,
   });
   for (const o of dying) {
     try {
@@ -78,7 +91,10 @@ async function sweepReservationsAndOrders(): Promise<void> {
     take: 500,
   });
   const expired = await prisma.order.updateMany({
-    where: { id: { in: expiring.map((o) => o.id) } },
+    // The status has to be re-checked, not just the id: the webhook that pays an
+    // order can land between the SELECT above and this UPDATE, and matching on
+    // id alone stamped EXPIRED over a PAID order — money taken, order dead.
+    where: { id: { in: expiring.map((o) => o.id) }, status: "PENDING_PAYMENT" },
     data: { status: "EXPIRED" },
   });
   for (const o of expiring) await clearPaymentPrompts(o.id).catch(() => undefined);
@@ -91,6 +107,22 @@ async function sweepReservationsAndOrders(): Promise<void> {
         after: { releasedKeys: keys.count, releasedAccounts: accounts.count, expiredOrders: expired.count },
       },
     });
+  }
+}
+
+/**
+ * Did the wallet credit actually land? A replay hits the ledger's unique
+ * idempotencyKey (P2002), which means the money IS there and the entry can be
+ * closed. Anything else — DB down, wallet vanished — means it is NOT, and the
+ * entry must stay open for the next tick. Swallowing every error and marking it
+ * paid regardless is how a reseller never receives a matured commission.
+ */
+async function credited(p: Promise<unknown>): Promise<boolean> {
+  try {
+    await p;
+    return true;
+  } catch (e) {
+    return (e as { code?: string } | null)?.code === "P2002";
   }
 }
 
@@ -117,13 +149,14 @@ async function releaseHolds(): Promise<void> {
     const commMinor = wallet.currency === entry.currency
       ? entry.netMinor
       : convertMinor(entry.netMinor, entry.currency, wallet.currency);
-    await adjustWallet({
+    const paid = await credited(adjustWallet({
       userId: profile.userId,
       amountMinor: BigInt(commMinor),
       type: "COMMISSION",
       note: `commission ${entry.orderItemId}`,
       idempotencyKey: `comm:${entry.id}`,
-    }).catch(() => undefined); // unique idempotencyKey → replay-safe
+    })); // unique idempotencyKey → replay-safe
+    if (!paid) continue; // not credited — leave it matured so the next run retries
     await prisma.commissionEntry.update({ where: { id: entry.id }, data: { releasedAt: now } });
   }
 
@@ -156,13 +189,14 @@ async function releaseHolds(): Promise<void> {
     const rewardMinor = wallet.currency === reward.currency
       ? reward.amountMinor
       : convertMinor(reward.amountMinor, reward.currency, wallet.currency);
-    await adjustWallet({
+    const paid = await credited(adjustWallet({
       userId: reward.referrerId,
       amountMinor: BigInt(rewardMinor),
       type: "REFERRAL_REWARD",
       note: `referral reward (${reward.orderId})`,
       idempotencyKey: `refr:${reward.id}`,
-    }).catch(() => undefined);
+    }));
+    if (!paid) continue; // still PENDING_HOLD — retried on the next tick
     await prisma.referralReward.update({
       where: { id: reward.id },
       data: { status: "CREDITED", creditedAt: now },
@@ -314,11 +348,17 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     // off our shelves, and a price rise follows through with the markup.
     every(300, "supsync", 290, async () => { await syncAllSuppliers(); }),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
-    every(86_400, "reconcile", 86_390, reconcileWallets),
+    // The once-a-day jobs TICK hourly and are held to once a day by a ~24 h lock
+    // instead of a 24 h setInterval. An interval that long never fires at all on
+    // a service that is redeployed more often than once a day: every restart put
+    // the timer back to zero, so the reconciliation, the money summary and the
+    // reseller statements simply never ran. The lock lives in Redis, so it
+    // survives the restart the timer did not.
+    every(3600, "reconcile", 86_390, reconcileWallets),
     every(120, "binancepoll", 110, binancePoll),
     every(300, "recovery", 290, recoverAbandonedCheckouts),
-    every(21_600, "quality", 21_590, qualitySweep),
-    every(86_400, "moneysummary", 86_390, dailyMoneySummary),
-    every(86_400, "resellerstmt", 86_390, resellerStatements),
+    every(3600, "quality", 21_590, qualitySweep),
+    every(3600, "moneysummary", 86_390, dailyMoneySummary),
+    every(3600, "resellerstmt", 86_390, resellerStatements),
   ];
 }

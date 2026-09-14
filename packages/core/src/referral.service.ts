@@ -24,6 +24,9 @@ export async function grantReferralRewardTx(
   // Referral promotion can be switched off by an admin — stop the PAYOUT, not just the UI.
   if (!promoFlagsCached().referral) return;
   if (!opts.referrerId || opts.netMinor <= 0) return;
+  // Never pay someone for referring themselves. Attribution refuses it at /start,
+  // but the payout is where the money leaves, so it is checked here too.
+  if (opts.referrerId === opts.referredId) return;
   const bp = opts.isFirst ? await settingInt(tx, REF_FIRST_KEY, 500) : await settingInt(tx, REF_REPEAT_KEY, 200);
   if (bp <= 0) return;
   const amount = Math.floor((opts.netMinor * bp) / 10_000);

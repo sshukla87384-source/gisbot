@@ -85,7 +85,7 @@ export async function testBinanceApi(): Promise<{ ok: boolean; detail: string }>
  * A credit can only pay for an order that already existed when it arrived.
  * Small allowance for clock skew between Binance and this server.
  */
-const CLOCK_SKEW_MS = 2 * 60_000;
+export const CLOCK_SKEW_MS = 2 * 60_000;
 
 
 
@@ -280,13 +280,20 @@ export async function verifyBinanceByTxnId(orderId: string, txnId: string, expec
   const want = parseFloat(order.binanceAmount ?? "0");
   if (!(want > 0) || Math.abs(parseFloat(txn.amount) - want) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
 
+  // Claim on the CANONICAL transaction id. A payment is reachable by two
+  // references — its transactionId and the Order ID shown to the customer — so
+  // recording whichever one was pasted let the SAME payment be pasted again
+  // under its other reference and settle a second order for free.
+  const ref = String(txn.transactionId);
+  if (ref !== clean && (await txnAlreadyUsed(ref))) return { ok: false, reason: "ALREADY_USED" };
+
   const claimed = await prisma.order.updateMany({
     where: { id: orderId, status: "PENDING_PAYMENT", binanceTxnId: null },
-    data: { binanceTxnId: clean },
+    data: { binanceTxnId: ref },
   });
   if (claimed.count === 0) return { ok: false, reason: "ORDER_NOT_PENDING" };
 
   await confirmManualPayment(orderId);
-  await enqueueAdminAlert(`✅ Binance verified by txn ${clean} — ${order.orderNumber} (${order.binanceAmount} USDT).`);
+  await enqueueAdminAlert(`✅ Binance verified by txn ${ref} — ${order.orderNumber} (${order.binanceAmount} USDT).`);
   return { ok: true, orderNumber: order.orderNumber };
 }

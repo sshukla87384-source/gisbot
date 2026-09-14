@@ -183,7 +183,19 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
 
   const result = await prisma.$transaction(
     async (tx): Promise<CheckoutResult> => {
-      // 1) Lock wallet (serializes concurrent checkouts per user).
+      // 1) Lock the user, THEN the wallet.
+      //
+      // The wallet lock alone only serializes wallet-vs-wallet. A BNPL checkout
+      // locks the User row instead, so a wallet checkout and a BNPL checkout for
+      // the same customer used to run side by side: both priced the same cart,
+      // both fulfilled it, and the customer paid twice for one basket. Locking
+      // the user first puts every rail behind one row.
+      //
+      // The order matters: repayBnpl already takes User → Wallet, so taking them
+      // the other way round here would be a lock-order inversion and deadlock.
+      const lockedUsers = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+      if (!lockedUsers[0]) throw new CoreError("USER_NOT_FOUND");
       const wallets = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
         SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
       const wallet = wallets[0];

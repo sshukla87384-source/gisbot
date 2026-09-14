@@ -113,6 +113,17 @@ export class AuthController {
       throw unauthenticated("Refresh token reuse detected — session revoked.");
     }
 
+    // Login refuses a non-ACTIVE account; rotation must too, or suspending or
+    // banning somebody never ends their session.
+    const owner = await prisma.user.findUnique({ where: { id: existing.userId }, select: { status: true } });
+    if (owner?.status !== "ACTIVE") {
+      await prisma.refreshToken.updateMany({
+        where: { familyId: existing.familyId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      throw unauthenticated("This account can no longer sign in.");
+    }
+
     const cfg = loadConfig();
     const next = randomBytes(32).toString("hex");
     const nextHash = sha256(next);

@@ -1,5 +1,10 @@
 packages:
   - "apps/*"
   - "packages/*"
+# NOTE: `overrides` here is a pnpm >= 10 key and is INERT under the pinned
+# pnpm@9.15.0 (the lockfile has no overrides section, confirming it never
+# applied). It is harmless today because ^5.4.1 already resolves to 5.10.1.
+# To make it real, move it to `pnpm.overrides` in the root package.json and
+# regenerate the lockfile — a plain copy here would fail --frozen-lockfile.
 overrides:
   ioredis: 5.10.1

@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Admin panel (@gis/admin-panel — Next.js 14, output: "standalone").
-# pnpm installed via npm (pinned) — no corepack/frozen-lockfile fragility.
+# pnpm installed via npm (pinned) — no corepack fragility. Keep PNPM_VERSION in
+# sync with the "packageManager" field in the repo-root package.json.
 ARG NODE_VERSION=22
 ARG PNPM_VERSION=9.15.0
 
@@ -9,8 +10,7 @@ ARG NEXT_PUBLIC_API_URL
 ARG PNPM_VERSION
 # Alpine's CDN can fail TLS on some hosts, which empties the package index and
 # makes every package look missing. Retry, fall back to the http mirror, and
-# never fail the build for openssl — node:22-alpine already ships libssl3,
-# which is what Prisma actually links against.
+# never fail the build for openssl — node:22-alpine already ships libssl3.
 RUN set -eux; \
     for i in 1 2 3; do apk update && break || sleep 5; done || \
       (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
@@ -19,15 +19,24 @@ RUN set -eux; \
     for i in 1 2 3; do apk add --no-cache openssl libssl3 && break || sleep 5; done || true; \
     npm install -g pnpm@${PNPM_VERSION}
 WORKDIR /app
+# Warm the pnpm store from the lockfile FIRST so editing app source does not
+# invalidate the (slow) download layer.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm fetch
 COPY . .
-RUN pnpm install --no-frozen-lockfile
+# --frozen-lockfile keeps the image reproducible; --offline uses the store above.
+RUN pnpm install --frozen-lockfile --offline --filter "@gis/admin-panel..."
+# NEXT_PUBLIC_* is inlined at build time, so it must be set before `next build`.
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS=--max-old-space-size=2048
 RUN pnpm --filter @gis/admin-panel build
 
 FROM node:${NODE_VERSION}-alpine AS runner
-RUN for i in 1 2 3; do apk add --no-cache curl && break || sleep 5; done || true
-ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
+# dumb-init as PID 1: Next's standalone server.js installs no SIGTERM handler,
+# and PID 1 ignores signals with a default disposition — without an init,
+# `docker stop` waits the full grace period and then SIGKILLs.
+RUN set -eux; \
+    for i in 1 2 3; do apk add --no-cache curl dumb-init && break || sleep 5; done
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 WORKDIR /app
 COPY --from=build --chown=node:node /app/apps/admin-panel/.next/standalone ./
@@ -37,4 +46,5 @@ USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:3000/login" || exit 1
+ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "apps/admin-panel/server.js"]

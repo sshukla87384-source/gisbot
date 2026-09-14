@@ -53,9 +53,16 @@ async function withRoleNames(user: User): Promise<User & { roleNames: string[] }
 export async function resolveTelegramUser(input: TelegramIdentity): Promise<ResolvedUser> {
   const existing = await prisma.user.findUnique({ where: { telegramId: input.telegramId } });
   if (existing) {
+    // `notifiable` is part of this: it is cleared when the bot is blocked, and
+    // somebody sending us an update has plainly unblocked it. Gating the write
+    // on a name change left everyone who ever blocked and came back permanently
+    // cut out of every broadcast. lastName is checked for the same reason — it
+    // was written by the update below but never able to trigger one.
     const needsUpdate =
       existing.firstName !== (input.firstName ?? existing.firstName) ||
-      existing.telegramHandle !== (input.username ?? existing.telegramHandle);
+      existing.lastName !== (input.lastName ?? existing.lastName) ||
+      existing.telegramHandle !== (input.username ?? existing.telegramHandle) ||
+      !existing.notifiable;
     const user = needsUpdate
       ? await prisma.user.update({
           where: { id: existing.id },

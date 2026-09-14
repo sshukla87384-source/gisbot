@@ -380,9 +380,17 @@ export async function createReplacementBatch(opts: {
       where: { userId: opts.userId, status: "PENDING", orderItemId: { in: claimUnits.map((u) => u.orderItemId) } },
       orderBy: { createdAt: "desc" },
       take: claimUnits.length,
-      select: { id: true },
+      // The unit each row belongs to, because the read-back order does NOT match
+      // the order the units were submitted in. Pairing them by position labelled
+      // the approve buttons with the wrong unit numbers, so approving "#2"
+      // approved a different unit's claim.
+      select: { id: true, orderItemId: true },
     });
-    claimIds.push(...made.map((m) => m.id));
+    const madeByItem = new Map(made.map((m) => [m.orderItemId, m.id]));
+    for (const u of claimUnits) {
+      const id = madeByItem.get(u.orderItemId);
+      if (id) claimIds.push(id);
+    }
   }
 
   if (claimUnits.length > 0) {

@@ -17,8 +17,13 @@ export function formatMinor(amountMinor: number | bigint, currency: CurrencyCode
   const meta = META[currency];
   const minor = typeof amountMinor === "bigint" ? amountMinor : BigInt(Math.trunc(amountMinor));
   const divisor = BigInt(10 ** meta.decimals);
-  const major = minor / divisor;
-  const frac = (minor % divisor < 0n ? -(minor % divisor) : minor % divisor).toString().padStart(meta.decimals, "0");
+  // Sign is carried by hand: -50 paise has a major part of 0n, so the minus
+  // would vanish if we let the number formatter print it.
+  const negative = minor < 0n;
+  const abs = negative ? -minor : minor;
+  const sign = negative ? "-" : "";
+  const major = abs / divisor;
+  const frac = (abs % divisor).toString().padStart(meta.decimals, "0");
   const majorStr = new Intl.NumberFormat(meta.locale).format(major);
-  return meta.decimals === 0 ? `${meta.symbol}${majorStr}` : `${meta.symbol}${majorStr}.${frac}`;
+  return meta.decimals === 0 ? `${sign}${meta.symbol}${majorStr}` : `${sign}${meta.symbol}${majorStr}.${frac}`;
 }

@@ -161,10 +161,22 @@ export async function listGifts(status: "PENDING" | "DELIVERED" | "ALL" = "PENDI
 }
 
 export async function markGiftDelivered(id: string, actor: string): Promise<boolean> {
+  // Only PENDING → DELIVERED. A second tap used to overwrite deliveredBy /
+  // deliveredAt and send the customer a duplicate "your gift has been sent",
+  // so the transition is claimed first and the DM only follows a real claim.
+  const claimed = await prisma.loyaltyGift.updateMany({
+    where: { id, status: "PENDING" },
+    data: { status: "DELIVERED", deliveredBy: actor, deliveredAt: new Date() },
+  });
+  if (claimed.count === 0) {
+    // Already delivered is still a success for the admin; anything else is not.
+    const cur = await prisma.loyaltyGift.findUnique({ where: { id }, select: { status: true } });
+    return cur?.status === "DELIVERED";
+  }
   const g = await prisma.loyaltyGift
-    .update({ where: { id }, data: { status: "DELIVERED", deliveredBy: actor, deliveredAt: new Date() }, include: { user: { select: { telegramId: true } } } })
+    .findUnique({ where: { id }, include: { user: { select: { telegramId: true } } } })
     .catch(() => null);
-  if (!g) return false;
+  if (!g) return true;
   if (g.user.telegramId) {
     await enqueueTelegramMessage(g.user.telegramId, `🎁 <b>Your gift has been sent!</b>\n\n<b>${g.title}</b>\n\nEnjoy — and thank you for being with us. 🙏`).catch(() => undefined);
   }

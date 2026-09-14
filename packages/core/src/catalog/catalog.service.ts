@@ -625,13 +625,17 @@ export async function setProductBulkTiers(productId: string, tiers: BulkTier[]):
   await prisma.product.update({
     where: { id: productId },
     data: {
-      bulkTiers: clean.length > 0 ? (clean as never) : undefined,
+      // An EMPTY ladder is written as an empty list, not skipped: `undefined`
+      // means "leave this column alone" to Prisma, so "remove bulk discounts"
+      // cleared the legacy columns, reported success, and left the ladder itself
+      // exactly where it was — customers kept getting a discount the operator
+      // had just turned off.
+      bulkTiers: clean as never,
       // The legacy columns are cleared so they cannot resurface as a fallback
       // once a ladder exists, which would otherwise reintroduce an old tier the
       // operator thought they had replaced.
       bulkMinQty: null,
       bulkPercentBp: null,
-      ...(clean.length === 0 ? { bulkTiers: undefined } : {}),
     },
   });
   await invalidate("cat:*");

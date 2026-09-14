@@ -379,6 +379,10 @@ model UserPrice {
 
   @@unique([userId, productId, channel])
   @@index([userId])
+  /// The sold-out sweep runs every 5 minutes and looks overrides up BY PRODUCT.
+  /// The unique above is led by userId, so it cannot serve that query and every
+  /// tick sequentially scanned the whole override table.
+  @@index([productId])
 }
 
 model PostTarget {

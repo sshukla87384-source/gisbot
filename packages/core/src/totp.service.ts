@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { decryptSecret, encryptSecret } from "@gis/shared";
+import { getRedis } from "./redis.js";
 
 /**
  * TOTP (RFC 6238) generated locally — HMAC-SHA1, 30s window, 6 digits.
@@ -165,10 +166,29 @@ export async function adminTotpRequired(): Promise<boolean> {
   return (await readAdminTotp()).enabled;
 }
 
+/**
+ * A code may be spent ONCE (RFC 6238 §5.2). It matters more than usual here:
+ * the operator types the code into a Telegram chat, where it stays in the
+ * history, and every code is accepted for a further 30-60 seconds after it is
+ * used. Only a SUCCESSFUL check spends one, so a mistyped attempt can be
+ * retried with the same code.
+ *
+ * If Redis is unreachable the code is allowed through rather than locking the
+ * operator out of their own store.
+ */
+async function spendAdminTotpCode(code: string): Promise<boolean> {
+  try {
+    return (await getRedis().set(`admintotp:used:${code}`, "1", "EX", STEP * 3, "NX")) !== null;
+  } catch {
+    return true;
+  }
+}
+
 export async function checkAdminTotp(code: string): Promise<boolean> {
   const { secret, enabled } = await readAdminTotp();
   if (!enabled || !secret) return true;
-  return verifyTotp(secret, code);
+  if (!verifyTotp(secret, code)) return false;
+  return spendAdminTotpCode(code.replace(/\D/g, ""));
 }
 
 /** Switching it off requires a valid code — otherwise it protects nothing. */

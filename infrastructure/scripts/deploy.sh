@@ -8,8 +8,26 @@ PROFILE="${1:-}"
 COMPOSE="docker compose --env-file .env -f infrastructure/docker/compose.prod.yml"
 [ "$PROFILE" = "full" ] && COMPOSE="$COMPOSE --profile full"
 
+cd "$(dirname "$0")/../.."
+
 [ -f .env ] || { echo "ERROR: .env missing (copy .env.example and fill it in)"; exit 1; }
-NGINX_DOMAIN="$(grep -E '^NGINX_DOMAIN=' .env | cut -d= -f2- || true)"
+
+# Sync FIRST. Everything below (nginx template, compose file, Dockerfiles, app
+# source) has to come from the revision we are about to deploy — rendering the
+# nginx config before the pull shipped the PREVIOUS release's template.
+# Re-exec afterwards: git just rewrote this very file underneath the shell.
+if [ "${GIS_DEPLOY_SYNCED:-}" != "1" ]; then
+  echo "==> Syncing to origin/main"
+  git fetch origin && git reset --hard origin/main
+  export GIS_DEPLOY_SYNCED=1
+  exec "$0" "$@"
+fi
+
+NGINX_DOMAIN="$(grep -E '^NGINX_DOMAIN=' .env | head -n1 | cut -d= -f2- || true)"
+NGINX_DOMAIN="${NGINX_DOMAIN%%#*}"          # drop any inline comment
+NGINX_DOMAIN="${NGINX_DOMAIN//[[:space:]]/}"
+NGINX_DOMAIN="${NGINX_DOMAIN//\"/}"
+NGINX_DOMAIN="${NGINX_DOMAIN//\'/}"
 [ -n "$NGINX_DOMAIN" ] || { echo "ERROR: set NGINX_DOMAIN in .env"; exit 1; }
 
 # Does a TLS cert for the ROOT domain (landing page) already exist?
@@ -28,7 +46,6 @@ if [ "$HAS_ROOT_CERT" != "1" ]; then
   echo "    (landing HTTPS disabled until cert exists — run get-landing-cert.sh)"
 fi
 
-echo "==> Syncing to origin/main"; git fetch origin && git reset --hard origin/main
 # Build images ONE AT A TIME. Parallel builds (BuildKit bake) can exhaust RAM on
 # a single VPS during the heavy Next.js admin build → "connection reset by peer".
 echo "==> Building images (sequential)"

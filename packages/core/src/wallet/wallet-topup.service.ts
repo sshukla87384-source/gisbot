@@ -4,7 +4,7 @@ import { CoreError } from "@gis/shared";
 import { enqueueAdminAlert } from "../queues.js";
 import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { adjustWallet } from "./wallet.service.js";
-import { fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
+import { CLOCK_SKEW_MS, fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
 import { convertMinor, usdtRate } from "../fx.js";
 
 function toUsdt(amountMinor: number, currency: Currency): string {
@@ -76,11 +76,31 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
   }
   const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
   if (!txn || txn.currency !== "USDT" || parseFloat(txn.amount) <= 0) return { ok: false, reason: "NOT_FOUND" };
+  // A credit can only fund a top-up that already existed when it arrived — the
+  // same guard the order poller relies on. Without it any unclaimed credit of a
+  // matching size, however old, could be harvested by anyone who asks for a
+  // top-up of that amount.
+  const txnTime = Number(txn.transactionTime);
+  if (!Number.isFinite(txnTime) || txnTime <= 0) return { ok: false, reason: "NOT_FOUND" };
+  if (txnTime < topup.createdAt.getTime() - CLOCK_SKEW_MS) return { ok: false, reason: "NOT_FOUND" };
   if (Math.abs(parseFloat(txn.amount) - parseFloat(topup.binanceAmount)) >= 0.01) return { ok: false, reason: "AMOUNT_MISMATCH" };
+
+  // Dedupe and claim on the CANONICAL transaction id. One payment carries TWO
+  // references — its transactionId and the Order ID shown to the customer — so
+  // keying on whatever was pasted let the same money be submitted twice, once
+  // under each reference, and credit twice.
+  const ref = String(txn.transactionId);
+  if (ref !== clean) {
+    const [refTopup, refOrder] = await Promise.all([
+      prisma.walletTopup.findFirst({ where: { binanceTxnId: ref }, select: { id: true } }),
+      prisma.order.findFirst({ where: { binanceTxnId: ref }, select: { id: true } }),
+    ]);
+    if (refTopup || refOrder) return { ok: false, reason: "ALREADY_USED" };
+  }
 
   const claimed = await prisma.walletTopup.updateMany({
     where: { id: topupId, status: "PENDING" },
-    data: { binanceTxnId: clean },
+    data: { binanceTxnId: ref },
   });
   if (claimed.count === 0) return { ok: false, reason: "NOT_PENDING" };
 
@@ -97,14 +117,14 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
     userId: topup.userId,
     amountMinor: BigInt(creditMinor),
     type: "DEPOSIT",
-    note: `Binance top-up (txn ${clean})`,
+    note: `Binance top-up (txn ${ref})`,
     // Keyed on the TRANSACTION, not the top-up row: the same Binance txn must
     // never credit twice even via two different pending top-ups.
-    idempotencyKey: `topup-txn:${clean}`,
+    idempotencyKey: `topup-txn:${ref}`,
   });
   await prisma.walletTopup.update({ where: { id: topup.id }, data: { status: "CREDITED", creditedAt: new Date() } });
   const tu = await prisma.user.findUnique({ where: { id: topup.userId }, select: { telegramHandle: true, firstName: true, telegramId: true, currency: true } });
-  if (tu) await notifyTopupToAdmins(tu, topup.amountMinor, "Binance top-up", clean, newBalanceMinor);
+  if (tu) await notifyTopupToAdmins(tu, topup.amountMinor, "Binance top-up", ref, newBalanceMinor);
   return { ok: true, newBalanceMinor, amountMinor: topup.amountMinor, currency: topup.currency };
 }
 
@@ -138,6 +158,18 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
   const signed = parseFloat(txn.amount);
   if (!(signed > 0)) return { ok: false, reason: "NOT_FOUND" };
   const usdt = signed;
+  // Dedupe and record against the CANONICAL transaction id. One payment carries
+  // two references — its transactionId and the customer-facing Order ID — so
+  // keying on whichever was pasted let the same deposit be claimed twice, once
+  // under each reference.
+  const ref = String(txn.transactionId);
+  if (ref !== clean) {
+    const [refTopup, refOrder] = await Promise.all([
+      prisma.walletTopup.findFirst({ where: { binanceTxnId: ref }, select: { id: true } }),
+      prisma.order.findFirst({ where: { binanceTxnId: ref }, select: { id: true } }),
+    ]);
+    if (refTopup || refOrder) return { ok: false, reason: "ALREADY_USED" };
+  }
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   // Credit in the WALLET's currency, not the user's display currency — they
   // differ the moment someone switches to INR, and crediting INR-scaled minor
@@ -151,7 +183,7 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
   const topup = await prisma.walletTopup.create({
     data: {
       userId, amountMinor: creditMinor, currency: walletCur, binanceAsset: "USDT",
-      binanceAmount: usdt.toFixed(2), binanceTxnId: clean, status: "CREDITED",
+      binanceAmount: usdt.toFixed(2), binanceTxnId: ref, status: "CREDITED",
       creditedAt: new Date(), expiresAt: new Date(),
     },
   });
@@ -159,9 +191,9 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
     userId, amountMinor: BigInt(creditMinor), type: "DEPOSIT",
     // Key on the TRANSACTION, so two concurrent submissions of the same
     // Binance id can never both credit (each call makes its own topup row).
-    note: `Binance deposit (txn ${clean})`, idempotencyKey: `topup-txn:${clean}`,
+    note: `Binance deposit (txn ${ref})`, idempotencyKey: `topup-txn:${ref}`,
   });
-  await notifyTopupToAdmins({ ...user, currency: walletCur }, creditMinor, `Binance ${usdt.toFixed(2)} USDT`, clean, newBalanceMinor);
+  await notifyTopupToAdmins({ ...user, currency: walletCur }, creditMinor, `Binance ${usdt.toFixed(2)} USDT`, ref, newBalanceMinor);
   return { ok: true, newBalanceMinor, amountMinor: creditMinor, currency: walletCur };
 }
 

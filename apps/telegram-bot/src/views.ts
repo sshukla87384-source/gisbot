@@ -272,7 +272,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     "",
     // A personal price the admin set for THIS customer.
     ...(p.hasCustomPrice
-      ? [`💎 <b>Special price just for you, ${escapeHtml(greetName(user))}!</b>`, "<i>This is your personal rate — not the public price.</i>"]
+      ? [`💎 <b>Special price just for you, ${greetName(user)}!</b>`, "<i>This is your personal rate — not the public price.</i>"]
       : user.isVip
         ? [`${e("vip")} <b>VIP price applied</b>`]
         : []),
@@ -397,7 +397,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     cartText(view),
     ...(coupon ? [`🎟 Coupon <b>${escapeHtml(coupon.code)}</b>: −${fmt(discount, view.currency)}`, `💳 <b>Total to pay: ${fmt(payable, view.currency)}</b>`] : []),
     "",
-    view.hasCustomPrice ? `💎 <b>Special price just for you, ${escapeHtml(greetName(user))}!</b>` : "",
+    view.hasCustomPrice ? `💎 <b>Special price just for you, ${greetName(user)}!</b>` : "",
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${walletCur === "USD" ? " USDT" : ""}`,
     crossCur ? `🔁 Wallet charge for this order: <b>${walletChargeLabel}</b>  <i>(${fmt(payable, view.currency)})</i>` : "",
     (user.currency as string) === "INR" && loadConfig().UPI_ID

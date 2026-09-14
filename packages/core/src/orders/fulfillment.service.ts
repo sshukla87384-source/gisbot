@@ -21,12 +21,6 @@ import { grantReferralRewardTx } from "../referral.service.js";
 
 type QueuedDelivery = DeliveryLine;
 
-async function getSettingInt(key: string, fallback: number): Promise<number> {
-  const row = await prisma.setting.findUnique({ where: { key } });
-  const n = Number(row?.value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
 export async function processWebhookEvent(webhookEventId: string): Promise<void> {
   const event = await prisma.webhookEvent.findUnique({ where: { id: webhookEventId } });
   if (!event || event.processedAt) return;
@@ -80,8 +74,6 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
     await markProcessed(eventId, "order not found");
     return;
   }
-
-  const commissionBpDefault = await getSettingInt("reseller.commission_pct_bp", 1000);
 
   const outcome = await prisma.$transaction(
     async (tx) => {

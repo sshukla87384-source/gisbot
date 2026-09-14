@@ -1,0 +1,25 @@
+# Keep secrets and host-local build output OUT of the build context.
+# The build context is the repo root (compose: context: ../..), so without this
+# a local .env would be baked into every image layer.
+.env
+.env.*
+!.env.example
+.git
+.github
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/.next
+.turbo
+**/.turbo
+coverage
+**/coverage
+*.log
+build-log.txt
+*.tsbuildinfo
+**/*.tsbuildinfo
+docs
+infrastructure/nginx/gis.rendered.conf
+.DS_Store

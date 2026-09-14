@@ -1,7 +1,7 @@
 import { loadConfig } from "@gis/config";
 import { BINANCE_SESSION_MIN, UPI_SESSION_MIN } from "./binance-window.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
-import { CoreError, cb, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
+import { CoreError, cb, effectiveHours, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
@@ -9,7 +9,7 @@ import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, deliveryExpiry, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
@@ -374,13 +374,19 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         }
         try {
           if (type === "LICENSE_KEY") {
-            const { key, expiresAt, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
+            const { key, expiresAt: stockExpiry, costMinor: cost } = await assignLicenseKey(tx, item.variantId, item.id, masterKey, true);
+            // Same expiry rule as every other rail: the stock item's own date when
+            // it has one, otherwise delivery time plus the variant's validity.
+            // This rail computed neither, so a 6-hour trial bought over UPI had no
+            // expiry recorded at all and no reminder could ever fire for it.
+            const expiresAt = deliveryExpiry(stockExpiry, effectiveHours(item.variant.durationHours, item.variant.durationDays));
             const payload = { kind: "LICENSE_KEY", key, expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
+                expiresAt,
                 costMinor: cost ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
@@ -388,12 +394,14 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
             if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
-            const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: creds.expiresAt?.toISOString() };
+            const expiresAt = deliveryExpiry(creds.expiresAt, effectiveHours(item.variant.durationHours, item.variant.durationDays));
+            const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
                 fulfilledAt: new Date(),
                 warrantyStartAt: new Date(),
+                expiresAt,
                 costMinor: creds.costMinor ?? item.variant.defaultCostMinor,
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },

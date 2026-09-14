@@ -12,13 +12,24 @@ import { RequirePermission } from "../common/permissions.decorator.js";
 import { escapeHtml, type ApiRequest } from "../common/types.js";
 import { validate } from "../common/zod-body.pipe.js";
 
-const fulfillBody = z.object({
-  kind: z.enum(["LICENSE_KEY", "DIGITAL_ACCOUNT", "TEXT"]),
-  key: z.string().optional(),
-  username: z.string().optional(),
-  password: z.string().optional(),
-  text: z.string().optional(),
-});
+const fulfillBody = z
+  .object({
+    kind: z.enum(["LICENSE_KEY", "DIGITAL_ACCOUNT", "TEXT"]),
+    key: z.string().optional(),
+    username: z.string().optional(),
+    password: z.string().optional(),
+    text: z.string().optional(),
+  })
+  // Delivery is one-shot (a second attempt is ALREADY_FULFILLED), so an empty
+  // payload would permanently deliver the customer nothing.
+  .superRefine((v, ctx) => {
+    if (v.kind === "LICENSE_KEY" && !v.key)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "LICENSE_KEY deliveries need a key", path: ["key"] });
+    if (v.kind === "DIGITAL_ACCOUNT" && (!v.username || !v.password))
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "DIGITAL_ACCOUNT deliveries need username and password", path: ["username"] });
+    if (v.kind === "TEXT" && !v.text)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "TEXT deliveries need text", path: ["text"] });
+  });
 
 function deliveryText(productName: string, variantName: string, p: Record<string, string | undefined>): string {
   const lines = [`📦 <b>${escapeHtml(productName)}</b> · ${escapeHtml(variantName)}`, ""];

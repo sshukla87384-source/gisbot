@@ -20,6 +20,9 @@ function renderText(title: string, body: string): string {
 async function targetTelegramIds(segment: BroadcastSegment): Promise<bigint[]> {
   const where: Record<string, unknown> = { notifiable: true, telegramId: { not: null }, status: "ACTIVE" };
   if (segment === "resellers") where.roles = { some: { role: { name: "RESELLER" } } };
+  // Without this "customers" was indistinguishable from "all" — a customers-only
+  // broadcast went to the resellers too.
+  if (segment === "customers") where.roles = { none: { role: { name: "RESELLER" } } };
   // Bounded. An unbounded findMany over every user is fine at 10k and a problem
   // at 1M, and there was no cursor to fall back on.
   const users = await prisma.user.findMany({ where, select: { telegramId: true }, take: 200_000 });
@@ -223,6 +226,9 @@ export async function announceProduct(
   const lines = onSale
     ? [`📣 <b>New Update!</b>`, "", `We just added a new product — <b>on flash sale</b>:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`]
     : [`📣 <b>New Update!</b>`, "", `We just added a new product:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`];
+  // descDisp was computed and then never used, so every launch announcement went
+  // out with no description at all (announceFlashSale below does include it).
+  if (descDisp) lines.push("", descDisp);
   if (cheapest) lines.push("", `💵 <b>${onSale ? "Sale price " : "Price "}from ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
 
   // The emoji goes on the button too. It is the thing a customer recognises at

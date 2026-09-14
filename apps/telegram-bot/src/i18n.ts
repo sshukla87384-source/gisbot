@@ -101,6 +101,8 @@ const DICTS: Record<Locale, Dict> = { en, hi, ar, es, pt, zh };
 export function t(locale: string | null | undefined, key: string, vars: Record<string, string | number> = {}): string {
   const loc = (locale && (locale in DICTS) ? locale : "en") as Locale;
   let str = DICTS[loc][key] ?? en[key] ?? key;
-  for (const [k, v] of Object.entries(vars)) str = str.replace(`{${k}}`, String(v));
+  // split/join, not String.replace: replace() rewrites only the FIRST {k}, and
+  // it expands $&/$' patterns that happen to appear in a user-supplied name.
+  for (const [k, v] of Object.entries(vars)) str = str.split(`{${k}}`).join(String(v));
   return str;
 }

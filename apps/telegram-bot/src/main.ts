@@ -28,6 +28,15 @@ async function main(): Promise<void> {
     { command: "language", description: "Change language" },
   ]);
 
+  const shutdown = async (): Promise<void> => {
+    await bot.stop().catch(() => undefined);
+    await prisma.$disconnect().catch(() => undefined);
+    getRedis().disconnect();
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
   if (config.BOT_MODE === "webhook") {
     const path = `/webhooks/telegram/${config.WEBHOOK_SECRET_PATH}`;
     const handler = webhookCallback(bot, "http", { secretToken: config.TELEGRAM_SECRET_TOKEN });
@@ -56,7 +65,7 @@ async function main(): Promise<void> {
       await bot.api.setWebhook(`${config.WEBHOOK_DOMAIN}${path}`, {
         secret_token: config.TELEGRAM_SECRET_TOKEN,
         drop_pending_updates: false,
-        allowed_updates: ["message", "callback_query"],
+        allowed_updates: ["message", "callback_query", "pre_checkout_query"],
       });
       // eslint-disable-next-line no-console
       console.log(`bot: webhook mode on :${config.PORT}`);
@@ -64,17 +73,8 @@ async function main(): Promise<void> {
   } else {
     // eslint-disable-next-line no-console
     console.log("bot: long-polling mode (development)");
-    await bot.start({ allowed_updates: ["message", "callback_query"] });
+    await bot.start({ allowed_updates: ["message", "callback_query", "pre_checkout_query"] });
   }
-
-  const shutdown = async (): Promise<void> => {
-    await bot.stop().catch(() => undefined);
-    await prisma.$disconnect().catch(() => undefined);
-    getRedis().disconnect();
-    process.exit(0);
-  };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
 }
 
 main().catch((e) => {

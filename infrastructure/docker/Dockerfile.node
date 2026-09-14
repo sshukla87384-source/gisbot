@@ -3,51 +3,66 @@
 # Build from repo root:  docker build -f infrastructure/docker/Dockerfile.node --build-arg APP=@gis/api .
 # pnpm is installed directly via npm (NOT corepack) at a pinned version, so the
 # build never depends on corepack downloading/verifying a newer pnpm release —
-# that was the silent build failure. --no-frozen-lockfile tolerates drift.
+# that was the silent build failure. Keep PNPM_VERSION in sync with the
+# "packageManager" field in the repo-root package.json.
+#
+# Build scripts (@prisma/client, @prisma/engines, prisma, esbuild, ...) are
+# allow-listed via pnpm.onlyBuiltDependencies in the root package.json. Without
+# that allowlist pnpm >= 10 refuses to run them and exits non-zero
+# (ERR_PNPM_IGNORED_BUILDS), and Prisma's query engine is never placed.
 
 ARG NODE_VERSION=22
 ARG PNPM_VERSION=9.15.0
 
-FROM node:${NODE_VERSION}-alpine AS deps
-ARG APP
+# ── Shared base: OS packages + pnpm (cached once, reused by both stages) ──────
+FROM node:${NODE_VERSION}-alpine AS base
 ARG PNPM_VERSION
 # Alpine's CDN can fail TLS on some hosts, which empties the package index and
 # makes every package look missing. Retry, fall back to the http mirror, and
 # never fail the build for openssl — node:22-alpine already ships libssl3,
 # which is what Prisma actually links against.
-RUN set -eux; \
-    for i in 1 2 3; do apk update && break || sleep 5; done || \
-      (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
-       echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories && \
-       apk update) || true; \
-    for i in 1 2 3; do apk add --no-cache openssl libssl3 && break || sleep 5; done || true; \
-    npm install -g pnpm@${PNPM_VERSION}
-ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
-WORKDIR /app
-COPY . .
-RUN pnpm install --no-frozen-lockfile
-RUN pnpm --filter @gis/database exec prisma generate
-
-FROM node:${NODE_VERSION}-alpine AS runner
-ARG APP
-ARG PNPM_VERSION
-# Alpine's CDN can fail TLS on some hosts, which empties the package index and
-# makes every package look missing. Retry, fall back to the http mirror, and
-# never fail the build for openssl — node:22-alpine already ships libssl3,
-# which is what Prisma actually links against.
+# dumb-init is NOT optional: without a real init as PID 1, SIGTERM is never
+# delivered to the app, so "docker stop" degrades into SIGKILL after 10s and
+# cuts BullMQ jobs / in-flight requests instead of draining them.
 RUN set -eux; \
     for i in 1 2 3; do apk update && break || sleep 5; done || \
       (echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /etc/apk/repositories && \
        echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories && \
        apk update) || true; \
     for i in 1 2 3; do apk add --no-cache openssl libssl3 curl && break || sleep 5; done || apk add --no-cache curl || true; \
+    for i in 1 2 3; do apk add --no-cache dumb-init && break || sleep 5; done; \
     npm install -g pnpm@${PNPM_VERSION}
 ENV PRISMA_CLI_BINARY_TARGETS=linux-musl-openssl-3.0.x
+WORKDIR /app
+
+# ── deps: install + prisma generate ──────────────────────────────────────────
+FROM base AS deps
+ARG APP
+# Warm the pnpm store from the lockfile FIRST so that editing application source
+# does not invalidate the (slow) download layer.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm fetch
+COPY . .
+# --frozen-lockfile: the image must be reproducible; lockfile drift has to fail
+# the build loudly instead of silently resolving something else in production.
+# --offline: everything is already in the store from `pnpm fetch` above.
+RUN set -eux; \
+    test -n "${APP}" || { echo "build-arg APP is required, e.g. --build-arg APP=@gis/api" >&2; exit 1; }; \
+    pnpm install --frozen-lockfile --offline \
+      --filter "${APP}..." \
+      --filter "@gis/database..."
+RUN pnpm --filter @gis/database exec prisma generate
+
+# ── runner ───────────────────────────────────────────────────────────────────
+FROM base AS runner
+ARG APP
 ENV NODE_ENV=production
 ENV APP_FILTER=${APP}
-WORKDIR /app
 COPY --from=deps --chown=node:node /app /app
 USER node
+# api :8080 · telegram-bot :8081 · worker :8082 (documentation only)
+EXPOSE 8080 8081 8082
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "require('http').get({host:'127.0.0.1',port:process.env.PORT||8080,path:'/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))" || exit 1
+ENTRYPOINT ["dumb-init", "--"]
 CMD ["sh", "-c", "exec pnpm --filter \"$APP_FILTER\" start"]

@@ -57,15 +57,19 @@ async function fanOut(productId: string, type: WatchKind, text: string, buttons?
     include: { user: { select: { telegramId: true, notifiable: true } } },
   });
   let sent = 0;
+  const notified: string[] = [];
   for (const r of rows) {
     if (r.user.telegramId && r.user.notifiable) {
       await enqueueTelegramMessage(r.user.telegramId, text, buttons ? { buttons } : {}).catch(() => undefined);
+      notified.push(r.id);
       sent++;
     }
   }
   // One notification per opt-in: clear the list so a second small restock
-  // cannot spam the same people again.
-  await prisma.productWatch.deleteMany({ where: { productId, type } });
+  // cannot spam the same people again. Only the rows we actually notified —
+  // deleting the whole list silently cancelled the subscription of everyone who
+  // had blocked the bot, so they were never told even after coming back.
+  if (notified.length > 0) await prisma.productWatch.deleteMany({ where: { id: { in: notified } } });
   return sent;
 }
 

@@ -7,7 +7,7 @@ import { isCoreError } from "@gis/shared";
 import { z } from "zod";
 import { ApiError, forbidden, notFound } from "../common/errors.js";
 import { DeveloperApiGuard, Scopes, type DeveloperRequest } from "../common/developer.guard.js";
-import { Public } from "../common/permissions.decorator.js";
+import { Public, SkipEnvelope } from "../common/permissions.decorator.js";
 
 /** Every price the API returns is expressed in USDT. */
 function usdtOf(minor: number | null, currency: Currency): string | null {
@@ -111,6 +111,11 @@ export class DeveloperController {
         fromPriceMinor: p.fromPriceMinor,
         onSale: p.onSale,
         inStock: p.inStock,
+        // Same shape the detail endpoint publishes. The ratings were already
+        // being fetched here and then thrown away, so the query ran per request
+        // and no consumer ever saw a rating on a list item.
+        rating: (rat.get(p.id)?.count ?? 0) > 0 ? (rat.get(p.id)?.avg ?? null) : null,
+        reviewCount: rat.get(p.id)?.count ?? 0,
         // true = fulfilled by an upstream supplier; still bought the same way.
         supplierBacked: p.supplierBacked,
         // Order with any of these: POST /orders { "variantId": ... }
@@ -251,8 +256,11 @@ export class DeveloperController {
   @Get("orders/:orderNumber")
   async order(@Param("orderNumber") orderNumber: string, @Req() req: DeveloperRequest) {
     const ownerId = req.apiKey?.ownerUserId ?? null;
+    // Never fall back to an unscoped lookup: an unlinked key must not be able to
+    // read somebody else's order by guessing its number.
+    if (!ownerId) throw forbidden("This API key isn't linked to a user account.");
     const o = await prisma.order.findFirst({
-      where: { orderNumber, ...(ownerId ? { userId: ownerId } : {}) },
+      where: { orderNumber, userId: ownerId },
       include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true } } },
     });
     if (!o) throw notFound("Order");
@@ -568,12 +576,14 @@ export class DeveloperDocsController {
   }
 
   @Get()
+  @SkipEnvelope()
   @Header("Content-Type", "text/html; charset=utf-8")
   docsRoot(): string {
     return docsPage();
   }
 
   @Get("guide")
+  @SkipEnvelope()
   @Header("Content-Type", "text/html; charset=utf-8")
   guide(): string {
     return docsPage();
@@ -626,6 +636,7 @@ export class DeveloperDocsController {
 
   /** Plain-text docs: easiest thing for a scraper or an LLM to read. */
   @Get("docs.txt")
+  @SkipEnvelope()
   @Header("Content-Type", "text/plain; charset=utf-8")
   docsText(): string {
     const base = `${(loadConfig().PUBLIC_API_URL ?? "").replace(/\/$/, "")}/api/v1/developer`;

@@ -33,7 +33,10 @@ export interface SpinConfig {
 
 // Enabled by default (requested). Rewards stay bounded by REWARD_CAP_BP: with
 // these targets the most anyone can earn per challenge is $1 / $2 / $5.
-const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14, minSpendMinor: 1_000, maxRewardMinor: 1, maxSpinsPerDay: 3 };
+// maxRewardMinor is MINOR units, and it clamps every per-purchase spin
+// (`Math.min(cfg.maxRewardMinor, ...)`). At 1 it paid exactly one paise/cent
+// on every win; 500 is 2% of the largest target, i.e. the $5 stated above.
+const DEFAULTS: SpinConfig = { enabled: true, targetsMinor: [5_000, 10_000, 25_000], rewardBp: 200, expiryDays: 14, minSpendMinor: 1_000, maxRewardMinor: 500, maxSpinsPerDay: 3 };
 
 export async function getSpinConfig(): Promise<SpinConfig> {
   const row = await prisma.setting.findUnique({ where: { key: SETTING } }).catch(() => null);

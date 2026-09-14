@@ -47,9 +47,20 @@ export function startWebhookServer(port: number): Server {
     const providerName = match[1]!;
     const chunks: Buffer[] = [];
     let size = 0;
+    // Set once the request is finished with, so a late `data` chunk cannot write
+    // a second set of headers and a still-arriving `end` cannot run the handler.
+    let done = false;
+    // A client that vanishes mid-upload (ECONNRESET) emits `error` on the
+    // request stream. With no listener that is an UNHANDLED 'error' event, which
+    // takes the whole worker — queues, cron and all — down with it.
+    req.on("error", () => {
+      done = true;
+    });
     req.on("data", (chunk: Buffer) => {
+      if (done) return;
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
+        done = true;
         res.writeHead(413);
         res.end();
         req.destroy();
@@ -58,6 +69,8 @@ export function startWebhookServer(port: number): Server {
       chunks.push(chunk);
     });
     req.on("end", () => {
+      if (done) return;
+      done = true;
       void (async () => {
         const provider = getProvider(providerName);
         const providerEnum = PROVIDER_ENUM[providerName];
@@ -88,8 +101,19 @@ export function startWebhookServer(port: number): Server {
             });
             await enqueueFulfillment(row.id);
           } catch (e) {
-            // P2002 = duplicate (provider,eventId) → idempotent no-op.
+            // P2002 = duplicate (provider,eventId).
             if (!(e instanceof Error && "code" in e && (e as { code?: string }).code === "P2002")) throw e;
+            // NOT a plain no-op: the row can exist while the enqueue that should
+            // have followed it never happened (Redis down, worker killed between
+            // the two writes), and the gateway's redelivery is the only chance
+            // left to notice. Treating it as "already handled" is how a PAID
+            // order is never fulfilled. Re-enqueue instead — the job id is
+            // derived from the event, so a genuine duplicate is still a no-op.
+            const existing = await prisma.webhookEvent.findUnique({
+              where: { provider_eventId: { provider: providerEnum, eventId: event.eventId } },
+              select: { id: true, processedAt: true },
+            });
+            if (existing && !existing.processedAt) await enqueueFulfillment(existing.id);
           }
         }
         res.writeHead(200, { "content-type": "application/json" });
@@ -98,7 +122,9 @@ export function startWebhookServer(port: number): Server {
         // eslint-disable-next-line no-console
         console.error("webhook handling error", { error: String(e) });
         if (!res.headersSent) res.writeHead(500);
-        res.end();
+        // The 200 may already have gone out (a throw from a later event in the
+        // batch); ending a finished response throws ERR_STREAM_ALREADY_FINISHED.
+        if (!res.writableEnded) res.end();
       });
     });
   });

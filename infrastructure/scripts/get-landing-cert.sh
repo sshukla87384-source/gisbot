@@ -4,8 +4,21 @@
 # stack already running (nginx serves the ACME challenge over :80).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-NGINX_DOMAIN="$(grep -E '^NGINX_DOMAIN=' .env | cut -d= -f2-)"
-EMAIL="$(grep -E '^SEED_ADMIN_EMAIL=' .env | cut -d= -f2- || echo admin@"$NGINX_DOMAIN")"
+# `grep ... | cut ...` reports CUT's status, so a missing key silently yielded an
+# EMPTY value and the `|| echo <fallback>` could never fire.
+env_value() {
+  local v
+  v="$(grep -E "^$1=" .env | head -n1 | cut -d= -f2- || true)"
+  v="${v%%#*}"                      # drop any inline comment
+  v="${v//[[:space:]]/}"
+  v="${v//\"/}"; v="${v//\'/}"
+  printf '%s' "$v"
+}
+
+NGINX_DOMAIN="$(env_value NGINX_DOMAIN)"
+[ -n "$NGINX_DOMAIN" ] || { echo "ERROR: set NGINX_DOMAIN in .env"; exit 1; }
+EMAIL="$(env_value SEED_ADMIN_EMAIL)"
+[ -n "$EMAIL" ] || EMAIL="admin@${NGINX_DOMAIN}"
 COMPOSE="docker compose --env-file .env -f infrastructure/docker/compose.prod.yml"
 
 echo "==> Requesting certificate for ${NGINX_DOMAIN} and www.${NGINX_DOMAIN}"

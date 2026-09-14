@@ -20,7 +20,8 @@ interface Product {
 const STATUSES = ["DRAFT", "ACTIVE", "PAUSED", "ARCHIVED"];
 
 // datetime-local <-> ISO helpers
-const toLocal = (iso: string | null) => (iso ? new Date(iso).toISOString().slice(0, 16) : "");
+const toLocal = (iso: string | null) =>
+  iso ? new Date(new Date(iso).getTime() - new Date(iso).getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : "";
 const toIso = (local: string) => (local ? new Date(local).toISOString() : "");
 
 export default function ProductDetail() {

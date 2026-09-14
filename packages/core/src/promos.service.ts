@@ -17,6 +17,7 @@ const DEFAULTS: PromoFlags = { spin: true, referral: true, loyalty: true, cashba
 
 let cache: PromoFlags = DEFAULTS;
 let loadedAt = 0;
+let refreshing: Promise<PromoFlags> | null = null;
 const TTL = 30_000;
 
 export async function getPromoFlags(): Promise<PromoFlags> {
@@ -39,6 +40,15 @@ export async function getPromoFlags(): Promise<PromoFlags> {
 
 /** Synchronous read of the cached flags, for hot paths. */
 export function promoFlagsCached(): PromoFlags {
+  // Refresh in the background once the cache is stale. The worker primes this
+  // once at boot and never calls getPromoFlags again, so without this a switch
+  // turned off in the panel never reached the process that credits the money —
+  // the kill-switch stopped working in exactly the place it exists to guard.
+  // One refresh at a time, so a burst of orders cannot fan out into a query each.
+  if (Date.now() - loadedAt >= TTL && !refreshing) {
+    refreshing = getPromoFlags();
+    void refreshing.catch(() => undefined).finally(() => { refreshing = null; });
+  }
   return cache;
 }
 

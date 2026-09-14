@@ -4,6 +4,8 @@ dist/
 .turbo/
 coverage/
 *.log
+*.tsbuildinfo
+build-log.txt
 .env
 .env.*
 !.env.example

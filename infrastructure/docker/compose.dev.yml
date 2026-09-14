@@ -1,3 +1,7 @@
+# Local development data stores only (the apps run on the host via `pnpm dev`).
+# Ports are bound to 127.0.0.1 on purpose: a 0.0.0.0 bind publishes Postgres and
+# Redis on every interface of the machine — including a public VPS IP — and both
+# use trivial development credentials.
 name: gis-dev
 services:
   postgres:
@@ -7,7 +11,7 @@ services:
       POSTGRES_PASSWORD: gis
       POSTGRES_DB: gis
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,7 +24,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:

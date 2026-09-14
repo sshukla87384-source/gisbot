@@ -1,7 +1,20 @@
-import { prisma } from "@gis/database";
+import { prisma, type Currency } from "@gis/database";
 import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { adjustWallet } from "../wallet/wallet.service.js";
+import { convertMinor } from "../fx.js";
 import { enqueueTelegramMessage } from "../queues.js";
+
+/**
+ * A refund is computed in the ORDER's currency, but `adjustWallet` always moves
+ * the WALLET's own. They differ the moment a customer switches currency after
+ * buying, and crediting the raw number then paid out 100x. Returns what to
+ * credit and the currency to say it in.
+ */
+async function creditForOrder(userId: string, amountMinor: number, orderCurrency: string): Promise<{ minor: number; currency: string }> {
+  const wal = await prisma.wallet.findUnique({ where: { userId }, select: { currency: true } });
+  if (!wal || wal.currency === orderCurrency) return { minor: amountMinor, currency: orderCurrency };
+  return { minor: convertMinor(amountMinor, orderCurrency as Currency, wal.currency), currency: wal.currency };
+}
 
 /**
  * Auto-refund orders stuck in AWAITING_STOCK: an item went out of stock after
@@ -36,10 +49,11 @@ export async function autoRefundStuckStock(olderThanHours = 6, limit = 50): Prom
       ? paidMinor
       : Math.min(paidMinor, Math.round((paidMinor * undeliveredValue) / subtotal));
     try {
+      const credit = await creditForOrder(o.user.id, refundMinor, o.currency);
       if (refundMinor > 0) {
         await adjustWallet({
           userId: o.user.id,
-          amountMinor: BigInt(refundMinor),
+          amountMinor: BigInt(credit.minor),
           type: "REFUND",
           note: `Auto-refund — out of stock (order ${o.orderNumber})`,
           idempotencyKey: `refund:stock:${o.id}`,
@@ -52,7 +66,7 @@ export async function autoRefundStuckStock(olderThanHours = 6, limit = 50): Prom
       if (o.user.telegramId !== null && refundMinor > 0) {
         await enqueueTelegramMessage(
           o.user.telegramId,
-          `↩️ <b>Refund issued</b>\nSome items in order <b>${o.orderNumber}</b> went out of stock, so we've credited <b>${formatMinor(refundMinor, o.currency as CurrencyCode)}</b> back to your wallet. We're sorry for the inconvenience! 🙏`,
+          `↩️ <b>Refund issued</b>\nSome items in order <b>${o.orderNumber}</b> went out of stock, so we've credited <b>${formatMinor(credit.minor, credit.currency as CurrencyCode)}</b> back to your wallet. We're sorry for the inconvenience! 🙏`,
         );
       }
       refunded++;
@@ -76,11 +90,16 @@ export async function adminRefundOrder(orderId: string, adminId?: string): Promi
   // part of this order under a DIFFERENT idempotency key, so a full refund on
   // top of it pays out more than the order was ever worth.
   if (["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED", "EXPIRED"].includes(order.status)) return { ok: false, reason: "ALREADY" };
-  const paidMinor = order.walletUsedMinor + order.totalMinor; // exactly what was paid (net of discount)
+  // `totalMinor` is what is owed through the gateway/UPI/Binance — it is only
+  // money we HOLD once the order was actually paid. Refunding it on a still
+  // PENDING_PAYMENT order paid out cash that never arrived; the wallet portion
+  // was debited at order creation, so that part is always refundable.
+  const paidMinor = order.walletUsedMinor + (order.paidAt !== null ? order.totalMinor : 0);
+  const credit = await creditForOrder(order.user.id, paidMinor, order.currency);
   if (paidMinor > 0) {
     await adjustWallet({
       userId: order.user.id,
-      amountMinor: BigInt(paidMinor),
+      amountMinor: BigInt(credit.minor),
       type: "REFUND",
       note: `Refund by admin (order ${order.orderNumber})`,
       actorId: adminId,
@@ -91,8 +110,8 @@ export async function adminRefundOrder(orderId: string, adminId?: string): Promi
   if (order.user.telegramId !== null && paidMinor > 0) {
     await enqueueTelegramMessage(
       order.user.telegramId,
-      `↩️ <b>Refund issued</b>\nWe've credited <b>${formatMinor(paidMinor, order.currency as CurrencyCode)}</b> back to your wallet for order <b>${order.orderNumber}</b>. Thank you for your patience! 🙏`,
+      `↩️ <b>Refund issued</b>\nWe've credited <b>${formatMinor(credit.minor, credit.currency as CurrencyCode)}</b> back to your wallet for order <b>${order.orderNumber}</b>. Thank you for your patience! 🙏`,
     );
   }
-  return { ok: true, refundedMinor: paidMinor, currency: order.currency };
+  return { ok: true, refundedMinor: credit.minor, currency: credit.currency };
 }

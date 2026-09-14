@@ -196,12 +196,16 @@ async function main(): Promise<void> {
         }
         return;
       }
-      await resend.emails.send({
+      // Resend REPORTS failures, it does not throw them: a rejected send came
+      // back as a resolved promise carrying `error`, the job was marked done and
+      // the mail was silently never sent. Throw so BullMQ retries it.
+      const { error } = await resend.emails.send({
         from: config.EMAIL_FROM,
         to: job.data.to,
         subject: job.data.subject,
         html: job.data.html,
       });
+      if (error) throw new Error(`resend: ${error.message}`);
     },
     { connection, concurrency: 5 },
   );
@@ -211,7 +215,21 @@ async function main(): Promise<void> {
       // eslint-disable-next-line no-console
       console.error("job failed", { queue: w.name, jobId: job?.id, error: String(err) });
     });
+    // A Worker is an EventEmitter: a connection drop emits 'error', and with no
+    // listener Node rethrows it as an uncaught exception. One Redis hiccup was
+    // enough to kill the whole worker process.
+    w.on("error", (err) => {
+      // eslint-disable-next-line no-console
+      console.error("worker error", { queue: w.name, error: String(err) });
+    });
   }
+
+  // Same reasoning one level up: an unhandled rejection anywhere (a cron tick, a
+  // stray .then) terminates the process by default under Node 22.
+  process.on("unhandledRejection", (reason) => {
+    // eslint-disable-next-line no-console
+    console.error("unhandled rejection", { error: String(reason) });
+  });
 
   const server = startWebhookServer(config.PORT);
   const timers = startCronJobs();
@@ -219,10 +237,18 @@ async function main(): Promise<void> {
   // eslint-disable-next-line no-console
   console.log("worker: queues + webhooks + cron running");
 
+  // Docker sends SIGTERM and follows it with SIGKILL: a second signal arriving
+  // mid-drain used to start a second shutdown, closing workers twice.
+  let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     for (const t of timers) clearInterval(t);
     server.close();
     await Promise.allSettled([fulfillmentWorker.close(), outboxWorker.close(), emailWorker.close()]);
+    // The queue connection is shared by every Queue and Worker; without this the
+    // in-flight commands are cut mid-write by process.exit instead of drained.
+    await connection.quit().catch(() => undefined);
     await prisma.$disconnect().catch(() => undefined);
     process.exit(0);
   };

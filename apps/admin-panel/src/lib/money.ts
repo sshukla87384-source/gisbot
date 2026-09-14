@@ -1,15 +1,20 @@
+/** Minor-unit decimals per currency — must match packages/shared/src/money.ts. */
+const DECIMALS: Record<string, number> = { INR: 2, USD: 2, XTR: 0 };
+
 /** Format an integer minor-unit amount (paise/cents) as a currency string. */
 export function formatMinor(minor: number | null | undefined, currency: string | null | undefined): string {
-  const amount = (minor ?? 0) / 100;
   const code = currency && currency.length === 3 ? currency : "INR";
+  const decimals = DECIMALS[code] ?? 2;
+  const amount = (minor ?? 0) / 10 ** decimals;
   try {
     return new Intl.NumberFormat(code === "INR" ? "en-IN" : "en-US", {
       style: "currency",
       currency: code,
-      maximumFractionDigits: 2,
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
     }).format(amount);
   } catch {
-    return `${amount.toFixed(2)} ${code}`;
+    return `${amount.toFixed(decimals)} ${code}`;
   }
 }
 
