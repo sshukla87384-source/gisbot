@@ -41,6 +41,7 @@ import {
   greetName,
   toUsdt,
   type CartView,
+  stripLeadingEmoji,
 } from "@gis/core";
 import { prisma, type Currency } from "@gis/database";
 import { loadConfig } from "@gis/config";
@@ -52,6 +53,18 @@ import { backToMenuRow, navRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText,
 import { LOCALES, t } from "./i18n.js";
 import { header, bold, num, HR, e } from "./premium.js";
 import { sbtn } from "./keyboard.js";
+
+/**
+ * A product label with its emoji shown exactly ONCE.
+ *
+ * The emoji can live in two places — the icon field and the front of the name —
+ * and the buttons used to print both, so a product the operator gave one emoji
+ * came out as "🈲🎬 Youtube 3 Months". When an icon is set it wins and the name's
+ * own leading emoji is dropped; with no icon the name keeps whatever it has.
+ */
+function withIcon(iconEmoji: string | null | undefined, name: string): string {
+  return iconEmoji ? `${iconEmoji} ${stripLeadingEmoji(name)}` : name;
+}
 
 export interface View {
   text: string;
@@ -85,8 +98,7 @@ export async function soldOutView(user: BotUser, page: number): Promise<View> {
   const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale, soldOutOnly: true });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
-    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
-    kb.add(sbtn(`${icon}${p.name}`, cb("shp", "prod", p.id), "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(withIcon(p.iconEmoji, p.name), cb("shp", "prod", p.id), "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "soldout", result.page, result.pages);
   kb.row().text("🛍 Back to shop", cb("shp", "home", 1));
@@ -108,9 +120,8 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
-    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    const label = `${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`;
+    const label = `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`;
     kb.add(sbtn(label, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
@@ -146,9 +157,8 @@ export async function productListView(
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
-    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
@@ -162,9 +172,8 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
-    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   kb.row().add(sbtn("🔍 Search again", cb("shp", "find"), "primary")).row();
@@ -236,7 +245,9 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     hook,
     "",
     `📦 ${bold("Product")}`,
-    `${p.iconEmoji ? p.iconEmoji + " " : ""}${translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name))}`,
+    p.iconEmoji
+      ? `${p.iconEmoji} ${stripLeadingEmoji(translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name)))}`
+      : (translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name))),
     "",
     `💎 ${bold("Price")}`,
     priceStr,
@@ -680,10 +691,9 @@ export async function categoryProductsView(user: BotUser, categoryId: string, pa
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
-    const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
     const sale = p.onSale ? "🔥 " : "";
     kb.add(sbtn(
-      `${sale}${icon}${outMark(p)}${p.name} — ${price}${stockTag(p)}`,
+      `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`,
       cb("shp", "prod", p.id),
       p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger",
       p.iconCustomEmojiId ?? undefined,
@@ -876,7 +886,7 @@ export async function resellerPricesView(user: BotUser): Promise<View> {
   for (const r of rows) {
     const shown = r.myPriceMinor ?? r.basePriceMinor;
     kb.text(
-      `${r.myPriceMinor !== null ? "⭐ " : ""}${r.iconEmoji ? r.iconEmoji + " " : ""}${r.name.slice(0, 26)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
+      `${r.myPriceMinor !== null ? "⭐ " : ""}${withIcon(r.iconEmoji, r.name).slice(0, 28)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
       cb("api", "setprice", r.productId),
     ).row();
   }
@@ -1094,6 +1104,13 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
       kb.text(`${mark} View${unit}${tail || ` ${it.productName.slice(0, 14)}`}`, cb("lic", "view", it.orderItemId)).row();
     }
     if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
+  }
+  // A file beats scrolling once an order has more than a couple of units, and
+  // the un-numbered copy is the one a customer pastes into a password manager
+  // or a script — the "1) 2) 3)" prefixes are noise there.
+  if (items.length > 1) {
+    kb.add(sbtn("📄 Download all (.txt)", cb("ord", "txt", orderId), "primary")).row();
+    kb.add(sbtn("📄 Download — no numbering", cb("ord", "txtp", orderId), "primary")).row();
   }
   kb.add(sbtn("⚡ Buy this again", cb("ord", "again", orderId), "success")).row();
   kb.add(sbtn("⭐ Rate this order", cb("rev", "new", orderId), "primary")).row();
@@ -1545,7 +1562,7 @@ export async function dealsView(user: BotUser): Promise<View> {
   for (const d of items) {
     const tag = d.tag === "SALE" ? "🔥" : d.tag === "NEW" ? "🆕" : "🔔";
     const price = d.fromPriceMinor === null ? "—" : fmt(d.fromPriceMinor, user.currency);
-    kb.add(sbtn(`${tag} ${d.iconEmoji ? `${d.iconEmoji} ` : ""}${d.name.slice(0, 22)} — ${price}`, cb("shp", "prod", d.id), d.tag === "SALE" ? "danger" : "success")).row();
+    kb.add(sbtn(`${tag} ${withIcon(d.iconEmoji, d.name).slice(0, 24)} — ${price}`, cb("shp", "prod", d.id), d.tag === "SALE" ? "danger" : "success")).row();
   }
   kb.add(sbtn("🛍 All products", cb("shp", "home", 1), "primary")).row();
   navRow(kb, cb("mnu", "home"));

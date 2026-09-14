@@ -167,7 +167,7 @@ export async function listOrderItems(userId: string, orderId: string): Promise<V
 export interface RevealedDelivery {
   productName: string;
   variantName: string;
-  payload: { kind: string; key?: string; username?: string; password?: string; expiresAt?: string };
+  payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string };
   /** True when this unit has been superseded — the value no longer works. */
   replaced?: boolean;
 }
@@ -176,6 +176,25 @@ export interface RevealedDelivery {
  * Re-reveal a delivered secret to its owner. Ownership enforced in the query;
  * every reveal is audit-logged (Security doc §4).
  */
+/**
+ * The header facts for one order: its number, what it came to, and in what
+ * currency. `subtotal - discount` is used rather than wallet+total+bnpl because
+ * it is the one figure that is the same on every rail — a BNPL order carries
+ * its money in bnplMinor and leaves totalMinor at 0, which is how Pay Later
+ * orders came to be shown as zero elsewhere.
+ */
+export async function getOrderSummary(
+  userId: string,
+  orderId: string,
+): Promise<{ orderNumber: string; totalMinor: number; currency: string } | null> {
+  const o = await prisma.order.findFirst({
+    where: { id: orderId, userId },
+    select: { orderNumber: true, subtotalMinor: true, discountMinor: true, currency: true },
+  });
+  if (!o) return null;
+  return { orderNumber: o.orderNumber, totalMinor: Math.max(0, o.subtotalMinor - o.discountMinor), currency: o.currency };
+}
+
 export async function revealOrderDeliveries(userId: string, orderId: string): Promise<RevealedDelivery[]> {
   const items = await prisma.orderItem.findMany({
     where: { orderId, order: { userId }, fulfilledAt: { not: null }, deliveryPayloadEncrypted: { not: null } },

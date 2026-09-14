@@ -76,6 +76,10 @@ export async function vipAnimation(ctx: Context): Promise<void> {
       if (ctx.chat) await ctx.api.editMessageText(ctx.chat.id, msgId, frames[i]!, { parse_mode: "HTML" }).catch(() => undefined);
     }
     await sleep(700);
+    // The animation has played; the real receipt and the delivery follow it.
+    // Leaving "Order Completed Successfully" behind just pushes the customer's
+    // keys further up the chat.
+    if (ctx.chat && msgId) await ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
   } catch {
     /* animation is best-effort */
   }

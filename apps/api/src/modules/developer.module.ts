@@ -1,4 +1,4 @@
-import { addToCart, checkoutWithWallet, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
+import { addToCart, checkoutWithWallet, checkoutWithBnpl, getBnplStatus, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { Body, Controller, Get, Header, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
@@ -40,6 +40,12 @@ function currencyOf(_q?: unknown): Currency {
 const purchaseSchema = z.object({
   variantId: z.string().min(1),
   quantity: z.number().int().min(1).max(99).optional().default(1),
+  /**
+   * How to pay. The API only ever offered the wallet, so a partner with a Pay
+   * Later limit could use it in the bot and not through their integration.
+   * Defaults to "wallet", so existing clients are unaffected.
+   */
+  payWith: z.enum(["wallet", "bnpl"]).optional().default("wallet"),
 });
 
 @ApiTags("developer")
@@ -338,7 +344,11 @@ export class DeveloperController {
   async balance(@Req() req: DeveloperRequest) {
     const userId = req.apiKey?.ownerUserId;
     if (!userId) throw forbidden("This API key isn't linked to a user account.");
-    const [w, ledger] = await Promise.all([getWallet(userId), getLedger(userId, 1, 10)]);
+    const [w, ledger, bnpl] = await Promise.all([
+      getWallet(userId),
+      getLedger(userId, 1, 10),
+      getBnplStatus(userId).catch(() => null),
+    ]);
     const native = Number(w.balanceMinor);
     const usdt = toUsdt(native, w.currency);
     return {
@@ -349,6 +359,19 @@ export class DeveloperController {
       nativeBalanceMinor: native,
       nativeCurrency: w.currency,
       rate: { inrPerUsdt: usdtRate("INR") },
+      // Pay Later, so an integration can see the credit it may spend with
+      // POST /orders { "payWith": "bnpl" } instead of discovering it by failure.
+      bnpl: bnpl
+        ? {
+            availableUsdt: toUsdt(bnpl.availableMinor, bnpl.currency),
+            limitUsdt: toUsdt(bnpl.limitMinor, bnpl.currency),
+            outstandingUsdt: toUsdt(bnpl.outstandingMinor, bnpl.currency),
+            availableMinor: bnpl.availableMinor,
+            limitMinor: bnpl.limitMinor,
+            outstandingMinor: bnpl.outstandingMinor,
+            nativeCurrency: bnpl.currency,
+          }
+        : null,
       ledger: ledger.entries.map((e) => ({
         type: e.type,
         amountUsdt: toUsdt(Number(e.amountMinor), w.currency),
@@ -373,7 +396,7 @@ export class DeveloperController {
     if (!userId) throw forbidden("This API key isn't linked to a user account, so it can't purchase.");
     const parsed = purchaseSchema.safeParse(body);
     if (!parsed.success) throw new ApiError(400, "VALIDATION_FAILED", parsed.error.issues[0]?.message ?? "Invalid body.");
-    const { variantId, quantity } = parsed.data;
+    const { variantId, quantity, payWith } = parsed.data;
     const idemRaw = req.headers["idempotency-key"];
     const idem = (Array.isArray(idemRaw) ? idemRaw[0] : idemRaw)?.trim();
     const idemKey = idem ? `apiidem:${req.apiKey?.id}:${idem}` : null;
@@ -387,7 +410,9 @@ export class DeveloperController {
     try {
       await clearCart(userId);
       await addToCart(userId, variantId, quantity);
-      const r = await checkoutWithWallet(userId, "API");
+      const r = payWith === "bnpl"
+        ? await checkoutWithBnpl(userId, "API")
+        : await checkoutWithWallet(userId, "API");
       if (idemKey) await getRedis().set(idemKey, r.orderNumber, "EX", 86400);
 
       let items: Array<{ product: string; variant: string; kind: string; secret: unknown; activationGuide?: string | null }> =
@@ -672,6 +697,7 @@ export class DeveloperDocsController {
       '  price: "variants[].price" / "variants[].priceUsdt"  (USDT, 2dp string)',
       '  price (raw): "variants[].priceMinor" + "nativeCurrency"  (integer MINOR units)',
       '  balance: "balance" / "balanceUsdt"  (USDT, 2dp string; currency is always "USDT")',
+      '  pay later: "bnpl.availableUsdt"  (spend it with POST /orders {"payWith":"bnpl"})',
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
       '  stock (display): "variants[].stockText"  (the number, or "Unlimited")',
       '  variant label: "variants[].label"  (product name, or "Product — Variant")',

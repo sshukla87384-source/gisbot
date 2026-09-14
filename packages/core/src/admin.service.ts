@@ -1193,13 +1193,15 @@ export async function getSalesDashboard(): Promise<SalesDashboard> {
 
   const paid7d = await prisma.order.findMany({
     where: { paidAt: { gte: start7d }, status: { in: [...PAID_STATUSES] } },
-    select: { currency: true, walletUsedMinor: true, totalMinor: true, paidAt: true },
+    select: { currency: true, walletUsedMinor: true, totalMinor: true, bnplMinor: true, paidAt: true },
   });
   const revenueTodayMinor: Record<string, number> = {};
   const revenue7dMinor: Record<string, number> = {};
   let ordersToday = 0;
   for (const o of paid7d) {
-    const val = o.walletUsedMinor + o.totalMinor;
+    // bnplMinor too — a Pay Later sale is booked revenue the customer owes,
+    // and without it every BNPL order counted as zero.
+    const val = o.walletUsedMinor + o.totalMinor + o.bnplMinor;
     revenue7dMinor[o.currency] = (revenue7dMinor[o.currency] ?? 0) + val;
     if (o.paidAt && o.paidAt >= startToday) {
       revenueTodayMinor[o.currency] = (revenueTodayMinor[o.currency] ?? 0) + val;

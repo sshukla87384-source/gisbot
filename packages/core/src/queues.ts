@@ -263,3 +263,83 @@ export async function enqueueAdminAlert(text: string, buttons?: OutboxButton[]):
     // Redis unavailable — the configured channel/ids (if any) still got it.
   }
 }
+
+/** Telegram's hard cap on one text message. */
+export const TELEGRAM_TEXT_MAX = 4096;
+
+/** The inline tags Telegram actually understands — everything else is content. */
+const TG_TAGS = "b|strong|i|em|u|ins|s|strike|del|a|code|pre|span|tg-spoiler|tg-emoji|blockquote";
+const TG_TAG_RE = new RegExp(`</?(?:${TG_TAGS})(?:\\s[^<>]*)?>`, "gi");
+
+/**
+ * Strip Telegram markup and undo the entity escaping, leaving the CONTENT.
+ *
+ * A blanket `<[^>]+>` strip cannot be used here: a license key like
+ * `ABCD-<XY>-Z` is legitimate content and would be eaten, handing the customer
+ * a corrupted key. So only the tags Telegram defines are removed, and only then
+ * are `&amp;`/`&lt;`/`&gt;`/`&quot;` turned back into the characters the
+ * customer is supposed to see.
+ */
+export function stripTelegramHtml(html: string): string {
+  return html
+    .replace(TG_TAG_RE, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/** Tags that may legitimately stay open across a line (everything but <a>/<tg-emoji>). */
+const REOPENABLE = ["blockquote", "pre", "code", "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "span", "tg-spoiler"];
+
+/**
+ * Split an HTML message into Telegram-sized parts WITHOUT cutting a tag in half.
+ *
+ * Slicing every 4000 characters is what produced `...">Tap here to open your
+ * link</a></b>` in a customer's chat: the cut landed inside an anchor, Telegram
+ * rejected the part as unparseable, and the fallback then posted the raw markup.
+ * Splitting on line boundaries keeps every tag whole, and any formatting still
+ * open at a cut is closed and reopened so each part parses on its own.
+ */
+export function splitTelegramHtml(html: string, max = TELEGRAM_TEXT_MAX): string[] {
+  if (html.length <= max) return [html];
+  const parts: string[] = [];
+  let buf = "";
+  let open: string[] = [];
+
+  const openTagsOf = (chunk: string): string[] => {
+    const stack: string[] = [];
+    for (const m of chunk.matchAll(new RegExp(`</?(${TG_TAGS})(?:\\s[^<>]*)?>`, "gi"))) {
+      const name = (m[1] ?? "").toLowerCase();
+      if (!REOPENABLE.includes(name)) continue;
+      if (m[0]!.startsWith("</")) { const i = stack.lastIndexOf(name); if (i >= 0) stack.splice(i, 1); }
+      else stack.push(name);
+    }
+    return stack;
+  };
+
+  const flush = (): void => {
+    if (!buf) return;
+    const stillOpen = openTagsOf(`${open.map((t) => `<${t}>`).join("")}${buf}`);
+    parts.push(`${open.map((t) => `<${t}>`).join("")}${buf}${[...stillOpen].reverse().map((t) => `</${t}>`).join("")}`);
+    open = stillOpen;
+    buf = "";
+  };
+
+  for (const line of html.split("\n")) {
+    // A single line longer than the cap has no safe tag boundary — hand it to
+    // the caller as plain content rather than emitting a part that cannot parse.
+    if (line.length > max) {
+      flush();
+      const plain = stripTelegramHtml(line);
+      for (let i = 0; i < plain.length; i += max) parts.push(plain.slice(i, i + max));
+      continue;
+    }
+    const reopenCost = open.reduce((n, t) => n + t.length * 2 + 5, 0);
+    if (buf && reopenCost + buf.length + 1 + line.length > max) flush();
+    buf = buf ? `${buf}\n${line}` : line;
+  }
+  flush();
+  return parts.filter((p) => p.trim() !== "");
+}

@@ -7,6 +7,7 @@ import {
   checkoutWithBnpl,
   repayBnpl,
   greetName,
+  comeBackMessage,
   applyCouponToCart,
   removeCouponFromCart,
   couponReason,
@@ -76,6 +77,7 @@ import {
   splitCredential,
   repairAccountPair,
   revealOrderDeliveries,
+  getOrderSummary,
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
@@ -85,6 +87,7 @@ import {
   rememberPaymentPrompt,
   rememberChatClutter,
   clearChatClutter,
+  clearPaymentPrompts,
   registerPostTarget,
   removePostTargetByChat,
   resolveUserByTelegramId,
@@ -965,18 +968,29 @@ export function createBot(): Bot<Ctx> {
       const orderId = ctx.session.upiOrderId ?? "";
       const ref = ctx.message.text.trim().slice(0, 64);
       if (!orderId) return ctx.reply("That checkout expired — please start again from your 🛒 Cart.");
+      // Everything in this back-and-forth — the prompts, the retries, the
+      // customer's own pasted UTR, the receipt — belongs to THIS order and is
+      // clutter the moment it resolves. Recording each one lets whatever
+      // finishes the order (delivery, cancellation, expiry) sweep them away.
+      const trackPay = async (msg?: { message_id: number } | null): Promise<void> => {
+        if (msg && ctx.chat) await rememberPaymentPrompt(orderId, ctx.chat.id, msg.message_id).catch(() => undefined);
+      };
+      await trackPay(ctx.message);
       // A UPI UTR/RRN is exactly 12 digits. The old check took any 6+ characters.
       const digits = ref.replace(/\D/g, "");
       if (digits.length !== 12) {
         ctx.session.awaiting = "upi_ref"; // keep waiting instead of dropping the order
-        return ctx.reply(
+        const retry = await ctx.reply(
           "🔎 That doesn't look like a <b>UTR</b>. Open your UPI app → the payment → copy the <b>12-digit</b> UTR / RRN / Transaction ID and paste it here.",
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid") },
         );
+        await trackPay(retry);
+        return retry;
       }
 
       // Visible progress while the checks run, like a card terminal.
       const progress = await ctx.reply("🔄 <b>Verifying your payment…</b>\n<code>▰▱▱▱▱</code>", { parse_mode: "HTML" });
+      await trackPay(progress);
       const step = async (bar: string, text: string): Promise<void> => {
         await ctx.api.editMessageText(progress.chat.id, progress.message_id, `${text}\n<code>${bar}</code>`, { parse_mode: "HTML" })
           .catch(() => undefined);
@@ -1028,7 +1042,7 @@ export function createBot(): Bot<Ctx> {
       await step("▰▰▰▰▰", "✅ <b>Reference accepted</b>");
       const ref2 = digits;
       if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref2}.`).catch(() => undefined);
-      return ctx.reply(
+      const receipt = await ctx.reply(
         [
           "🧾 <b>Thanks — UTR received!</b>",
           "",
@@ -1038,6 +1052,8 @@ export function createBot(): Bot<Ctx> {
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
       );
+      await trackPay(receipt);
+      return receipt;
     }
     if (awaiting === "wallet_free_txn") {
       const txn = ctx.message.text.trim().slice(0, 128);
@@ -1698,15 +1714,26 @@ export function createBot(): Bot<Ctx> {
             await ctx.api.deleteMessage(ctx.chat!.id, ctx.session.upiQrMsgId).catch(() => undefined);
             ctx.session.upiQrMsgId = undefined;
           }
+          const cancelledOrder = ctx.session.upiOrderId;
           ctx.session.upiOrderId = undefined;
-          await ctx.reply("✖️ Payment cancelled. Your order is still in 📦 My orders if you want to try again.");
+          ctx.session.awaiting = undefined;
+          // The payment card and the whole UTR conversation are dead weight now.
+          if (cancelledOrder) await clearPaymentPrompts(cancelledOrder).catch(() => undefined);
+          await ctx.reply(comeBackMessage(user), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🛍 Pick it up again", cb("shp", "home", 1)).row()
+              .text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home"),
+          });
           break;
         }
         case "ord:upipaid": {
           await ctx.answerCallbackQuery();
-          if (!ctx.session.upiOrderId) { await ctx.reply("This checkout expired. Please start again from your cart."); break; }
+          const payOrderId = ctx.session.upiOrderId;
+          if (!payOrderId) { await ctx.reply("This checkout expired. Please start again from your cart."); break; }
           ctx.session.awaiting = "upi_ref";
-          await ctx.reply("🔎 Paste your UPI <b>reference / UTR number</b>:", { parse_mode: "HTML" });
+          const ask = await ctx.reply("🔎 Paste your UPI <b>reference / UTR number</b>:", { parse_mode: "HTML" });
+          if (ctx.chat) await rememberPaymentPrompt(payOrderId, ctx.chat.id, ask.message_id).catch(() => undefined);
           break;
         }
         case "lic:list":
@@ -1821,6 +1848,37 @@ export function createBot(): Bot<Ctx> {
             );
           }
           await deliverAll(ctx, ds, args[0] ?? "");
+          break;
+        }
+
+        case "ord:txt":
+        case "ord:txtp": {
+          // Same data as "Get all keys", handed over as a file. `txtp` is the
+          // plain copy with no "1) 2) 3)" prefixes, for pasting into a password
+          // manager or a script.
+          const numbered = route === "ord:txt";
+          await ctx.answerCallbackQuery({ text: "Building your file…" });
+          const orderId = args[0] ?? "";
+          const rows = await revealOrderDeliveries(user.id, orderId);
+          if (rows.length === 0) { await ctx.reply("No delivered keys found for this order."); break; }
+          const meta = await getOrderSummary(user.id, orderId).catch(() => null);
+          const lines = rows.map((r) => ({
+            productName: r.replaced ? `${r.productName} (REPLACED - no longer works)` : r.productName,
+            variantName: r.variantName,
+            payload: { kind: r.payload.kind, key: r.payload.key, username: r.payload.username, password: r.payload.password, twofa: r.payload.twofa, expiresAt: r.payload.expiresAt },
+            activationGuide: null,
+          }));
+          const body = buildDeliveryTxt(lines, meta?.orderNumber ?? orderId, {
+            numbered,
+            ...(meta ? { amountLabel: fmt(meta.totalMinor, meta.currency) } : {}),
+          });
+          const name = `order-${(meta?.orderNumber ?? orderId).replace(/[^A-Za-z0-9_-]/g, "")}${numbered ? "" : "-plain"}.txt`;
+          await ctx.replyWithDocument(new InputFile(Buffer.from(body, "utf8"), name), {
+            caption: `📄 ${rows.length} item(s)${numbered ? "" : " — no numbering"}. Keep this file safe.`,
+            reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home"),
+          }).catch(async () => {
+            await ctx.reply("Couldn't build that file — tap 📄 Get all keys instead.").catch(() => undefined);
+          });
           break;
         }
 
@@ -2048,6 +2106,9 @@ export function createBot(): Bot<Ctx> {
           break;
         }
         case "rev:rate": {
+          // The star picker has served its purpose the moment a star is tapped;
+          // leaving it in the chat invites a second, impossible attempt.
+          await ctx.deleteMessage().catch(() => undefined);
           const oid = args[0] ?? "";
           const rating = Math.min(5, Math.max(1, Number.parseInt(args[1] ?? "5", 10) || 5));
           let saved: { id: string; alreadyRated: boolean };

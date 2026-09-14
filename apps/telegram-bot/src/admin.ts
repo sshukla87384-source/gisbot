@@ -471,7 +471,15 @@ async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): 
   // Consume any queued banner and render it inline with the view.
   const banner = ctx.session.admFlash;
   ctx.session.admFlash = undefined;
-  if (banner) text = `${banner}\n\n${text}`;
+  if (banner) {
+    text = `${banner}\n\n${text}`;
+    // A banner means something was just CHANGED — a price set, a product paused,
+    // stock added. Editing the page away at that point erases the screen the
+    // operator acted on, so there is nothing left in the chat showing what was
+    // done or what it was done to. A change gets its own message; plain
+    // navigation still edits in place so the panel does not spam the chat.
+    edit = false;
+  }
   // Telegram hard-caps a message at 4096 chars; over that the send fails and the
   // admin sees nothing at all, which reads as a dead button.
   if (text.length > 4096) text = `${text.slice(0, 4056)}\n\n<i>…truncated</i>`;
@@ -3626,10 +3634,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.priceProductId = ctx.session.priceUserId = ctx.session.priceUserLabel = undefined;
       ctx.session.priceAmountMinor = undefined;
       ctx.session.priceChannel = undefined;
-      await ctx.reply(
-        `✅ Set ${escapeHtml(label)}'s price to <b>${(amt / 100).toFixed(2)}</b> (${chLabel(channel)}) — ${permanent ? "🔒 permanent" : "⏳ until it sells out"}.`,
-        { parse_mode: "HTML" },
-      );
+      // Through flash() rather than its own message, so the confirmation and the
+      // updated list arrive together as ONE new page — and the screens that led
+      // here stay in the chat instead of being edited away.
+      flash(ctx, `✅ Set ${escapeHtml(label)}'s price to <b>${(amt / 100).toFixed(2)}</b> (${chLabel(channel)}) — ${permanent ? "🔒 permanent" : "⏳ until it sells out"}.`);
       await customPriceView(ctx, pid);
       return;
     }

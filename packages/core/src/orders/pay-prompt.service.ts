@@ -98,3 +98,43 @@ export async function clearPaymentPrompts(orderId: string): Promise<number> {
     return 0;
   }
 }
+
+/**
+ * Clear the payment cards of every order that is no longer awaiting payment.
+ *
+ * The delivery paths clear their own, and the expiry cron clears the orders it
+ * expires — but an order can leave PENDING_PAYMENT by half a dozen other routes
+ * (a rail cancelling the previous attempt, a gateway rejection, an admin
+ * cancelling by hand), and each of those used to leave the "send this amount to
+ * this Pay ID" card and the whole UTR conversation sitting in the customer's
+ * chat for good.
+ *
+ * Rather than patching every one of those call sites — and every future one —
+ * this walks the prompt keys themselves. Only orders that actually have cards
+ * recorded have a key, and they expire after 48 h anyway, so the set is small.
+ */
+export async function sweepResolvedOrderPrompts(
+  isResolved: (orderIds: string[]) => Promise<string[]>,
+  maxKeys = 500,
+): Promise<number> {
+  try {
+    const redis = getRedis();
+    const found: string[] = [];
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", "ordmsg:*", "COUNT", 200);
+      cursor = next;
+      for (const k of keys) {
+        const id = k.slice("ordmsg:".length);
+        if (id) found.push(id);
+      }
+    } while (cursor !== "0" && found.length < maxKeys);
+    if (found.length === 0) return 0;
+    const resolved = await isResolved(found.slice(0, maxKeys));
+    let cleared = 0;
+    for (const id of resolved) cleared += (await clearPaymentPrompts(id)) > 0 ? 1 : 0;
+    return cleared;
+  } catch {
+    return 0;
+  }
+}

@@ -458,18 +458,19 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
   await clearChatClutter(outcome.telegramId).catch(() => undefined);
 
   if (outcome.telegramId !== null) {
-    await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode)}. Delivering now… 🚀`);
+    const money = formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode);
+    await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${money}. Delivering now… 🚀`);
     const celeb = loadConfig().CELEBRATION_EMOJI;
     // Plays its fullscreen animation, then removes itself rather than sitting
     // between the customer and their keys.
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange), { buttons: deliveryButtons(credsOf(d.payload)) });
+      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money }), { buttons: deliveryButtons(credsOf(d.payload)) });
     } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
+      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
     } else if (outcome.deliveries.length > 1) {
-      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber), { buttons: DELIVERY_BUTTONS });
+      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: DELIVERY_BUTTONS });
     }
     if (outcome.deliveries.length > 0) {
       await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));
@@ -870,7 +871,9 @@ export async function notifyOrderToAdmins(orderId: string, method = "order"): Pr
   });
   if (!order) return;
   const buyer = order.user.telegramHandle ? `@${order.user.telegramHandle}` : (order.user.firstName ?? String(order.user.telegramId));
-  const paid = order.walletUsedMinor + order.totalMinor;
+  // BNPL puts the whole amount in bnplMinor and leaves totalMinor at 0, so a
+  // Pay Later order used to be announced to the admin as "$0.00".
+  const paid = order.walletUsedMinor + order.totalMinor + order.bnplMinor;
   const manualPending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null && !i.variant.product.supplierId);
   const itemLine = (i: (typeof order.items)[number]): string => {
     const vn = i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${i.variantNameSnap}`;

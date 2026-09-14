@@ -9,6 +9,9 @@ import {
   primeFxRate,
   getPromoFlags,
   enqueueTelegramDelete,
+  splitTelegramHtml,
+  stripTelegramHtml,
+  TELEGRAM_TEXT_MAX,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -87,6 +90,9 @@ async function main(): Promise<void> {
         replyMarkup = rows ? ({ inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
         const reply_markup = replyMarkup;
         let msg;
+        // Every message id the job produced. A split send makes several, and a
+        // deleteAfterSec that only cleaned up the last one would leave the rest.
+        const sentIds: number[] = [];
         if (job.data.document) {
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
           const file = new InputFile(Buffer.from(job.data.document.content, "utf8"), job.data.document.filename);
@@ -95,12 +101,29 @@ async function main(): Promise<void> {
           // Caption limit is 1024 chars; trim defensively.
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
           msg = await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML", reply_markup });
+        } else if (job.data.text.length > TELEGRAM_TEXT_MAX) {
+          // Too long for one message. Split it HERE, on line boundaries, while
+          // the markup is still intact — letting Telegram reject it and falling
+          // through to the 400 handler below is what used to post raw
+          // `">Tap here to open your link</a></b>` into a customer's chat.
+          const parts = splitTelegramHtml(job.data.text);
+          for (let i = 0; i < parts.length; i++) {
+            const last = i === parts.length - 1;
+            msg = await telegram.sendMessage(job.data.telegramId, parts[i]!, {
+              parse_mode: "HTML",
+              ...(last && reply_markup ? { reply_markup } : {}),
+            });
+            if (msg?.message_id) sentIds.push(msg.message_id);
+          }
         } else {
           msg = await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML", reply_markup });
         }
-        // Scheduled tidy-up: the id only exists here, on the send.
-        if (job.data.deleteAfterSec && msg?.message_id) {
-          await enqueueTelegramDelete(job.data.telegramId, msg.message_id, job.data.deleteAfterSec * 1000).catch(() => undefined);
+        // Scheduled tidy-up: the ids only exist here, on the send.
+        if (msg?.message_id && sentIds.length === 0) sentIds.push(msg.message_id);
+        if (job.data.deleteAfterSec) {
+          for (const id of sentIds) {
+            await enqueueTelegramDelete(job.data.telegramId, id, job.data.deleteAfterSec * 1000).catch(() => undefined);
+          }
         }
         if (job.data.pin && msg?.message_id) {
           // Pinning can fail (e.g. bot lacks rights in groups); never fail the job for it.
@@ -155,7 +178,12 @@ async function main(): Promise<void> {
               // Not the emoji (or the keyboard is at fault too) — carry on below.
             }
           }
-          const plain = unwrapped;
+          // Strip only the tags Telegram defines, then undo the entity escaping,
+          // so what lands in the chat is the CONTENT. A blanket `<[^>]+>` strip
+          // was rejected here for eating `<XY>` out of a key — but sending the
+          // markup through untouched was worse: customers saw `<b><a href=...>`
+          // spelled out in their delivery. stripTelegramHtml does neither.
+          const plain = stripTelegramHtml(unwrapped);
           const chunks: string[] = [];
           for (let i = 0; i < plain.length; i += 4000) chunks.push(plain.slice(i, i + 4000));
           // The KEYBOARD is a 400 cause too, not just the text (an over-long

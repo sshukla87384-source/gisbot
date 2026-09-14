@@ -12,6 +12,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   pollUpiCredits,
   convertMinor,
   clearPaymentPrompts,
+  sweepResolvedOrderPrompts,
   resetPricesForSoldOut,
   syncAllSuppliers,
 } from "@gis/core";
@@ -98,6 +99,18 @@ async function sweepReservationsAndOrders(): Promise<void> {
     data: { status: "EXPIRED" },
   });
   for (const o of expiring) await clearPaymentPrompts(o.id).catch(() => undefined);
+
+  // Catch-all for every OTHER way an order stops awaiting payment — a rail
+  // cancelling the previous attempt, a gateway rejection, an admin cancelling by
+  // hand. Those used to leave the payment card and the whole UTR conversation in
+  // the customer's chat for good.
+  await sweepResolvedOrderPrompts(async (ids) => {
+    const rows = await prisma.order.findMany({
+      where: { id: { in: ids }, status: { not: "PENDING_PAYMENT" } },
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
+  }).catch(() => 0);
   if (keys.count + accounts.count + expired.count > 0) {
     await prisma.auditLog.create({
       data: {

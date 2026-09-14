@@ -416,10 +416,13 @@ export function buildDeliveryText(
   payload: DeliveryPayload,
   activationGuide?: string | null,
   allowPwChange?: boolean,
+  opts: DeliveryRenderOpts = {},
 ): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(variantName)}`;
-  const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b>${vn}`, ""];
+  const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b>${vn}`];
+  if (opts.amountLabel) lines.push(`💰 Amount paid: <b>${esc(opts.amountLabel)}</b>`);
+  lines.push("");
 
   let renderedCreds = false;
   if (payload.key) {
@@ -511,6 +514,27 @@ export function thankYouMessage(u: { telegramHandle?: string | null; firstName?:
   ].join("\n");
 }
 
+/**
+ * Sent when a customer walks away from a checkout.
+ *
+ * A bare "Payment cancelled." reads as a door closing. This is the one moment
+ * the customer is still here, still interested enough to have got as far as
+ * paying — so it says the cart is safe, that nothing was charged, and leaves
+ * the way back open. Warm, short, and not pleading.
+ */
+export function comeBackMessage(u: { telegramHandle?: string | null; firstName?: string | null }): string {
+  return [
+    `😢 <b>Oh no — you're leaving already, ${greetName(u)}?</b>`,
+    "",
+    "No worries at all, and <b>nothing has been charged</b>. 💙",
+    "",
+    "🛒 Your items are still waiting in your cart, exactly as you left them.",
+    "⚡ Stock moves fast though — the good ones rarely wait around.",
+    "",
+    "Come back whenever you're ready. We'd love to serve you. 🙏",
+  ].join("\n");
+}
+
 /** Orders with more than this many delivered items get a .txt file instead of one long chat message. */
 export const DELIVERY_FILE_THRESHOLD = 15;
 
@@ -522,11 +546,24 @@ export interface DeliveryLine {
   allowPwChange?: boolean;
 }
 
+/** Extras the delivery renderers accept. All optional — old callers are unchanged. */
+export interface DeliveryRenderOpts {
+  /** Pre-formatted order total, e.g. "₹499.00". Shown so the customer can see what they paid. */
+  amountLabel?: string;
+  /**
+   * Number the items (`1)`, `2)` …). On by default; the .txt download offers a
+   * version with this off, because a customer feeding the file to a script or
+   * pasting it elsewhere wants the values and nothing else.
+   */
+  numbered?: boolean;
+}
+
 /** One consolidated HTML message for a whole multi-item order (used when count ≤ threshold). */
-export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: string): string {
+export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: string, opts: DeliveryRenderOpts = {}): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const out: string[] = [`🎉🎊 <b>Your order is delivered!</b> 🥳  (${items.length} item${items.length === 1 ? "" : "s"})`];
   if (orderNumber) out.push(`🧾 Order <b>${esc(orderNumber)}</b>`);
+  if (opts.amountLabel) out.push(`💰 Amount paid: <b>${esc(opts.amountLabel)}</b>`);
   out.push("");
   // Anything identical for every unit is said ONCE, at the bottom. Repeating
   // "Password can be changed", the 2fa.live hint and a copy-all line under each
@@ -606,14 +643,16 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
 }
 
 /** Plaintext body for the .txt attachment sent for large orders (> threshold). */
-export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): string {
+export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string, opts: DeliveryRenderOpts = {}): string {
+  const numbered = opts.numbered !== false;
   const out: string[] = [];
   out.push(`ORDER DELIVERY${orderNumber ? ` — ${orderNumber}` : ""}`);
   out.push(`${items.length} item(s)`);
+  if (opts.amountLabel) out.push(`Amount paid: ${opts.amountLabel}`);
   out.push("=".repeat(40), "");
   items.forEach((it, i) => {
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
-    out.push(`${i + 1}) ${it.productName}${vn}`);
+    out.push(`${numbered ? `${i + 1}) ` : ""}${it.productName}${vn}`);
     const p = it.payload;
     if (p.key) {
       const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
@@ -621,9 +660,11 @@ export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string): s
       if (rows.length > 0 && creds.every((c) => c !== null)) {
         rows.forEach((_, k) => {
           const c = creds[k] as { id: string; pw: string; twofa?: string };
-          out.push(`   ${rows.length > 1 ? `${k + 1}) ` : ""}ID: ${c.id}`);
-          out.push(`   ${rows.length > 1 ? "   " : ""}Password: ${c.pw}`);
-          if (c.twofa) out.push(`   ${rows.length > 1 ? "   " : ""}2FA secret: ${c.twofa}   (paste at ${TWOFA_SITE} to get the OTP)`);
+          const rowTag = rows.length > 1 && numbered ? `${k + 1}) ` : "";
+          const rowPad = rows.length > 1 && numbered ? "   " : "";
+          out.push(`   ${rowTag}ID: ${c.id}`);
+          out.push(`   ${rowPad}Password: ${c.pw}`);
+          if (c.twofa) out.push(`   ${rowPad}2FA secret: ${c.twofa}   (paste at ${TWOFA_SITE} to get the OTP)`);
         });
       } else {
         for (const r of rows) out.push(`   Key: ${r}`);
