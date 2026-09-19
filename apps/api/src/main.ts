@@ -4,6 +4,7 @@ import { ensureDbObjects } from "@gis/database";
 import { primeFxRate } from "@gis/core";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
@@ -17,7 +18,17 @@ async function bootstrap(): Promise<void> {
   // Load + keep fresh the admin-set INR<->USDT rate.
   await primeFxRate().catch(() => undefined);
 
-  const app = await NestFactory.create(AppModule, { rawBody: true, logger: ["error", "warn", "log"] });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+    logger: ["error", "warn", "log"],
+  });
+  // nginx fronts this service (exactly one hop). Without it every req.ip is the
+  // proxy's, so AuditLog.ip is useless and the login throttle degrades from
+  // per-IP+email to global-per-email.
+  app.set("trust proxy", 1);
+  // Express defaults to a 100 KB JSON body, but POST /inventory/keys accepts up
+  // to 5000 keys — a legitimate import 413s without this.
+  app.useBodyParser("json", { limit: "2mb" });
   app.setGlobalPrefix("api/v1");
   app.use(helmet());
   app.use(cookieParser());

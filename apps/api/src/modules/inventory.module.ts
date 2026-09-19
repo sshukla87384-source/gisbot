@@ -132,7 +132,9 @@ export class InventoryController {
   @RequirePermission("inventory.write")
   @Post("keys/delete")
   async deleteKeys(@Body() body: unknown, @Req() req: ApiRequest) {
-    const { ids } = validate(z.object({ ids: z.array(z.string().min(1)).min(1) }), body);
+    // Same cap as the bulk status endpoint — an unbounded id list builds an
+    // unbounded IN (...) and is now reachable through the 2mb body limit.
+    const { ids } = validate(z.object({ ids: z.array(z.string().min(1)).min(1).max(5000) }), body);
     // Never delete SOLD/RESERVED stock — only unused keys.
     const result = await prisma.licenseKey.deleteMany({
       where: { id: { in: ids }, status: { in: ["AVAILABLE", "DISABLED"] } },

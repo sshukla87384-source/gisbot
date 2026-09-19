@@ -433,8 +433,12 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     }
     kb.add(sbtn(`➕ Or top up ${fmt(need, walletCur)} first`, cb("wal", "topup"), "primary")).row();
   }
-  if (view.allAvailable && bnpl.limitMinor > 0 && bnpl.availableMinor >= walletPayable && walletPayable > 0) {
-    kb.add(sbtn(`🕒 Pay Later — ${fmt(walletPayable, bnpl.currency as Currency)} (BNPL)`, cb("ord", "paybnpl"), "primary")).row();
+  // BNPL is held in the USER's currency (getBnplStatus reads user.currency), not
+  // the wallet's. Comparing a wallet-currency amount against the credit limit —
+  // and printing it with the BNPL currency — quoted the wrong number and offered
+  // or hid the button wrongly whenever the two currencies had drifted apart.
+  if (view.allAvailable && bnpl.limitMinor > 0 && bnpl.availableMinor >= payable && payable > 0) {
+    kb.add(sbtn(`🕒 Pay Later — ${fmt(payable, bnpl.currency as Currency)} (BNPL)`, cb("ord", "paybnpl"), "primary")).row();
   }
   if (view.allAvailable) {
     for (const p of gateways) {
@@ -572,7 +576,10 @@ export async function walletHistoryView(user: BotUser, page: number): Promise<Vi
 }
 
 export async function referralView(user: BotUser, botUsername: string): Promise<View> {
-  const [stats, cfg] = await Promise.all([getReferralStats(user.id), getReferralConfig()]);
+  // Referral rewards are credited to the WALLET, so they are wallet-currency
+  // amounts. Printing them with user.currency mislabelled the figure after a
+  // currency switch — and disagreed with 👤 My Account, which gets it right.
+  const [stats, cfg, wallet] = await Promise.all([getReferralStats(user.id), getReferralConfig(), getWallet(user.id)]);
   const link = `https://t.me/${botUsername}?start=ref_${user.referralCode}`;
   const store = loadConfig().STORE_NAME;
   const shareText = `🎁 Join ${store} — instant digital products at the best prices! Use my link:`;
@@ -586,7 +593,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
       "",
       `👥 <b>Invited:</b>  <code>${num(stats.invited)}</code>`,
       `🛍 <b>Purchased:</b>  <code>${num(stats.purchased)}</code>`,
-      `💰 <b>Earned:</b>  <code>${fmt(stats.earnedMinor, user.currency)}</code>`,
+      `💰 <b>Earned:</b>  <code>${fmt(stats.earnedMinor, wallet.currency)}</code>`,
       `📊 <b>Status:</b>  ${stats.invited > 0 ? "ACTIVE" : "NOT STARTED"}`,
       HR,
       "Invite friends and earn <b>real wallet rewards</b> on everything they buy! 💸",
@@ -718,7 +725,13 @@ export async function profileView(user: BotUser): Promise<View> {
     getBnplStatus(user.id).catch(() => null),
     getReferralStats(user.id).catch(() => null),
   ]);
-  const spent = orders.items.reduce((n, o) => n + o.totalPaidMinor, 0);
+  // Orders keep the currency they were PLACED in, so after a currency switch
+  // this list mixes ₹ and $ amounts. Adding them raw and then printing the total
+  // with the wallet's symbol invented a number that was simply wrong.
+  const spent = orders.items.reduce(
+    (n, o) => n + (o.currency === wallet.currency ? o.totalPaidMinor : convertMinor(o.totalPaidMinor, o.currency as Currency, wallet.currency as Currency)),
+    0,
+  );
   const done = orders.items.filter((o) => o.status === "COMPLETED").length;
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()

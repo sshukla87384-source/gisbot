@@ -3,8 +3,8 @@ import { getProvider, type PaymentProviderId } from "@gis/payments";
 import { CoreError } from "@gis/shared";
 import { loadConfig } from "@gis/config";
 import { convertMinor } from "../fx.js";
-import { priceCart } from "./assign.js";
-import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
+import { couponLines, priceCart } from "./assign.js";
+import { resolveCartCouponTx, recordCouponUseTx, releaseCouponForOrderTx } from "./coupon.service.js";
 
 /**
  * Gateway checkout (PRD §6.1 steps 1-2): creates a PENDING_PAYMENT order with a
@@ -66,29 +66,46 @@ export async function createGatewayCheckout(
           const backMinor = sw.currency === so.currency
             ? so.walletUsedMinor
             : convertMinor(so.walletUsedMinor, so.currency as Currency, sw.currency as Currency);
-          const back = sw.balanceMinor + BigInt(backMinor);
-          await tx.walletTransaction.create({
-            data: {
-              walletId: sw.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
-              currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
-              idempotencyKey: `refund-cancel:${so.id}`,
-            },
+          // The expiry cron may have refunded this same order already. The unique
+          // idempotency key would then throw and abort the customer's new
+          // checkout, so check first — the same guard cancelStalePendingTx has.
+          const done = await tx.walletTransaction.findUnique({
+            where: { idempotencyKey: `refund-cancel:${so.id}` },
+            select: { id: true },
           });
-          await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
+          if (!done) {
+            const back = sw.balanceMinor + BigInt(backMinor);
+            await tx.walletTransaction.create({
+              data: {
+                walletId: sw.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
+                currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
+                idempotencyKey: `refund-cancel:${so.id}`,
+              },
+            });
+            await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
+          }
           await tx.order.update({ where: { id: so.id }, data: { walletUsedMinor: 0 } });
         }
       }
+      // Collect the ids before the sweep: a coupon burned on the attempt we are
+      // cancelling has to be given back, and updateMany does not say which rows
+      // it touched.
+      const cancelling = await tx.order.findMany({
+        where: { userId, status: "PENDING_PAYMENT" },
+        select: { id: true },
+      });
       await tx.order.updateMany({
         where: { userId, status: "PENDING_PAYMENT" },
         data: { status: "CANCELLED", cancelledAt: new Date() },
       });
+      for (const co of cancelling) await releaseCouponForOrderTx(tx, co.id);
 
       const lines = await priceCart(tx, userId, user.currency);
       const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
       // The cart coupon applies on THIS rail too. It used to be ignored here, so
       // a customer shown a discounted cart was charged the undiscounted total by
       // the gateway.
-      const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+      const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor, couponLines(lines));
       const discountMinor = coupon?.discountMinor ?? 0;
       const totalMinor = Math.max(0, subtotalMinor - discountMinor);
 
@@ -193,10 +210,17 @@ export async function createGatewayCheckout(
     return { ...created, currency: user.currency, url: session.url, expiresAt };
   } catch (e) {
     // Gateway rejected/unreachable: cancel the order; reservations expire via TTL.
-    await prisma.order.update({
-      where: { id: created.orderId },
-      data: { status: "CANCELLED", cancelledAt: new Date() },
-    });
+    // The coupon was burned when the order was created a moment ago and this
+    // order will never be paid, so give it back in the same transaction.
+    // Swallowing a failure here is deliberate: the gateway error below is what
+    // the customer needs to hear, and a bookkeeping fault must not replace it.
+    await prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: created.orderId },
+        data: { status: "CANCELLED", cancelledAt: new Date() },
+      });
+      await releaseCouponForOrderTx(tx, created.orderId);
+    }).catch(() => undefined);
     throw new CoreError("VALIDATION_FAILED", "Payment gateway error — please try again", {
       cause: String(e),
     });

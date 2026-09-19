@@ -99,18 +99,22 @@ export class CatalogController {
 
   @RequirePermission("catalog.write")
   @Patch("categories/:id")
-  async updateCategory(@Param("id") id: string, @Body() body: unknown) {
+  async updateCategory(@Param("id") id: string, @Body() body: unknown, @Req() req: ApiRequest) {
     const data = validate(createCategory.partial().extend({ isActive: z.boolean().optional() }), body);
+    const before = await prisma.category.findUnique({ where: { id } });
+    if (!before) throw notFound("Category");
     const cat = await prisma.category.update({ where: { id }, data });
     await invalidate("cat:*");
+    await writeAudit(req, "category.update", "Category", id, before, cat);
     return cat;
   }
 
   @RequirePermission("catalog.write")
   @Delete("categories/:id")
-  async deleteCategory(@Param("id") id: string) {
+  async deleteCategory(@Param("id") id: string, @Req() req: ApiRequest) {
     await prisma.category.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
     await invalidate("cat:*");
+    await writeAudit(req, "category.delete", "Category", id);
     return { ok: true };
   }
 
@@ -233,34 +237,42 @@ export class CatalogController {
 
   @RequirePermission("catalog.write")
   @Post("products/:id/variants")
-  async createVariant(@Param("id") productId: string, @Body() body: unknown) {
+  async createVariant(@Param("id") productId: string, @Body() body: unknown, @Req() req: ApiRequest) {
     const data = validate(createVariant, body);
     const v = await prisma.productVariant.create({ data: { ...data, productId } });
     await invalidate("cat:*");
+    await writeAudit(req, "variant.create", "ProductVariant", v.id, undefined, v);
     return v;
   }
 
   @RequirePermission("catalog.write")
   @Patch("variants/:id")
-  async updateVariant(@Param("id") id: string, @Body() body: unknown) {
+  async updateVariant(@Param("id") id: string, @Body() body: unknown, @Req() req: ApiRequest) {
     const data = validate(updateVariant, body);
+    const before = await prisma.productVariant.findUnique({ where: { id } });
+    if (!before) throw notFound("Variant");
     const v = await prisma.productVariant.update({ where: { id }, data });
     await invalidate("cat:*");
+    await writeAudit(req, "variant.update", "ProductVariant", id, before, v);
     return v;
   }
 
   @RequirePermission("catalog.write")
   @Delete("variants/:id")
-  async deleteVariant(@Param("id") id: string) {
+  async deleteVariant(@Param("id") id: string, @Req() req: ApiRequest) {
     await prisma.productVariant.update({ where: { id }, data: { deletedAt: new Date(), isActive: false } });
     await invalidate("cat:*");
+    await writeAudit(req, "variant.delete", "ProductVariant", id);
     return { ok: true };
   }
 
   @RequirePermission("pricing.write")
   @Put("variants/:id/prices")
-  async setPrices(@Param("id") variantId: string, @Body() body: unknown) {
+  async setPrices(@Param("id") variantId: string, @Body() body: unknown, @Req() req: ApiRequest) {
     const { prices } = validate(pricesBody, body);
+    const snapshot = (rows: Array<{ currency: string; amountMinor: number; compareAtMinor: number | null; tier: { name: string } }>) =>
+      rows.map((p) => ({ tier: p.tier.name, currency: p.currency, amountMinor: p.amountMinor, compareAtMinor: p.compareAtMinor }));
+    const before = await prisma.variantPrice.findMany({ where: { variantId }, include: { tier: true } });
     for (const p of prices) {
       const tier = await prisma.priceTier.findUnique({ where: { name: p.tierName } });
       if (!tier) continue;
@@ -271,7 +283,10 @@ export class CatalogController {
       });
     }
     await invalidate("cat:*");
-    return prisma.variantPrice.findMany({ where: { variantId }, include: { tier: true } });
+    const after = await prisma.variantPrice.findMany({ where: { variantId }, include: { tier: true } });
+    // Price changes are money changes — they must leave a trail (Security doc §7).
+    await writeAudit(req, "variant.prices.set", "ProductVariant", variantId, snapshot(before), snapshot(after));
+    return after;
   }
 }
 

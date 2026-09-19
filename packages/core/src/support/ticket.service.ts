@@ -169,7 +169,10 @@ async function threadOf(where: { id: string; userId?: string }): Promise<TicketT
     where,
     include: {
       user: { select: { telegramHandle: true, firstName: true, telegramId: true } },
-      messages: { orderBy: { createdAt: "asc" }, take: 40 },
+      // Newest 40, flipped back into reading order below. Taking the OLDEST 40
+      // meant that on a long back-and-forth the thread froze at message 40 —
+      // support answered while the customer's latest message was off-screen.
+      messages: { orderBy: { createdAt: "desc" }, take: 40 },
     },
   });
   if (!t) return null;
@@ -200,7 +203,7 @@ async function threadOf(where: { id: string; userId?: string }): Promise<TicketT
     orderNumber,
     who: t.user.telegramHandle ? `@${t.user.telegramHandle}` : (t.user.firstName ?? "customer"),
     telegramId: String(t.user.telegramId ?? "—"),
-    messages: t.messages.map((m) => ({
+    messages: [...t.messages].reverse().map((m) => ({
       id: m.id,
       authorType: m.authorType as TicketMsg["authorType"],
       body: m.body,
@@ -279,15 +282,21 @@ export async function adminReplyTicket(ticketId: string, body: string): Promise<
 
 /** The customer answers back — the thread stays in one place instead of a new ticket. */
 export async function customerReplyTicket(userId: string, ticketId: string, body: string, proofFileId?: string): Promise<{ ok: boolean; ticketNumber?: string }> {
+  // RESOLVED counts as answerable: "if this is still not sorted, just reply and
+  // we'll reopen it" is what the resolve message promises, and a replacement
+  // resolves the ticket silently — so the one customer who most needs to come
+  // back was told their ticket "is no longer open". CLOSED stays terminal.
   const t = await prisma.supportTicket.findFirst({
-    where: { id: ticketId, userId, status: { in: OPEN_STATES } },
+    where: { id: ticketId, userId, status: { in: [...OPEN_STATES, "RESOLVED"] } },
     select: { id: true, ticketNumber: true },
   });
   if (!t) return { ok: false };
   const text = body.trim().slice(0, 2000);
   await prisma.supportTicket.update({
     where: { id: t.id },
-    data: { status: "IN_PROGRESS", messages: { create: { authorId: userId, authorType: "CUSTOMER", body: text, proofFileId: proofFileId ?? null } } },
+    // Reopening clears resolvedAt, or the ticket reads as resolved and worked on
+    // at the same time and the response figures count it twice.
+    data: { status: "IN_PROGRESS", resolvedAt: null, messages: { create: { authorId: userId, authorType: "CUSTOMER", body: text, proofFileId: proofFileId ?? null } } },
   });
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { telegramHandle: true, firstName: true } }).catch(() => null);
   const who = u?.telegramHandle ? `@${u.telegramHandle}` : (u?.firstName ?? "customer");

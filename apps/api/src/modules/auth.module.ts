@@ -8,7 +8,7 @@ import { hash as argonHash, verify as argonVerify } from "@node-rs/argon2";
 import { SignJWT } from "jose";
 import { z } from "zod";
 import { ApiError, unauthenticated } from "../common/errors.js";
-import { Public, SkipEnvelope } from "../common/permissions.decorator.js";
+import { Public, SelfScoped, SkipEnvelope } from "../common/permissions.decorator.js";
 import { validate } from "../common/zod-body.pipe.js";
 import type { ApiRequest, ApiResponse } from "../common/types.js";
 
@@ -163,6 +163,7 @@ export class AuthController {
     return { ok: true };
   }
 
+  @SelfScoped()
   @Post("logout-all")
   async logoutAll(@Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
     await prisma.refreshToken.updateMany({
@@ -173,6 +174,7 @@ export class AuthController {
     return { ok: true };
   }
 
+  @SelfScoped()
   @Get("me")
   async me(@Req() req: ApiRequest) {
     const user = await prisma.user.findUnique({ where: { id: req.user!.id } });

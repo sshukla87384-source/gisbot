@@ -24,13 +24,40 @@ const base = z.object({
   isStackable: z.boolean().default(false),
   startsAt: z.coerce.date().optional(),
   expiresAt: z.coerce.date().optional(),
+  // Scope targets. The evaluator has honoured PRODUCT / CATEGORY / USER since
+  // round 2, but nothing could CREATE one — the schema had no way to say which
+  // products, categories or user a code was for, so every coupon was GLOBAL.
+  scope: z.enum(["GLOBAL", "PRODUCT", "CATEGORY", "USER"]).default("GLOBAL"),
+  productIds: z.array(z.string().min(1)).max(200).optional(),
+  categoryIds: z.array(z.string().min(1)).max(200).optional(),
+  allowedUserId: z.string().min(1).optional(),
 });
+const scopeIssues = (v: { scope?: string; productIds?: string[]; categoryIds?: string[]; allowedUserId?: string }, ctx: z.RefinementCtx): void => {
+  if (v.scope === "PRODUCT" && !(v.productIds && v.productIds.length > 0))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "PRODUCT scope needs at least one productId", path: ["productIds"] });
+  if (v.scope === "CATEGORY" && !(v.categoryIds && v.categoryIds.length > 0))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "CATEGORY scope needs at least one categoryId", path: ["categoryIds"] });
+  if (v.scope === "USER" && !v.allowedUserId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "USER scope needs allowedUserId", path: ["allowedUserId"] });
+};
 const createCoupon = base.superRefine((v, ctx) => {
   if (v.type === "FIXED" && (v.valueMinor === undefined || !v.currency))
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "FIXED coupons need valueMinor and currency", path: ["valueMinor"] });
   if (v.type === "PERCENTAGE" && v.valuePct === undefined)
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "PERCENTAGE coupons need valuePct (basis points)", path: ["valuePct"] });
+  scopeIssues(v, ctx);
 });
+
+/**
+ * `productIds` is an input convenience; the Prisma side is the `products`
+ * relation, and `categoryIds`/`allowedUserId` are plain columns. Split the
+ * validated body into the shape `coupon.create`/`update` accept.
+ */
+function toCouponData<T extends { productIds?: string[] }>(v: T): Omit<T, "productIds"> & { products?: { set?: { id: string }[]; connect?: { id: string }[] } } {
+  const { productIds, ...rest } = v;
+  if (productIds === undefined) return rest;
+  return { ...rest, products: { set: [], connect: productIds.map((id) => ({ id })) } };
+}
 
 @ApiBearerAuth()
 @ApiTags("coupons")
@@ -51,7 +78,10 @@ export class CouponsController {
   @RequirePermission("coupons.write")
   @Post()
   async create(@Body() body: unknown, @Req() req: ApiRequest) {
-    const data = validate(createCoupon, body);
+    const v = validate(createCoupon, body);
+    const { productIds, ...rest } = v;
+    // `set` is an update-only operation; on create only `connect` is valid.
+    const data = { ...rest, ...(productIds ? { products: { connect: productIds.map((id) => ({ id })) } } : {}) };
     const coupon = await prisma.coupon.create({ data });
     await writeAudit(req, "coupon.create", "Coupon", coupon.id, undefined, { code: coupon.code });
     return coupon;
@@ -60,8 +90,8 @@ export class CouponsController {
   @RequirePermission("coupons.write")
   @Patch(":id")
   async update(@Param("id") id: string, @Body() body: unknown, @Req() req: ApiRequest) {
-    const data = validate(base.partial().extend({ isActive: z.boolean().optional() }), body);
-    const coupon = await prisma.coupon.update({ where: { id }, data });
+    const v = validate(base.partial().extend({ isActive: z.boolean().optional() }).superRefine(scopeIssues), body);
+    const coupon = await prisma.coupon.update({ where: { id }, data: toCouponData(v) });
     await writeAudit(req, "coupon.update", "Coupon", id);
     return coupon;
   }
@@ -77,10 +107,12 @@ export class CouponsController {
   @RequirePermission("coupons.read")
   @Get(":id/usages")
   async usages(@Param("id") id: string, @Query() query: unknown) {
-    const list = parseList(query, ["usedAt"]);
+    // CouponUsage has no `createdAt`, so the "-createdAt" default would produce
+    // an orderBy Prisma rejects now that the computed order is actually used.
+    const list = parseList(query, ["usedAt"], "-usedAt");
     const [total, rows] = await Promise.all([
       prisma.couponUsage.count({ where: { couponId: id } }),
-      prisma.couponUsage.findMany({ where: { couponId: id }, orderBy: { usedAt: "desc" }, skip: list.skip, take: list.take }),
+      prisma.couponUsage.findMany({ where: { couponId: id }, orderBy: list.orderBy, skip: list.skip, take: list.take }),
     ]);
     if (total === 0 && !(await prisma.coupon.findUnique({ where: { id } }))) throw notFound("Coupon");
     return paginated(rows, list.page, list.perPage, total);

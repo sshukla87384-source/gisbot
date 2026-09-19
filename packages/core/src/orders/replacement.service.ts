@@ -771,7 +771,10 @@ export async function rejectReplacement(id: string, note?: string): Promise<{ ok
   if (req.user.telegramId !== null) {
     await enqueueTelegramMessage(
       req.user.telegramId,
-      `❌ <b>Replacement request declined</b>${note ? `\n\n💬 ${note}` : ""}\n\nIf you believe this is a mistake, please open 🎫 Support and our team will take another look.`,
+      // The admin's note is free text going into an HTML message. Unescaped, a
+      // stray "<" made Telegram reject the whole send, so the customer was never
+      // told their claim had been declined at all.
+      `❌ <b>Replacement request declined</b>${note ? `\n\n💬 ${escHtml(note)}` : ""}\n\nIf you believe this is a mistake, please open 🎫 Support and our team will take another look.`,
     );
   }
   return { ok: true };

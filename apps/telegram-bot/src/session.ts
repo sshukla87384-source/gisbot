@@ -11,7 +11,16 @@ export function redisSessionStorage(): StorageAdapter<SessionData> {
   return {
     async read(k) {
       const raw = await redis.get(key(k));
-      return raw ? (JSON.parse(raw) as SessionData) : undefined;
+      if (!raw) return undefined;
+      try {
+        return JSON.parse(raw) as SessionData;
+      } catch {
+        // A truncated or hand-edited value used to throw out of the session
+        // middleware on EVERY update, which bricked that chat until the key
+        // expired 24 h later. Starting fresh loses a half-finished wizard; the
+        // alternative lost the whole bot for that customer.
+        return undefined;
+      }
     },
     async write(k, value) {
       await redis.set(key(k), JSON.stringify(value), "EX", TTL_SECONDS);

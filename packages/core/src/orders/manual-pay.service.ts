@@ -9,8 +9,8 @@ import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, credsOf, deliveryExpiry, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
-import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, couponLines, credsOf, deliveryExpiry, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { resolveCartCouponTx, recordCouponUseTx, releaseCouponForOrderTx } from "./coupon.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
@@ -104,6 +104,9 @@ async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
       }
     }
     await tx.order.update({ where: { id: o.id }, data: { status: "CANCELLED", cancelledAt: new Date(), walletUsedMinor: 0 } });
+    // The coupon was spent when this dead order was created. Wallet money is
+    // refunded above; the coupon is money too, and it was never given back.
+    await releaseCouponForOrderTx(tx, o.id);
   }
 }
 
@@ -193,7 +196,7 @@ export async function createUpiManualCheckout(userId: string, opts: { useWallet?
     await cancelStalePendingTx(tx, userId);
     const lines = await priceCart(tx, userId, user.currency);
     const subtotalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
-    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor, couponLines(lines));
     const discountMinor = coupon?.discountMinor ?? 0;
     const totalMinor = Math.max(0, subtotalMinor - discountMinor);
     const orderNumber = await nextOrderNumber(tx);
@@ -243,7 +246,7 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
     await cancelStalePendingTx(tx, userId);
     const lines = await priceCart(tx, userId, user.currency);
     const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor, couponLines(lines));
     const discountMinor = coupon?.discountMinor ?? 0;
     const totalMinor = Math.max(0, subtotalMinor - discountMinor);
     const usdt = toUsdtAmount(totalMinor, user.currency);
@@ -507,14 +510,18 @@ export async function notifyManualOrder(orderId: string): Promise<void> {
   // Only alert for items that still need a HUMAN (manual, not fulfilled, not supplier-auto).
   const pending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null && !i.variant.product.supplierId);
   if (pending.length === 0) return;
+  // A Telegram first name is whatever the customer typed. Unescaped, one "<"
+  // made Telegram reject the alert, so the order nobody was told about simply
+  // never got delivered.
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const buyer = order.user.telegramHandle ? `@${order.user.telegramHandle}` : (order.user.firstName ?? String(order.user.telegramId));
   const lines = [
     "📦 <b>New manual-delivery order!</b>",
-    `🧾 Order <b>${order.orderNumber}</b>`,
-    `👤 Buyer: ${buyer}`,
+    `🧾 Order <b>${esc(order.orderNumber)}</b>`,
+    `👤 Buyer: ${esc(buyer)}`,
     `🆔 ID: <code>${order.user.telegramId ?? "—"}</code>`,
     "",
-    ...pending.map((i) => `• ${i.productNameSnap}${i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${i.variantNameSnap}`}`),
+    ...pending.map((i) => `• ${esc(i.productNameSnap)}${i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${esc(i.variantNameSnap)}`}`),
     "",
     "Tap Deliver to send the key/details now.",
   ];
@@ -870,20 +877,24 @@ export async function notifyOrderToAdmins(orderId: string, method = "order"): Pr
     },
   });
   if (!order) return;
+  // The buyer's name comes from Telegram, i.e. from the customer. Unescaped it
+  // took the whole admin alert down with it, and this alert is what tells the
+  // operator there is an order to deliver.
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const buyer = order.user.telegramHandle ? `@${order.user.telegramHandle}` : (order.user.firstName ?? String(order.user.telegramId));
   // BNPL puts the whole amount in bnplMinor and leaves totalMinor at 0, so a
   // Pay Later order used to be announced to the admin as "$0.00".
   const paid = order.walletUsedMinor + order.totalMinor + order.bnplMinor;
   const manualPending = order.items.filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null && !i.variant.product.supplierId);
   const itemLine = (i: (typeof order.items)[number]): string => {
-    const vn = i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${i.variantNameSnap}`;
+    const vn = i.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${esc(i.variantNameSnap)}`;
     const state = i.fulfilledAt ? "✅" : i.variant.product.supplierId ? "🤖" : "🕐";
-    return `${state} ${i.productNameSnap}${vn} ×${i.quantity}`;
+    return `${state} ${esc(i.productNameSnap)}${vn} ×${i.quantity}`;
   };
   const lines = [
-    `🧾 <b>New order — ${method}</b>`,
-    `#${order.orderNumber} · ${formatMinor(paid, order.currency as CurrencyCode)}`,
-    `👤 ${buyer}`,
+    `🧾 <b>New order — ${esc(method)}</b>`,
+    `#${esc(order.orderNumber)} · ${formatMinor(paid, order.currency as CurrencyCode)}`,
+    `👤 ${esc(buyer)}`,
     `🆔 <code>${order.user.telegramId ?? "—"}</code>`,
     "",
     ...order.items.map(itemLine),

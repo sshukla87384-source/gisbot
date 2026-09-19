@@ -13,6 +13,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   convertMinor,
   clearPaymentPrompts,
   sweepResolvedOrderPrompts,
+  releaseCouponForOrderTx,
   resetPricesForSoldOut,
   syncAllSuppliers,
 } from "@gis/core";
@@ -23,11 +24,23 @@ import { prisma } from "@gis/database";
  * Plain intervals + Redis NX locks: safe if multiple workers ever run.
  */
 
-async function withLock(key: string, ttlSec: number, fn: () => Promise<void>): Promise<void> {
+/**
+ * The lock is NOT released at the end by default: for the once-a-day jobs the
+ * TTL *is* the schedule (they tick hourly and the ~24 h lock is what holds them
+ * to once a day), so releasing it would make them run every hour.
+ *
+ * `releaseWhenDone` is for the other kind of job, where the TTL is meant to be
+ * a cap on how long one run may take rather than a period gate. Those need a
+ * TTL comfortably longer than the interval — otherwise a slow run outlives its
+ * own lock and the next tick starts a second copy on top of it — and that is
+ * only safe if a normal-length run hands the lock back so the next tick still
+ * runs on time.
+ */
+async function withLock(key: string, ttlSec: number, fn: () => Promise<void>, releaseWhenDone = false): Promise<void> {
+  const token = `${process.pid}:${Date.now()}`;
   let acquired: string | null = null;
   try {
     const redis = getRedis();
-    const token = `${process.pid}:${Date.now()}`;
     acquired = await redis.set(`lock:${key}`, token, "EX", ttlSec, "NX");
   } catch (e) {
     // Every tick is fired as `void withLock(...)`, so a rejection here is an
@@ -42,6 +55,17 @@ async function withLock(key: string, ttlSec: number, fn: () => Promise<void>): P
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error(`cron ${key} failed`, { error: String(e) });
+  } finally {
+    if (releaseWhenDone) {
+      try {
+        const redis = getRedis();
+        // Compare before deleting: a run that DID overrun its TTL must not
+        // delete the lock a later tick has since taken, or both keep running.
+        if ((await redis.get(`lock:${key}`)) === token) await redis.del(`lock:${key}`);
+      } catch {
+        // Couldn't release — the TTL still expires it, just later.
+      }
+    }
   }
 }
 
@@ -64,8 +88,8 @@ async function sweepReservationsAndOrders(): Promise<void> {
     where: { status: "PENDING_PAYMENT", expiresAt: { lt: now }, walletUsedMinor: { gt: 0 } },
     select: { id: true, userId: true, orderNumber: true, walletUsedMinor: true },
     // Bounded like the expiry pass below: this loop runs one transaction per row
-    // on a 60 s tick holding a 55 s lock, so an unbounded backlog would overrun
-    // its own lock and have the next tick start on top of it.
+    // on a 60 s tick, so an unbounded backlog would run past even the generous
+    // runtime cap on the sweep lock and have the next tick start on top of it.
     take: 200,
   });
   for (const o of dying) {
@@ -91,14 +115,28 @@ async function sweepReservationsAndOrders(): Promise<void> {
     select: { id: true },
     take: 500,
   });
-  const expired = await prisma.order.updateMany({
-    // The status has to be re-checked, not just the id: the webhook that pays an
-    // order can land between the SELECT above and this UPDATE, and matching on
-    // id alone stamped EXPIRED over a PAID order — money taken, order dead.
-    where: { id: { in: expiring.map((o) => o.id) }, status: "PENDING_PAYMENT" },
-    data: { status: "EXPIRED" },
-  });
-  for (const o of expiring) await clearPaymentPrompts(o.id).catch(() => undefined);
+  // One order per transaction, so each expiry and the return of its coupon are
+  // atomic together. The status is re-checked inside the same statement: the
+  // webhook that pays an order can land between the SELECT above and this
+  // UPDATE, and matching on id alone stamped EXPIRED over a PAID order — money
+  // taken, order dead.
+  let expiredCount = 0;
+  for (const o of expiring) {
+    const hit = await prisma.$transaction(async (tx) => {
+      const r = await tx.order.updateMany({
+        where: { id: o.id, status: "PENDING_PAYMENT" },
+        data: { status: "EXPIRED" },
+      });
+      // The coupon was burned when the order was created; an order that dies
+      // unpaid has to hand it back, or a single-use code is destroyed by an
+      // abandoned checkout.
+      if (r.count > 0) await releaseCouponForOrderTx(tx, o.id);
+      return r.count;
+    }).catch(() => 0);
+    expiredCount += hit;
+    await clearPaymentPrompts(o.id).catch(() => undefined);
+  }
+  const expired = { count: expiredCount };
 
   // Catch-all for every OTHER way an order stops awaiting payment — a rail
   // cancelling the previous attempt, a gateway rejection, an admin cancelling by
@@ -342,15 +380,25 @@ async function runScheduledBroadcasts(): Promise<void> {
   await dispatchDueBroadcasts();
 }
 
+/** Runtime caps (seconds) for the jobs whose lock is released when they finish. */
+const SWEEP_LOCK_TTL = 600;
+const SUPSYNC_LOCK_TTL = 1800;
+
 export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
-  const every = (sec: number, key: string, ttl: number, fn: () => Promise<void>) =>
-    setInterval(() => void withLock(key, ttl, fn), sec * 1000);
+  const every = (sec: number, key: string, ttl: number, fn: () => Promise<void>, releaseWhenDone = false) =>
+    setInterval(() => void withLock(key, ttl, fn, releaseWhenDone), sec * 1000);
 
   // Kick the sweep once at boot so restarts don't delay releases.
-  void withLock("sweep", 55, sweepReservationsAndOrders);
+  void withLock("sweep", SWEEP_LOCK_TTL, sweepReservationsAndOrders, true);
 
   return [
-    every(60, "sweep", 55, sweepReservationsAndOrders),
+    // The 55 s lock this used to take was SHORTER than the job: the sweep calls
+    // retryPendingSupplierFulfilment(20), and each of those is a supplier HTTP
+    // call with an 8 s timeout — well over two minutes on a bad day, plus up to
+    // 200 wallet refunds. The lock expired mid-run and the next tick started a
+    // second sweep alongside the first. TTL is now a real runtime cap, released
+    // as soon as the run ends so the 60 s cadence is unchanged.
+    every(60, "sweep", SWEEP_LOCK_TTL, sweepReservationsAndOrders, true),
     every(60, "broadcasts", 55, runScheduledBroadcasts),
     every(600, "holds", 590, releaseHolds),
     every(3600, "lowstock", 3590, lowStockAlerts),
@@ -359,7 +407,13 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(300, "saleoos", 290, async () => { await resetPricesForSoldOut(); }),
     // Supplier stock and prices, every 5 minutes: what they sold out of comes
     // off our shelves, and a price rise follows through with the markup.
-    every(300, "supsync", 290, async () => { await syncAllSuppliers(); }),
+    //
+    // syncAllSuppliers walks every active supplier one at a time — an 8 s
+    // catalogue fetch each, then a write pass over that supplier's products —
+    // so a handful of suppliers with real catalogues runs past the 290 s this
+    // used to lock for. Same fix as the sweep: generous runtime cap, released
+    // on completion so the 5-minute cadence stands.
+    every(300, "supsync", SUPSYNC_LOCK_TTL, async () => { await syncAllSuppliers(); }, true),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     // The once-a-day jobs TICK hourly and are held to once a day by a ~24 h lock
     // instead of a 24 h setInterval. An interval that long never fires at all on

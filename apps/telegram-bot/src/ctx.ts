@@ -57,8 +57,6 @@ export interface SessionData {
     | "admin_bnpl"
     | "admin_emoji_capture"
     | "admin_emoji_name"
-    | "wallet_topup_amount"
-    | "wallet_topup_txn"
     | "wallet_free_txn"
     | "reseller_price"
     | "upi_ref"
@@ -248,8 +246,6 @@ export interface SessionData {
   supDraft?: { name?: string; url?: string; key?: string };
   userTarget?: string;
   prodSearch?: string;
-  /** Pending customer wallet top-up awaiting a transaction ID. */
-  walletTopupId?: string;
   /** Pending UPI order awaiting a UTR reference. */
   upiOrderId?: string;
   /** Variant the user is buying; awaiting quantity. */

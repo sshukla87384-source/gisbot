@@ -12,6 +12,19 @@ cd "$(dirname "$0")/../.."
 
 [ -f .env ] || { echo "ERROR: .env missing (copy .env.example and fill it in)"; exit 1; }
 
+# The API needs a JWT secret and the shared schema cannot demand it (the bot
+# and worker run without one). Check it here, only for the profile that starts
+# the API, so a bot-only deploy is never blocked by a variable it does not use.
+if [ "$PROFILE" = "full" ]; then
+  JWT_SECRET_VAL="$(grep -E '^JWT_SECRET=' .env | head -n1 | cut -d= -f2- || true)"
+  JWT_SECRET_VAL="${JWT_SECRET_VAL%%#*}"; JWT_SECRET_VAL="${JWT_SECRET_VAL//[[:space:]]/}"
+  JWT_SECRET_VAL="${JWT_SECRET_VAL//\"/}"; JWT_SECRET_VAL="${JWT_SECRET_VAL//\'/}"
+  if [ "${#JWT_SECRET_VAL}" -lt 32 ]; then
+    echo "ERROR: JWT_SECRET must be set (32+ chars) in .env for the api — generate one with: openssl rand -hex 32"
+    exit 1
+  fi
+fi
+
 # Sync FIRST. Everything below (nginx template, compose file, Dockerfiles, app
 # source) has to come from the revision we are about to deploy — rendering the
 # nginx config before the pull shipped the PREVIOUS release's template.
@@ -59,8 +72,16 @@ done
 echo "==> Applying stack"; $COMPOSE up -d --remove-orphans
 
 # Reclaim space: drop old images + build cache left by previous builds (safe — never touches volumes).
-echo "==> Pruning old images & build cache"
-docker image prune -af >/dev/null 2>&1 || true
+#
+# NOT `docker image prune -af`. That removes every image no container is
+# currently using, daemon-wide — on a VPS that also hosts anything else, one
+# deploy of THIS stack deleted that service's images too, and it could not be
+# restarted without pulling them again. Scoped to dangling layers (unreferenced
+# by definition) plus images labelled with this compose project.
+COMPOSE_PROJECT=gis # must match `name:` in compose.prod.yml
+echo "==> Pruning old images & build cache (project: ${COMPOSE_PROJECT})"
+docker image prune -f >/dev/null 2>&1 || true
+docker image prune -af --filter "label=com.docker.compose.project=${COMPOSE_PROJECT}" >/dev/null 2>&1 || true
 docker builder prune -af >/dev/null 2>&1 || true
 
 echo "==> Waiting for bot health"

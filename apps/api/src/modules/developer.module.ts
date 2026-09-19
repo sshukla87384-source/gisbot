@@ -1,5 +1,6 @@
 import { addToCart, checkoutWithWallet, checkoutWithBnpl, getBnplStatus, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
+import { randomUUID } from "node:crypto";
 import { prisma, type Currency } from "@gis/database";
 import { Body, Controller, Get, Header, Module, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiSecurity, ApiTags } from "@nestjs/swagger";
@@ -36,6 +37,11 @@ function currencyOf(_q?: unknown): Currency {
  * Base path: /api/v1/developer   ·   Docs: /api/v1/developer/docs
  * Auth: send your key as the `X-API-Key` header (or `Authorization: Bearer`).
  */
+
+/** Placeholder stored under an Idempotency-Key while its order is in flight. */
+const IDEM_PENDING = "__pending__";
+const IDEM_TTL_SEC = 86_400;
+const ORDER_LOCK_SEC = 30;
 
 const purchaseSchema = z.object({
   variantId: z.string().min(1),
@@ -400,20 +406,42 @@ export class DeveloperController {
     const idemRaw = req.headers["idempotency-key"];
     const idem = (Array.isArray(idemRaw) ? idemRaw[0] : idemRaw)?.trim();
     const idemKey = idem ? `apiidem:${req.apiKey?.id}:${idem}` : null;
+    const redis = getRedis();
+    let idemClaimed = false;
     if (idemKey) {
-      const prev = await getRedis().get(idemKey);
-      if (prev) {
+      const prev = await redis.get(idemKey);
+      if (prev && prev !== IDEM_PENDING) {
         const o = await prisma.order.findFirst({ where: { orderNumber: prev, userId } });
         if (o) return { orderNumber: o.orderNumber, status: o.status, currency: o.currency, totalMinor: o.totalMinor, replayed: true, items: [] };
       }
+      // Claim the key BEFORE checking out. Writing it only afterwards left a
+      // whole checkout's worth of time in which a retry of the same request
+      // bought a second order.
+      const claimed = await redis.set(idemKey, IDEM_PENDING, "EX", IDEM_TTL_SEC, "NX");
+      if (claimed !== "OK") {
+        throw new ApiError(409, "IDEMPOTENCY_IN_FLIGHT", "A request with this Idempotency-Key is still being processed. Retry in a moment.");
+      }
+      idemClaimed = true;
     }
+
+    // The cart is a single shared row per user, so two concurrent API purchases
+    // would interleave clearCart/addToCart and check out each other's items.
+    const lockKey = `apiorder:lock:${userId}`;
+    const lockToken = randomUUID();
+    const locked = await redis.set(lockKey, lockToken, "EX", ORDER_LOCK_SEC, "NX");
+    if (locked !== "OK") {
+      if (idemClaimed && idemKey) await redis.del(idemKey).catch(() => undefined);
+      throw new ApiError(409, "PURCHASE_IN_PROGRESS", "Another purchase for this account is still in progress. Retry in a moment.");
+    }
+    let placed = false;
     try {
       await clearCart(userId);
       await addToCart(userId, variantId, quantity);
       const r = payWith === "bnpl"
         ? await checkoutWithBnpl(userId, "API")
         : await checkoutWithWallet(userId, "API");
-      if (idemKey) await getRedis().set(idemKey, r.orderNumber, "EX", 86400);
+      placed = true;
+      if (idemKey) await redis.set(idemKey, r.orderNumber, "EX", IDEM_TTL_SEC);
 
       let items: Array<{ product: string; variant: string; kind: string; secret: unknown; activationGuide?: string | null }> =
         r.deliveries.map((d) => ({
@@ -467,11 +495,19 @@ export class DeveloperController {
         items,
       };
     } catch (e) {
+      // Only release the claim when no order was actually created, otherwise a
+      // retry after a post-checkout hiccup would buy a second one.
+      if (idemKey && idemClaimed && !placed) await redis.del(idemKey).catch(() => undefined);
       if (isCoreError(e)) {
         const status = e.code === "INSUFFICIENT_BALANCE" ? 402 : 400;
         throw new ApiError(status, e.code, e.message);
       }
       throw e;
+    } finally {
+      // Release only our own lock — never one a later request took after ours expired.
+      if ((await redis.get(lockKey).catch(() => null)) === lockToken) {
+        await redis.del(lockKey).catch(() => undefined);
+      }
     }
   }
 }
@@ -590,6 +626,17 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
 </div></body></html>`;
 }
 
+/**
+ * The global helmet() CSP is `style-src 'self' https:`, which blocks the inline
+ * <style> block this page is built around — it rendered unstyled. Relax ONLY
+ * style-src, and only on the two HTML doc routes; @Header overwrites the header
+ * helmet set upstream, so the global policy stays strict everywhere else.
+ */
+const DOCS_CSP =
+  "default-src 'self'; base-uri 'self'; font-src 'self' https: data:; form-action 'self'; " +
+  "frame-ancestors 'self'; img-src 'self' data:; object-src 'none'; script-src 'none'; " +
+  "script-src-attr 'none'; style-src 'self' 'unsafe-inline'";
+
 /** Public developer-API docs page + health check (no auth). */
 @ApiTags("developer")
 @Public()
@@ -603,6 +650,7 @@ export class DeveloperDocsController {
   @Get()
   @SkipEnvelope()
   @Header("Content-Type", "text/html; charset=utf-8")
+  @Header("Content-Security-Policy", DOCS_CSP)
   docsRoot(): string {
     return docsPage();
   }
@@ -610,6 +658,7 @@ export class DeveloperDocsController {
   @Get("guide")
   @SkipEnvelope()
   @Header("Content-Type", "text/html; charset=utf-8")
+  @Header("Content-Security-Policy", DOCS_CSP)
   guide(): string {
     return docsPage();
   }

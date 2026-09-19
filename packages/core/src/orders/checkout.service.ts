@@ -7,7 +7,7 @@ import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 import { accrueCommissionTx } from "./commission.js";
-import { assignAccountSlot, assignLicenseKey, deliveryExpiry, priceCart, type PricedLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, couponLines, deliveryExpiry, priceCart, type PricedLine } from "./assign.js";
 
 /**
  * Wallet-funded checkout with automatic fulfillment (PRD §6.1, Security doc §5).
@@ -69,10 +69,13 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
             },
           });
 
-          // Auto-deliver from available stock whenever stock exists — regardless of the
-          // coarse fulfillment mode — so any product with keys/accounts is delivered instantly.
-          // A MANUAL product with a declared quantity counts down too.
-          if (!line.reusableSecret && line.manualStock !== null && line.manualStock !== undefined) {
+          // A MANUAL product with a declared quantity counts that quantity down.
+          // ONLY a manual line: `manualStock` is carried whenever the PRODUCT is
+          // manual, but a variant may override the mode to AUTOMATIC — and those
+          // lines then had a unit taken off manualStock before the delivery
+          // attempt as well as consuming a key, so every automatic sale of such a
+          // product burned two units of stock and hit "sold out" twice as fast.
+          if (line.fulfillmentMode === "MANUAL" && !line.reusableSecret && line.manualStock !== null && line.manualStock !== undefined) {
             const dec = await tx.product.updateMany({
               where: { id: line.productId, manualStock: { gte: 1 } },
               data: { manualStock: { decrement: 1 } },
@@ -204,7 +207,7 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
       // 2) Re-price cart from live rows in the wallet currency.
       const lines = await priceCart(tx, userId, wallet.currency, channel);
       const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-      const coupon = await resolveCartCouponTx(tx, userId, wallet.currency, subtotalMinor);
+      const coupon = await resolveCartCouponTx(tx, userId, wallet.currency, subtotalMinor, couponLines(lines));
       const discountMinor = coupon?.discountMinor ?? 0;
       const totalMinor = Math.max(0, subtotalMinor - discountMinor);
       if (wallet.balanceMinor < BigInt(totalMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
@@ -375,7 +378,7 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
 
       const lines = await priceCart(tx, userId, currency, channel);
       const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-      const coupon = await resolveCartCouponTx(tx, userId, currency, subtotalMinor);
+      const coupon = await resolveCartCouponTx(tx, userId, currency, subtotalMinor, couponLines(lines));
       const discountMinor = coupon?.discountMinor ?? 0;
       const totalMinor = Math.max(0, subtotalMinor - discountMinor);
       const available = Math.max(0, u.bnplLimitMinor - u.bnplOutstandingMinor);

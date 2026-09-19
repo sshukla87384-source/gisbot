@@ -1,6 +1,6 @@
 import { prisma } from "@gis/database";
 import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
-import { cached, invalidate } from "./redis.js";
+import { cached, getRedis, invalidate } from "./redis.js";
 
 /**
  * After-sale follow-up: a message sent some time AFTER an order is delivered —
@@ -66,6 +66,12 @@ export async function scheduleFollowup(orderId: string, storeName: string): Prom
       },
     });
     if (!order?.user.telegramId) return false;
+    // ONE follow-up per order, ever. The caller runs inside the fulfillment job,
+    // which retries up to five times, and every retry asked the same customer to
+    // review the same order again. Same reasoning as the referral nudge: failing
+    // open would restore the spam, so a Redis error stays quiet instead.
+    const first = await getRedis().set(`followup:sent:${orderId}`, "1", "EX", 30 * 86_400, "NX");
+    if (first === null) return false;
     const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const name = esc(order.user.firstName ?? (order.user.telegramHandle ? `@${order.user.telegramHandle}` : "there"));
     const products = [...new Set(order.items.map((i) => i.productNameSnap))];

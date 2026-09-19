@@ -2,6 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
 import { enqueueAdminAlert } from "../queues.js";
+import { getRedis } from "../redis.js";
 import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { adjustWallet } from "./wallet.service.js";
 import { CLOCK_SKEW_MS, fetchPayTransactions, getBinanceCreds } from "../orders/binance-poll.service.js";
@@ -48,7 +49,37 @@ export async function createWalletTopup(userId: string, amountMinor: number): Pr
 
 export type TopupVerify =
   | { ok: true; newBalanceMinor: bigint; amountMinor: number; currency: string }
-  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "NOT_PENDING" | "WRONG_USER" };
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "NOT_PENDING" | "WRONG_USER" | "DAILY_LIMIT" };
+
+/**
+ * Free-amount deposits have no ownership guard by design — whoever quotes a
+ * transaction id gets the credit — so one account can only be allowed to claim
+ * so many of them in a day. Same shape as the referral nudge's counter: one
+ * Redis key per user per day, self-cleaning, and a Redis outage never blocks a
+ * genuine deposit.
+ */
+export const FREE_TOPUP_DAILY_CAP = 10;
+
+const freeTopupKey = (userId: string): string => `freetopup:${userId}:${new Date().toISOString().slice(0, 10)}`;
+
+async function freeTopupClaimsToday(userId: string): Promise<number> {
+  try {
+    const n = Number(await getRedis().get(freeTopupKey(userId)));
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0; // Redis unavailable — never refuse real money over housekeeping
+  }
+}
+
+/** Counted only once the credit actually landed, so a typo costs nobody a claim. */
+async function noteFreeTopupClaim(userId: string): Promise<void> {
+  try {
+    const redis = getRedis();
+    const k = freeTopupKey(userId);
+    const n = await redis.incr(k);
+    if (n === 1) await redis.expire(k, 172_800);
+  } catch { /* housekeeping only */ }
+}
 
 /** Verify a Binance transaction ID against a pending top-up and credit the wallet. */
 export async function verifyTopupByTxn(topupId: string, txnId: string, expectedUserId?: string): Promise<TopupVerify> {
@@ -137,6 +168,9 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
   const cfg = loadConfig();
   const creds = await getBinanceCreds();
   if (!creds) return { ok: false, reason: "NO_API" };
+  // Checked before the Binance round trip, so a capped account cannot keep the
+  // API busy either.
+  if (await freeTopupClaimsToday(userId) >= FREE_TOPUP_DAILY_CAP) return { ok: false, reason: "DAILY_LIMIT" };
   const clean = txnId.trim();
   const [dupTopup, dupOrder] = await Promise.all([
     prisma.walletTopup.findFirst({ where: { binanceTxnId: clean }, select: { id: true } }),
@@ -193,6 +227,7 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
     // Binance id can never both credit (each call makes its own topup row).
     note: `Binance deposit (txn ${ref})`, idempotencyKey: `topup-txn:${ref}`,
   });
+  await noteFreeTopupClaim(userId);
   await notifyTopupToAdmins({ ...user, currency: walletCur }, creditMinor, `Binance ${usdt.toFixed(2)} USDT`, ref, newBalanceMinor);
   return { ok: true, newBalanceMinor, amountMinor: creditMinor, currency: walletCur };
 }

@@ -62,6 +62,17 @@ jobs:
       - run: pnpm --filter @gis/database exec prisma generate
       - run: pnpm -r typecheck
       - run: pnpm -r --if-present test
+      # The admin panel is the only package with a build, and `next build`
+      # typechecks every page the way a deploy does — CI green with a broken
+      # build was how the panel failed on the VPS and nowhere else. It reads no
+      # secrets at build time; NEXT_PUBLIC_API_URL is inlined, so a placeholder
+      # is passed to keep the build deterministic (the real value comes from the
+      # Dockerfile build arg).
+      - name: Build (admin panel)
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.invalid
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: pnpm -r --if-present build
       - name: Verify migrations apply cleanly
         # `migrate deploy || db push` used to hide BOTH a broken migration and
         # the fact that there is no migration history at all. Decide explicitly.
@@ -86,6 +97,16 @@ jobs:
           context: .
           file: infrastructure/docker/Dockerfile.node
           build-args: APP=@gis/telegram-bot
+          push: false
+      # Dockerfile.admin is a different build entirely (Next standalone output,
+      # its own pnpm filter, NEXT_PUBLIC_* inlining). Only ever built on the VPS
+      # by deploy.sh, so a break in it was found during a deploy, not in CI.
+      - name: Build admin image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.admin
+          build-args: NEXT_PUBLIC_API_URL=https://api.example.invalid
           push: false
       # To publish to GHCR: add permissions: packages: write, docker/login-action
       # with GITHUB_TOKEN, and set push: true + tags: ghcr.io/${{ github.repository }}/bot:latest

@@ -16,6 +16,8 @@ export type Tx = Prisma.TransactionClient;
 export interface PricedLine {
   variantId: string;
   productId: string;
+  /** The product's category, so a CATEGORY-scoped coupon can match this line. */
+  categoryId: string;
   productName: string;
   variantName: string;
   productType: string;
@@ -110,6 +112,7 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
     return {
       variantId: v.id,
       productId: v.productId,
+      categoryId: v.product.categoryId,
       productName: v.product.name,
       variantName: v.name,
       productType: v.product.type,
@@ -128,6 +131,15 @@ export async function priceCart(tx: Tx, userId: string, currency: Currency, chan
       fulfillmentMode: (v.fulfillmentMode ?? v.product.fulfillmentMode) as "AUTOMATIC" | "MANUAL",
     };
   });
+}
+
+/**
+ * The priced cart as a scoped coupon needs to see it: which product, which
+ * category, and what that line is worth. Every rail prices the cart the same
+ * way, so they all hand the coupon the same view of it.
+ */
+export function couponLines(lines: PricedLine[]): Array<{ productId: string; categoryId: string; lineTotalMinor: number }> {
+  return lines.map((l) => ({ productId: l.productId, categoryId: l.categoryId, lineTotalMinor: l.unitPriceMinor * l.quantity }));
 }
 
 /** The order item shape a reusable ("same link for everyone") delivery needs. */

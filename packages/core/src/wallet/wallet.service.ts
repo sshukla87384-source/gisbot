@@ -1,6 +1,7 @@
 import { prisma, type Currency, type WalletTxType } from "@gis/database";
 import { CoreError } from "@gis/shared";
 import { convertMinor } from "../fx.js";
+import { releaseCouponForOrderTx } from "../orders/coupon.service.js";
 
 export interface WalletSummary {
   walletId: string;
@@ -128,6 +129,9 @@ export async function refundWalletForOrder(
     });
     await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
     await tx.order.update({ where: { id: orderId }, data: { status: "EXPIRED", walletUsedMinor: 0 } });
+    // The coupon was burned when this order was created and it will never be
+    // paid. Give it back with the money, in the same transaction.
+    await releaseCouponForOrderTx(tx, orderId);
     return true;
   });
 }

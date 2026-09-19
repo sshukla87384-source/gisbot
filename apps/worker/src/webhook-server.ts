@@ -4,6 +4,20 @@ import { prisma, type PaymentProvider as PaymentProviderEnum } from "@gis/databa
 import { getProvider } from "@gis/payments";
 
 const MAX_BODY_BYTES = 1_048_576; // 1 MiB
+/** A whole request (headers + body) must arrive inside this window. */
+const REQUEST_TIMEOUT_MS = 30_000;
+/** Headers alone are far quicker than that — a slowloris never gets further. */
+const HEADERS_TIMEOUT_MS = 15_000;
+/** …and a socket that goes quiet mid-request is dropped rather than held open. */
+const SOCKET_IDLE_MS = 20_000;
+/**
+ * Cap on webhook bodies being buffered at once. Every in-flight request holds
+ * up to MAX_BODY_BYTES in `chunks`, so without a cap a few hundred slow POSTs
+ * are hundreds of megabytes of heap in a 1 GB container — the worker is OOM
+ * killed and takes fulfillment, the outbox and cron with it.
+ */
+const MAX_CONCURRENT_BODIES = 64;
+let inFlightBodies = 0;
 
 const PROVIDER_ENUM: Record<string, PaymentProviderEnum> = {
   razorpay: "RAZORPAY",
@@ -45,11 +59,40 @@ export function startWebhookServer(port: number): Server {
     }
 
     const providerName = match[1]!;
+
+    if (inFlightBodies >= MAX_CONCURRENT_BODIES) {
+      // Shed load rather than buffer without bound. 503 + Retry-After is what
+      // every gateway here treats as "come back", so nothing is lost.
+      res.writeHead(503, { "retry-after": "5" });
+      res.end();
+      req.resume(); // drain, so the socket can be closed cleanly
+      return;
+    }
+
     const chunks: Buffer[] = [];
     let size = 0;
     // Set once the request is finished with, so a late `data` chunk cannot write
     // a second set of headers and a still-arriving `end` cannot run the handler.
     let done = false;
+    inFlightBodies++;
+    // Released exactly once, however the request ends (handled, aborted, timed
+    // out) — a leak here permanently lowers the ceiling above.
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      inFlightBodies--;
+    };
+    res.on("close", release);
+    // A socket that stops sending mid-body holds a slot and a buffer for as long
+    // as the peer likes; Node applies no idle timeout of its own here.
+    req.setTimeout(SOCKET_IDLE_MS, () => {
+      if (done) return;
+      done = true;
+      if (!res.headersSent) res.writeHead(408);
+      if (!res.writableEnded) res.end();
+      req.destroy();
+    });
     // A client that vanishes mid-upload (ECONNRESET) emits `error` on the
     // request stream. With no listener that is an UNHANDLED 'error' event, which
     // takes the whole worker — queues, cron and all — down with it.
@@ -82,9 +125,12 @@ export function startWebhookServer(port: number): Server {
         const rawBody = Buffer.concat(chunks);
         const events = provider.verifyAndParseWebhook(rawBody, req.headers);
         if (events === null) {
-          // Invalid signature — logged for the security channel, no details leaked.
+          // null is the providers' single "do not trust this request" answer:
+          // a bad/absent signature, an unparseable body, or a payload missing
+          // the field that identifies the payment. Logged for the security
+          // channel, no details leaked.
           // eslint-disable-next-line no-console
-          console.warn("webhook signature verification failed", { provider: providerName });
+          console.warn("webhook rejected as invalid", { provider: providerName });
           res.writeHead(400);
           res.end();
           return;
@@ -109,6 +155,15 @@ export function startWebhookServer(port: number): Server {
             // left to notice. Treating it as "already handled" is how a PAID
             // order is never fulfilled. Re-enqueue instead — the job id is
             // derived from the event, so a genuine duplicate is still a no-op.
+            //
+            // The processedAt read below is only a cheap filter, NOT the
+            // safety property: processedAt can be stamped between this SELECT
+            // and the enqueue. Two things make that harmless. The job id is
+            // derived from the row (`wh:<webhookEventId>`), so re-adding it is
+            // a no-op for as long as BullMQ still holds the job; and if it has
+            // been evicted, processWebhookEvent re-reads the row and returns
+            // immediately on a non-null processedAt. The enqueue is therefore
+            // idempotent on the event, not on the timing of this check.
             const existing = await prisma.webhookEvent.findUnique({
               where: { provider_eventId: { provider: providerEnum, eventId: event.eventId } },
               select: { id: true, processedAt: true },
@@ -127,6 +182,17 @@ export function startWebhookServer(port: number): Server {
         if (!res.writableEnded) res.end();
       });
     });
+  });
+
+  // Node's defaults leave a half-open request alive far longer than any payment
+  // gateway needs; a handful of them is enough to sit on sockets and buffers.
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+  // A server 'error' (EADDRINUSE, an accept failure) with no listener is thrown
+  // as an uncaught exception, which ends the worker process.
+  server.on("error", (e) => {
+    // eslint-disable-next-line no-console
+    console.error("webhook server error", { error: String(e) });
   });
 
   server.listen(port, () => {

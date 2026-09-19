@@ -52,6 +52,14 @@ function money(minor: number, currency: string): string {
   return currency === "INR" ? `₹${v}` : `$${v}`;
 }
 
+/**
+ * The reminder is parse_mode: HTML and the product line is a name snapshot —
+ * supplier sync imports those from a vendor's API. One "<" in a name and
+ * Telegram rejected the message, so the order that was closest to being paid
+ * got no reminder at all.
+ */
+const esc = (x: string): string => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** Send the single reminder to anyone who left a payment half-finished. */
 export async function runRecoverySweep(limit = 30): Promise<{ sent: number }> {
   const cfg = await getRecoveryConfig();
@@ -106,7 +114,7 @@ export async function runRecoverySweep(limit = 30): Promise<{ sent: number }> {
         "🛒 <b>Your order is still waiting</b>",
         "",
         `🧾 <b>${o.orderNumber}</b>`,
-        ...(what ? [`📦 ${what}`] : []),
+        ...(what ? [`📦 ${esc(what)}`] : []),
         `💰 Amount due: <b>${money(due, o.currency)}</b>${o.currency === "INR" ? ` <i>(${toUsdtCharge(due, o.currency as Currency)} USDT)</i>` : ""}`,
         ...(o.walletUsedMinor > 0 ? [`💳 Already applied from wallet: <b>${money(o.walletUsedMinor, o.currency)}</b>`] : []),
         "",

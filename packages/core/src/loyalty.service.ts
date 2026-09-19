@@ -14,6 +14,14 @@ import type { Currency } from "@gis/database";
 const TTL = 120;
 const KEY = "loyalty.tiers";
 
+/**
+ * Every message below is parse_mode: HTML. A customer's Telegram first name and
+ * an admin's gift wording are both free text, so a single "<" made Telegram
+ * reject the whole message — and since every send here is best-effort, the
+ * customer was simply never told about their tier or their gift.
+ */
+const esc = (x: string): string => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 export interface TierDef { name: string; minSpendMinor: number; perk: string }
 
 const DEFAULT_TIERS: TierDef[] = [
@@ -101,10 +109,10 @@ export async function notifyTierChange(userId: string): Promise<void> {
     await enqueueTelegramMessage(
       u.telegramId,
       [
-        `🏆 <b>You're now ${st.tier.name}!</b>`,
+        `🏆 <b>You're now ${esc(st.tier.name)}!</b>`,
         "",
-        `Thank you for your support${u.firstName ? `, ${u.firstName}` : ""} — you've unlocked <b>${st.tier.perk}</b>.`,
-        st.next ? `\n📈 ${((st.next.minSpendMinor - st.spendMinor) / 100).toFixed(2)} more to reach <b>${st.next.name}</b>.` : "\n👑 You're at the top tier.",
+        `Thank you for your support${u.firstName ? `, ${esc(u.firstName)}` : ""} — you've unlocked <b>${esc(st.tier.perk)}</b>.`,
+        st.next ? `\n📈 ${((st.next.minSpendMinor - st.spendMinor) / 100).toFixed(2)} more to reach <b>${esc(st.next.name)}</b>.` : "\n👑 You're at the top tier.",
       ].join("\n"),
     );
   } catch {
@@ -126,15 +134,15 @@ export async function createGift(userId: string, title: string, detail: string |
       [
         "🎁 <b>You have a gift from us!</b>",
         "",
-        `<b>${title.slice(0, 120)}</b>`,
-        detail ? `\n${detail.slice(0, 500)}` : "",
+        `<b>${esc(title.slice(0, 120))}</b>`,
+        detail ? `\n${esc(detail.slice(0, 500))}` : "",
         "",
         "🙏 A thank-you for being a valued customer. Our team is arranging it and will send it here shortly.",
       ].filter(Boolean).join("\n"),
     ).catch(() => undefined);
   }
   await enqueueAdminAlert(
-    ["🎁 <b>Gift created — deliver by hand</b>", `👤 ${u?.firstName ?? userId}`, `🏷 ${title.slice(0, 80)}`, "", "Mark it delivered in Users → Gifts once sent."].join("\n"),
+    ["🎁 <b>Gift created — deliver by hand</b>", `👤 ${esc(u?.firstName ?? userId)}`, `🏷 ${esc(title.slice(0, 80))}`, "", "Mark it delivered in Users → Gifts once sent."].join("\n"),
   ).catch(() => undefined);
   return { ok: Boolean(g.id) };
 }
@@ -178,7 +186,7 @@ export async function markGiftDelivered(id: string, actor: string): Promise<bool
     .catch(() => null);
   if (!g) return true;
   if (g.user.telegramId) {
-    await enqueueTelegramMessage(g.user.telegramId, `🎁 <b>Your gift has been sent!</b>\n\n<b>${g.title}</b>\n\nEnjoy — and thank you for being with us. 🙏`).catch(() => undefined);
+    await enqueueTelegramMessage(g.user.telegramId, `🎁 <b>Your gift has been sent!</b>\n\n<b>${esc(g.title)}</b>\n\nEnjoy — and thank you for being with us. 🙏`).catch(() => undefined);
   }
   return true;
 }

@@ -81,7 +81,14 @@ export class NowPaymentsProvider implements PaymentProvider {
     if (!safeEqual(expected, signature)) return null;
 
     const status = String(payload["payment_status"] ?? "");
-    const paymentId = String(payload["payment_id"] ?? "");
+    // Without a payment_id the eventId below degrades to ":finished", which is
+    // the SAME key for every such IPN: the unique (provider,eventId) row makes
+    // the first one win and every later payment is discarded as a duplicate —
+    // a paid order that is never fulfilled. An IPN with no payment id is not
+    // something we can identify, so it is rejected outright (null = invalid).
+    const rawPaymentId = payload["payment_id"];
+    const paymentId = rawPaymentId === undefined || rawPaymentId === null ? "" : String(rawPaymentId).trim();
+    if (!paymentId) return null;
     const orderId = payload["order_id"] ? String(payload["order_id"]) : null;
     const priceAmount = Number(payload["price_amount"] ?? Number.NaN);
     const amountMinor = Number.isFinite(priceAmount) ? Math.round(priceAmount * 100) : null;

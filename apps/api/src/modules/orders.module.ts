@@ -73,6 +73,10 @@ export class OrdersController {
     return prisma.order.findMany({
       where: { status: "PENDING_FULFILLMENT" },
       orderBy: { paidAt: "asc" },
+      // Unbounded before: one fulfilment backlog loaded every pending order with
+      // its items and product joins in a single response. Oldest first, so the
+      // cap always shows the work that is due next.
+      take: 200,
       include: {
         user: { select: { telegramHandle: true, firstName: true } },
         items: { where: { fulfilledAt: null }, include: { variant: { include: { product: { select: { name: true, type: true } } } } } },

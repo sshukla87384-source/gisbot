@@ -4,6 +4,9 @@ import { authStore } from "./auth-store";
 // when its build ARG is unset, and `??` would happily keep that empty value.
 const BASE_URL = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/api/v1`;
 
+/** Non-upload requests give up after this; nginx caps the API at 60 s anyway. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export interface ListMeta {
   page?: number;
   perPage?: number;
@@ -59,6 +62,9 @@ export function refreshSession(): Promise<boolean> {
           method: "POST",
           credentials: "include",
           headers: { Accept: "application/json" },
+          // Single-flight: every concurrent 401 awaits THIS promise, so a
+          // refresh that never settles hangs the whole panel, not one request.
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
         if (!res.ok) return false;
         const json = (await res.json().catch(() => null)) as Envelope | null;
@@ -99,17 +105,32 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   const { method = "GET", body, query } = options;
   const url = `${BASE_URL}${path}${buildQuery(query)}`;
 
-  const doFetch = (): Promise<Response> => {
+  const doFetch = async (): Promise<Response> => {
     const headers: Record<string, string> = { Accept: "application/json" };
     const token = authStore.getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    return fetch(url, {
-      method,
-      credentials: "include",
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    try {
+      return await fetch(url, {
+        method,
+        credentials: "include",
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        // Without this a stalled request never settles: the mutation stays
+        // pending, its button stays disabled and the admin has no way forward
+        // but a page reload. Uploads are deliberately left uncapped — a large
+        // file on a slow line legitimately takes longer than this.
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (e) {
+      // A timeout surfaces as a TimeoutError DOMException whose message
+      // ("signal timed out") means nothing to an admin; the toast shows it
+      // verbatim. Give both failure shapes a sentence someone can act on.
+      if (e instanceof DOMException && e.name === "TimeoutError") {
+        throw new ApiError("The server took too long to respond. Please try again.", "TIMEOUT", 0);
+      }
+      throw new ApiError("Could not reach the server. Check your connection.", "NETWORK_ERROR", 0);
+    }
   };
 
   let res = await doFetch();

@@ -635,7 +635,13 @@ async function orderDeliveriesView(ctx: Ctx, orderId: string): Promise<void> {
   const text = lines.join("\n");
   if (text.length <= 3900) { await show(ctx, text, kb, true); return; }
   await show(ctx, `${text.slice(0, 3900)}\n…`, kb, true);
-  await ctx.reply(text.slice(3900).slice(0, 3900), { parse_mode: "HTML" }).catch(() => undefined);
+  // Everything past the SECOND chunk used to be thrown away, and a failed send
+  // was swallowed — so on a large order support was quietly shown only part of
+  // what the customer received, with nothing saying so.
+  for (let at = 3900; at < text.length; at += 3900) {
+    const ok = await ctx.reply(text.slice(at, at + 3900), { parse_mode: "HTML" }).then(() => true).catch(() => false);
+    if (!ok) { await ctx.reply("⚠️ The rest of this order's delivered items could not be shown. Open the order again."); return; }
+  }
 }
 
 async function orderView(ctx: Ctx, orderId: string): Promise<void> {
@@ -676,7 +682,9 @@ async function productsView(ctx: Ctx, page = 1): Promise<void> {
   for (const p of result.items) {
     const tag = p.status === "ACTIVE" ? "🟢" : "🙈";
     const sale = p.onSalePct ? " 🔥" : "";
-    kb.text(`${tag} ${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.name}${sale}`, cb("adm", "prod", p.id)).row();
+    // Telegram truncates a long button label without saying so, and a synced
+    // vendor name easily runs past it — cut it here so the 🔥 stays visible.
+    kb.text(`${tag} ${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.name.slice(0, 40)}${sale}`, cb("adm", "prod", p.id)).row();
   }
   if (result.pages > 1) {
     const nav: Array<ReturnType<typeof sbtn>> = [];
@@ -740,9 +748,18 @@ async function askStep(ctx: Ctx, text: string): Promise<void> {
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: cancelKb() });
 }
 
+/**
+ * A price an admin typed. The minus sign is stripped along with everything else
+ * that is not a digit or a dot, so the `n < 0` arm never fires — the real danger
+ * is the other end: a fat-fingered "99999999999999" becomes a minor-unit value
+ * past Number.MAX_SAFE_INTEGER, which is silently wrong before Prisma even sees
+ * it. Anything above a crore is a typo, so it is refused and re-prompted.
+ */
+const MAX_PRICE_MAJOR = 10_000_000;
+
 function rupeesToMinor(raw: string): number | null {
   const n = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
-  if (!Number.isFinite(n) || n < 0) return null;
+  if (!Number.isFinite(n) || n < 0 || n > MAX_PRICE_MAJOR) return null;
   return Math.round(n * 100);
 }
 
@@ -771,7 +788,7 @@ async function apiKeysView(ctx: Ctx): Promise<void> {
   const lines = ["🔑 <b>Developer API keys</b>", ""];
   for (const k of keys.slice(0, 15)) {
     const state = k.revokedAt ? "🚫 revoked" : "🟢 active";
-    lines.push(`• <b>${k.name}</b> — <code>${k.prefix}…</code> · ${state} · ${k.callCount} calls\n  scopes: ${k.scopes.join(", ")}`);
+    lines.push(`• <b>${escapeHtml(k.name)}</b> — <code>${k.prefix}…</code> · ${state} · ${k.callCount} calls\n  scopes: ${k.scopes.join(", ")}`);
     if (!k.revokedAt) {
       const hasPurchase = k.scopes.includes("orders:write") && k.scopes.includes("wallet:read");
       if (!hasPurchase) kb.text(`⬆️ Enable purchasing — ${k.name.slice(0, 14)}`, cb("adm", "apiup", k.id)).row();
@@ -811,8 +828,8 @@ async function manualDeliverView(ctx: Ctx, orderId: string): Promise<void> {
   const kb = new InlineKeyboard();
   for (const it of items) {
     const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
-    kb.text(`📤 Enter key — ${it.productName}${vn}`, cb("adm", "dlv", it.id)).row();
-    kb.text(`🤖 Auto-buy from supplier — ${it.productName}`, cb("adm", "supbuy", it.id)).row();
+    kb.text(`📤 Enter key — ${it.productName.slice(0, 32)}${vn}`, cb("adm", "dlv", it.id)).row();
+    kb.text(`🤖 Auto-buy from supplier — ${it.productName.slice(0, 26)}`, cb("adm", "supbuy", it.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "orders"));
   const text = items.length
@@ -882,7 +899,7 @@ function composeBroadcastHtml(ctx: Ctx): string {
 async function broadcastProductPicker(ctx: Ctx): Promise<void> {
   const prods = await listProductsBrief(50);
   const kb = new InlineKeyboard();
-  for (const p of prods) kb.text(`${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.name}`, cb("adm", "bcpick", p.id)).row();
+  for (const p of prods) kb.text(`${p.iconEmoji ? `${p.iconEmoji} ` : ""}${p.name.slice(0, 40)}`, cb("adm", "bcpick", p.id)).row();
   kb.text("📨 Send without product", cb("adm", "bcsend")).row();
   kb.text("✖️ Cancel", cb("adm", "home"));
   await show(ctx, "📦 Pick a product to attach a ⚡ Buy button:", kb, true);
@@ -920,8 +937,11 @@ async function finishBroadcast(ctx: Ctx): Promise<void> {
   return sendPanel(ctx, false);
 }
 
+// Every key in BUTTON_LABEL_KEYS needs a default here: the rename screen falls
+// back to this map, and "categories" was missing, so that row rendered as the
+// literal "✏️ undefined" until someone gave it a custom label.
 const BTN_LABEL_DEFAULTS: Record<string, string> = {
-  shop: "🛍 Shop Now", orders: "📦 My Orders", wallet: "💰 Wallet", support: "🎫 Help & Support",
+  shop: "🛍 Shop Now", categories: "🗂 Shop by Category", orders: "📦 My Orders", wallet: "💰 Wallet", support: "🎫 Help & Support",
   account: "👤 My Account", referral: "👥 Referral", currency: "💱 Currency", language: "🌐 Language", developer: "🧑‍💻 Developer API",
 };
 
@@ -967,7 +987,7 @@ async function replaceItemsView(ctx: Ctx, orderId: string): Promise<void> {
   const kb = new InlineKeyboard();
   const auto = o.items.filter((i) => i.type === "LICENSE_KEY" || i.type === "DIGITAL_ACCOUNT");
   for (const i of auto) {
-    kb.text(`🔄 ${i.name}${i.variant.trim().toLowerCase() === "standard" ? "" : ` · ${i.variant}`}`, cb("adm", "repl", i.id)).row();
+    kb.text(`🔄 ${i.name.slice(0, 34)}${i.variant.trim().toLowerCase() === "standard" ? "" : ` · ${i.variant.slice(0, 16)}`}`, cb("adm", "repl", i.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "ord", orderId));
   await show(ctx, auto.length ? `🔄 <b>Replace an item</b> — order <b>${escapeHtml(o.orderNumber)}</b>\nTap the item to deliver a fresh one from stock.` : "No auto-delivery items to replace on this order.", kb, true);
@@ -1399,7 +1419,11 @@ async function recoveryView(ctx: Ctx): Promise<void> {
 async function categoriesAdminView(ctx: Ctx): Promise<void> {
   const cats = await listCategoriesAdmin();
   const kb = new InlineKeyboard().add(sbtn("➕ New category", cb("adm", "catnew"), "success")).row();
-  for (const c of cats) {
+  // Five buttons per category against Telegram's 100-button ceiling: past 19 of
+  // them the WHOLE keyboard is rejected and the screen arrives with no buttons
+  // at all, so the list is capped and the remainder is reported in the text.
+  const SHOWN = 19;
+  for (const c of cats.slice(0, SHOWN)) {
     kb.text(`${c.emoji ?? "🗂"} ${c.name.slice(0, 18)} · ${c.productCount}`, cb("adm", "catpick", c.id)).row();
     kb.text("😀", cb("adm", "catemoji", c.id))
       .text("✏️", cb("adm", "catren", c.id))
@@ -1416,7 +1440,8 @@ async function categoriesAdminView(ctx: Ctx): Promise<void> {
     "Tap a category to <b>bulk-assign products</b> to it. Per row: 😀 tile emoji · ✏️ rename · 👁/🙈 show or hide the tile · 🗑 delete.",
     "",
     cats.length === 0 ? "None yet — tap ➕ New category." : `<i>${cats.length} categories. Deleting one moves its products to Uncategorized, never deletes them.</i>`,
-  ].join("\n"), kb, true);
+    cats.length > SHOWN ? `<i>Showing the first ${SHOWN} — Telegram won't render more buttons than that on one screen.</i>` : "",
+  ].filter(Boolean).join("\n"), kb, true);
 }
 
 /** Bulk categoriser: tick products, then move them all into the target category. */
@@ -1857,7 +1882,21 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
   const id = args[0] ?? "";
 
   switch (action) {
-    case "home": return sendPanel(ctx, true);
+    case "home":
+      // Every ✖️ Cancel on an askStep() prompt points here, and 🏠 Panel lands
+      // here too — but `awaiting` is only ever cleared when a text message
+      // arrives. So cancelling a prompt left the state armed: tap 🔑 Add stock
+      // keys, tap Cancel, type anything at all, and that line was added as a
+      // license key. Navigating back to the panel abandons the prompt, so the
+      // pending step and the id it was going to act on go with it.
+      ctx.session.awaiting = null;
+      ctx.session.admProductId = ctx.session.admVariantId = ctx.session.admOrderId = undefined;
+      ctx.session.admManualItemId = ctx.session.userTarget = ctx.session.ticketId = undefined;
+      ctx.session.admReplaceId = ctx.session.bpField = ctx.session.btnKey = undefined;
+      ctx.session.catTarget = ctx.session.revTarget = ctx.session.tstTarget = undefined;
+      ctx.session.supTarget = ctx.session.dmTarget = undefined;
+      ctx.session.pendEmojiId = ctx.session.pendEmojiGlyph = undefined;
+      return sendPanel(ctx, true);
     case "bharatpe": return bharatpeView(ctx);
     case "bpset":
       ctx.session.bpField = id;
@@ -2385,7 +2424,8 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         return suppliersView(ctx);
       }
       if ("err" in r && r.err) {
-        await ctx.reply(`❌ Sync failed: ${escapeHtml(String(r.err)).slice(0, 200)}`);
+        // Escaped text needs parse_mode, or the admin reads "&lt;" instead of "<".
+        await ctx.reply(`❌ Sync failed: ${escapeHtml(String(r.err).slice(0, 200))}`, { parse_mode: "HTML" });
         return suppliersView(ctx);
       }
       if (r.added + r.updated + r.skipped === 0) {
@@ -2434,7 +2474,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "suptest": {
       const r = await testSupplier(id);
-      await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ ${escapeHtml(r.detail)}`);
+      await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ ${escapeHtml(r.detail)}`, { parse_mode: "HTML" });
       return;
     }
     case "suprm": {
@@ -2637,7 +2677,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "ppw": {
       const cur = (await getProductBriefById(id))?.allowPwChange ?? false;
       await setProductPasswordChange(id, !cur);
-      await ctx.reply(!cur ? "🔓 Customers can now change this account's password." : "🔒 Customers are told not to change this account's password.");
+      flash(ctx, !cur ? "🔓 Customers can now change this account's password." : "🔒 Customers are told not to change this account's password.");
       return productView(ctx, id);
     }
     case "preuse": {
@@ -2684,19 +2724,16 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const on = a.productIds.includes(id);
       const ids = on ? a.productIds.filter((x) => x !== id) : [...a.productIds, id];
       await setAutoPromo({ productIds: ids });
-      await ctx.reply(
-        on
-          ? "🚫 Removed from Auto-Promo — it won't be posted automatically."
-          : `✅ Added to Auto-Promo${a.enabled ? ` — it will be posted with a rotating style every ${a.everyHours}h.` : ".\n\n⚠️ Auto-Promo is currently OFF. Turn it on in Marketing → 🤖 Auto-Promo."}`,
-        { parse_mode: "HTML" },
-      );
+      flash(ctx, on
+        ? "🚫 Removed from Auto-Promo — it won't be posted automatically."
+        : `✅ Added to Auto-Promo${a.enabled ? ` — it will be posted with a rotating style every ${a.everyHours}h.` : ".\n\n⚠️ Auto-Promo is currently OFF. Turn it on in Marketing → 🤖 Auto-Promo."}`);
       return productView(ctx, id);
     }
     case "pwar": {
       const b = await getProductBriefById(id);
       const cur = b?.warranty ?? false;
       await setProductWarranty(id, !cur);
-      await ctx.reply(!cur ? "🛡 Warranty is ON — buyers can request a replacement for this product." : "🚫 Warranty is OFF — replacement requests will be refused for this product.");
+      flash(ctx, !cur ? "🛡 Warranty is ON — buyers can request a replacement for this product." : "🚫 Warranty is OFF — replacement requests will be refused for this product.");
       return productView(ctx, id);
     }
     case "pwardays":
@@ -2709,9 +2746,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       // of the same product can expire differently. One variant → skip the picker.
       const vs = await listVariantsBrief(id);
       if (vs.length === 0) { await ctx.reply("No variants on this product."); return productView(ctx, id); }
+      // Remembered for BOTH branches: pvaldo only carries the variant id, so
+      // without this the "back to the product" step at the end of the flow used
+      // whatever product was left in the session from some earlier screen.
+      ctx.session.admProductId = id;
       if (vs.length === 1) {
         ctx.session.admVariantId = vs[0]!.id;
-        ctx.session.admProductId = id;
         ctx.session.awaiting = "admin_variant_validity";
         await askStep(ctx, DURATION_PROMPT("⏳ Send how long the delivered key/account stays <b>valid</b>"));
         return;
@@ -2901,7 +2941,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "catdel": {
       const r = await deleteCategory(id);
       await ctx.answerCallbackQuery().catch(() => undefined);
-      await ctx.reply(`🗑 Category deleted. ${r.moved} product(s) moved to Uncategorized — nothing was lost.`);
+      flash(ctx, `🗑 Category deleted. ${r.moved} product(s) moved to Uncategorized — nothing was lost.`);
       return categoriesAdminView(ctx);
     }
     case "tks": return ticketsListView(ctx);
@@ -3453,7 +3493,9 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
           `✅ Credited <b>$${(usdMinor / 100).toFixed(2)}</b> (₹${(inrMinor / 100).toFixed(2)} @ 100 INR = 1 USD). New balance: <b>${(Number(res.newBalanceMinor ?? 0n) / 100).toFixed(2)} ${res.currency ?? "USD"}</b>.`,
           { parse_mode: "HTML" },
         );
-        await dmUser(uid, `✅ <b>Wallet topped up!</b>\n\n💰 <b>$${(usdMinor / 100).toFixed(2)}</b> added (₹${(inrMinor / 100).toFixed(2)} at 100 INR = 1 USD).\nYou can pay for any order instantly now. 🚀`).catch(() => undefined);
+        // Plain text: dmUser escapes whatever it is handed, so tags would reach
+        // the customer as a literal "<b>".
+        await dmUser(uid, `✅ Wallet topped up!\n\n💰 $${(usdMinor / 100).toFixed(2)} added (₹${(inrMinor / 100).toFixed(2)} at 100 INR = 1 USD).\nYou can pay for any order instantly now. 🚀`).catch(() => undefined);
       } else {
         await ctx.reply("❌ Couldn't credit that customer.");
       }
@@ -3464,8 +3506,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       if (rejected?.utr) { await clearUpiUtrPending(rejected.utr); await dropUpiTopupClaim(id); }
       const rejectTarget = rejected?.userId ?? id;
       if (!rejectTarget) return;
-      await dmUser(rejectTarget, "❌ <b>We could not verify that UPI payment.</b>\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => undefined);
-      await ctx.reply("❌ Rejected — the customer has been told.");
+      // Report what actually happened: swallowing the DM failure and saying "the
+      // customer has been told" left the operator believing a customer who never
+      // heard anything was waiting on nothing. Plain text, because dmUser escapes
+      // whatever it is handed.
+      const told = await dmUser(rejectTarget, "❌ We could not verify that UPI payment.\n\nPlease double-check the UTR on your receipt and send it again, or open 🎫 Support and our team will help. 🙏").catch(() => false);
+      await ctx.reply(told
+        ? "❌ Rejected — the customer has been told."
+        : "❌ Rejected, but the customer could NOT be messaged (they may have blocked the bot). Reach them another way.");
       return;
     }
     case "tlprice": {
@@ -3697,15 +3745,15 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "pactive": {
       await setProductStatus(id, "ACTIVE");
-      await ctx.reply("👁 Now visible — customers can see and buy this product.").catch(() => undefined);
       const ann = await announceProduct(id, { createdById: "bot-admin", force: true });
-      await ctx.reply(`🟢 Activated.${ann.announced ? ` 📣 Notified ${ann.targets ?? 0} users with a ⚡ Buy Now button.` : ""}`);
+      // One banner, not two chat bubbles saying the same thing.
+      flash(ctx, `👁 <b>Now visible</b> — customers can see and buy this product.${ann.announced ? ` 📣 Notified ${ann.targets ?? 0} users with a ⚡ Buy Now button.` : ""}`);
       return productView(ctx, id);
     }
-    case "ppause": { await setProductStatus(id, "PAUSED"); await ctx.reply("🙈 Hidden — customers can no longer see or buy this product."); return productView(ctx, id); }
+    case "ppause": { await setProductStatus(id, "PAUSED"); flash(ctx, "🙈 Hidden — customers can no longer see or buy this product."); return productView(ctx, id); }
     case "announce": {
       const r = await announceProduct(id, { createdById: "bot-admin", force: true });
-      await ctx.reply(r.announced ? `📣 Announced to ${r.targets ?? 0} users.` : "⚠️ Product must be ACTIVE to announce.");
+      flash(ctx, r.announced ? `📣 Announced to ${r.targets ?? 0} users.` : "⚠️ Product must be ACTIVE to announce.");
       return productView(ctx, id);
     }
     case "sale": {
@@ -3714,7 +3762,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply("🔥 Send: <b>&lt;percent&gt; &lt;hours&gt;</b>  (e.g. <code>20 48</code> = 20% off for 48 h). Send <code>0</code> for hours to run until you stop it.", { parse_mode: "HTML" });
       return;
     }
-    case "saleoff": { await clearFlashSale(id); await ctx.reply("🔥 Sale ended."); return productView(ctx, id); }
+    case "saleoff": { await clearFlashSale(id); flash(ctx, "🔥 Sale ended."); return productView(ctx, id); }
     case "pbulk":
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_bulk";
@@ -3828,10 +3876,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "groups": return groupsView(ctx);
-    case "grpdel": { await removePostTarget(id); await ctx.reply("🗑 Removed."); return groupsView(ctx); }
+    case "grpdel": { await removePostTarget(id); flash(ctx, "🗑 Removed."); return groupsView(ctx); }
     case "gpost": {
       const n = await postProductToGroups(id);
-      await ctx.reply(n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
+      flash(ctx, n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
     case "binapi":
@@ -4101,6 +4149,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
   if (awaiting === "admin_p_btntext") {
     const pid = ctx.session.admProductId ?? "";
+    // Without the product the colour buttons below carry an empty id and do
+    // nothing at all when tapped — a dead row rather than an error.
+    if (!pid) { await ctx.reply("That product expired — open it again and tap 🎨 Button name & colour."); return true; }
     await setProductButton(pid, text.trim() === "-" ? "" : text.trim(), null);
     const kb = new InlineKeyboard()
       .text("🟢 Green", cb("adm", "pbtncol", `${pid}~success`)).text("🔵 Blue", cb("adm", "pbtncol", `${pid}~primary`)).text("🔴 Red", cb("adm", "pbtncol", `${pid}~danger`)).row()
@@ -4162,7 +4213,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const norm = await normalizeSupplierBase(id).catch(() => ({ changed: false, detail: "" }));
     if (norm.changed && norm.detail) await ctx.reply(norm.detail, { parse_mode: "HTML" });
     const t = await testSupplier(id);
-    await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`);
+    await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`, { parse_mode: "HTML" });
     await suppliersView(ctx);
     return true;
   }
@@ -5059,7 +5110,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const target = ctx.session.userTarget ?? ""; ctx.session.userTarget = undefined;
     const sign = awaiting === "admin_user_deductbal" ? -1 : 1;
     const val = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
-    if (!target || !Number.isFinite(val) || val <= 0) { await ctx.reply("Please send a valid amount, e.g. 10."); return true; }
+    // An amount past the cap turns into a minor-unit value the wallet column
+    // cannot hold, and the credit fails deep inside Prisma with no explanation.
+    if (!target || !Number.isFinite(val) || val <= 0 || val > MAX_PRICE_MAJOR) { await ctx.reply("Please send a valid amount, e.g. 10."); return true; }
     const r = await adjustUserWalletById(target, sign * Math.round(val * 100), String(ctx.from?.id ?? ""));
     await ctx.reply(r.ok ? `✅ ${sign > 0 ? "Added" : "Deducted"} ${val.toFixed(2)}. New balance: <b>${(Number(r.newBalanceMinor) / 100).toFixed(2)} ${r.currency}</b>.` : "❌ Could not adjust.", { parse_mode: "HTML" });
     await userDetailView(ctx, target);
@@ -5069,13 +5122,13 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const parts = text.split(/\s+/);
     const identifier = parts[0] ?? "";
     const amt = Number.parseFloat(parts[1] ?? "");
-    if (!identifier || !Number.isFinite(amt) || amt === 0) {
+    if (!identifier || !Number.isFinite(amt) || amt === 0 || Math.abs(amt) > MAX_PRICE_MAJOR) {
       await ctx.reply("Format: <id or @user> <amount>. Example: 123456789 500");
       return true;
     }
     const res = await adjustUserWallet(identifier, Math.round(amt * 100));
     if (!res.ok) await ctx.reply("❌ User not found. Use their Telegram numeric ID or @username (they must have used the bot).");
-    else await ctx.reply(`✅ ${amt >= 0 ? "Credited" : "Debited"} ${res.label}. New balance: <b>${(Number(res.newBalanceMinor) / 100).toFixed(2)} ${res.currency}</b>.`, { parse_mode: "HTML" });
+    else await ctx.reply(`✅ ${amt >= 0 ? "Credited" : "Debited"} ${escapeHtml(res.label ?? "")}. New balance: <b>${(Number(res.newBalanceMinor) / 100).toFixed(2)} ${res.currency}</b>.`, { parse_mode: "HTML" });
     await sendPanel(ctx, false);
     return true;
   }

@@ -110,14 +110,34 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         return { kind: "mismatch" as const, orderNumber: order.orderNumber };
       }
 
-      await tx.payment.updateMany({
-        where: { orderId: order.id },
-        data: {
-          status: "SUCCEEDED",
-          capturedAt: new Date(),
-          ...(normalized.providerRef ? { providerRef: normalized.providerRef } : {}),
-        },
-      });
+      // Capture the ONE payment this event is about. `updateMany` across the
+      // whole order marked every attempt SUCCEEDED — a customer who tried UPI,
+      // gave up and paid by crypto left two payment rows, and both were booked
+      // as captured, so the order read as paid twice and reconciliation had to
+      // be done by hand. It also stamped the new providerRef onto all of them,
+      // which the (provider, providerRef) unique cannot allow.
+      const captured =
+        (normalized.providerRef
+          ? await tx.payment.findFirst({
+              where: { orderId: order.id, providerRef: normalized.providerRef },
+              select: { id: true },
+            })
+          : null) ??
+        (await tx.payment.findFirst({
+          where: { orderId: order.id, status: { in: ["CREATED", "PENDING"] } },
+          orderBy: { createdAt: "desc" },
+          select: { id: true },
+        }));
+      if (captured) {
+        await tx.payment.update({
+          where: { id: captured.id },
+          data: {
+            status: "SUCCEEDED",
+            capturedAt: new Date(),
+            ...(normalized.providerRef ? { providerRef: normalized.providerRef } : {}),
+          },
+        });
+      }
       await tx.order.update({ where: { id: order.id }, data: { status: "PAID", paidAt: new Date() } });
 
       const deliveries: QueuedDelivery[] = [];
@@ -364,9 +384,13 @@ async function handleFailure(eventId: string, normalized: NormalizedPaymentEvent
     });
     const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } });
     if (order?.user.telegramId != null && order.status === "PENDING_PAYMENT") {
+      // The reason is free text the GATEWAY wrote (Razorpay's error_description).
+      // Dropped into an HTML message unescaped, a single "<" made Telegram reject
+      // the send, so the customer was never told their payment had failed.
+      const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       await enqueueTelegramMessage(
         order.user.telegramId,
-        `❌ Payment for order <b>${order.orderNumber}</b> failed${normalized.failureReason ? ` (${normalized.failureReason})` : ""}. You can retry from 🛒 Cart → Checkout.`,
+        `❌ Payment for order <b>${esc(order.orderNumber)}</b> failed${normalized.failureReason ? ` (${esc(normalized.failureReason)})` : ""}. You can retry from 🛒 Cart → Checkout.`,
       );
     }
   }

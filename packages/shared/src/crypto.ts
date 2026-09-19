@@ -15,7 +15,20 @@ function keyFromHex(masterKeyHex: string): Buffer {
   return key;
 }
 
+/**
+ * Key material accepted by decryptSecret: either the single master key hex (the
+ * historic signature — every caller still passes this) or a keyId → hex map,
+ * which is what makes the rotation the format above advertises actually work:
+ * ciphertext written under the retired key keeps decrypting while new writes go
+ * out under the new one.
+ */
+export type KeyRing = Record<string, string>;
+
 export function encryptSecret(plaintext: string, masterKeyHex: string, keyId = DEFAULT_KEY_ID): string {
+  // ":" is the field separator. A keyId containing one shifts every field along
+  // and the payload no longer parses (or, worse, parses as someone else's
+  // nonce/ciphertext) — reject it at the point it is written, not on read.
+  if (keyId.includes(":")) throw new Error('keyId must not contain ":"');
   const key = keyFromHex(masterKeyHex);
   const nonce = randomBytes(NONCE_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
@@ -24,10 +37,30 @@ export function encryptSecret(plaintext: string, masterKeyHex: string, keyId = D
   return [VERSION, keyId, nonce.toString("base64"), ct.toString("base64"), tag.toString("base64")].join(":");
 }
 
-export function decryptSecret(payload: string, masterKeyHex: string): string {
+/**
+ * Decrypt a payload written by encryptSecret.
+ *
+ * Passing the master key hex is the original behaviour, unchanged: the keyId in
+ * the payload is informational and that one key is used. Passing a keyId → hex
+ * map instead selects the key the payload was written under, which is the whole
+ * point of carrying a keyId and was previously parsed and thrown away — so the
+ * documented zero-downtime rotation could not be performed at all.
+ */
+export function decryptSecret(payload: string, keyMaterial: string | KeyRing): string {
   const parts = payload.split(":");
   if (parts.length !== 5 || parts[0] !== VERSION) throw new Error("Unsupported ciphertext format");
-  const [, , nonceB64, ctB64, tagB64] = parts;
+  const [, keyId, nonceB64, ctB64, tagB64] = parts;
+  let masterKeyHex: string;
+  if (typeof keyMaterial === "string") {
+    masterKeyHex = keyMaterial;
+  } else {
+    const fromRing = keyMaterial[keyId ?? ""];
+    if (!fromRing) {
+      const known = Object.keys(keyMaterial).join(", ") || "(empty key ring)";
+      throw new Error(`No decryption key for keyId "${keyId ?? ""}" — key ring holds: ${known}`);
+    }
+    masterKeyHex = fromRing;
+  }
   const key = keyFromHex(masterKeyHex);
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(nonceB64!, "base64"));
   decipher.setAuthTag(Buffer.from(tagB64!, "base64"));

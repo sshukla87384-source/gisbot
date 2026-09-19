@@ -219,6 +219,13 @@ export async function pollBinancePayments(): Promise<number> {
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("binance auto-confirm failed", { orderId: order.id, error: String(e) });
+      // The txn is already CLAIMED on this order, so the next poll skips it as
+      // "already used" and nothing retries. Silently, that is a customer who
+      // paid and will sit in PENDING_PAYMENT until the order expires — so the
+      // failure has to reach a human.
+      await enqueueAdminAlert(
+        `🚨 Binance payment landed but fulfilment failed — ${order.orderNumber} (${order.binanceAmount} USDT, txn ${txnId}). Confirm it by hand in the panel.`,
+      ).catch(() => undefined);
     }
   }
   return confirmed;

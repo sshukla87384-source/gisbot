@@ -22,7 +22,10 @@ export async function createApiKey(input: {
   expiresAt?: Date | null;
   ownerUserId?: string;
 }): Promise<CreatedApiKey> {
-  const raw = KEY_PREFIX + randomBytes(24).toString("hex"); // gis_live_<48 hex>
+  // 32 bytes = the 256-bit key the security doc promises; 24 was 192-bit.
+  // Nothing anywhere reads a fixed length — the prefix shown is a slice, the
+  // stored hash is SHA-256 either way — so older keys keep working untouched.
+  const raw = KEY_PREFIX + randomBytes(32).toString("hex"); // gis_live_<64 hex>
   const keyHash = sha256Hex(raw);
   const prefix = raw.slice(0, 16);
   const scopes = input.scopes.filter((s) => (API_SCOPES as readonly string[]).includes(s));
@@ -149,7 +152,7 @@ export async function regenerateApiKeyForOwner(
       where: { ownerUserId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
-    const raw = KEY_PREFIX + randomBytes(24).toString("hex");
+    const raw = KEY_PREFIX + randomBytes(32).toString("hex");
     const rec = await tx.apiKey.create({
       data: {
         name: name.slice(0, 120),

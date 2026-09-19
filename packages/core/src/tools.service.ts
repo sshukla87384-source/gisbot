@@ -155,8 +155,11 @@ export async function stockHealth(lowThreshold = 3): Promise<StockHealth> {
   const [keys, accts, sold, waits] = await Promise.all([
     ids.length ? prisma.licenseKey.groupBy({ by: ["variantId"], where: { variantId: { in: ids }, status: "AVAILABLE", deletedAt: null }, _count: { _all: true } }) : [],
     ids.length ? prisma.digitalAccount.groupBy({ by: ["variantId"], where: { variantId: { in: ids }, status: "AVAILABLE", deletedAt: null }, _count: { _all: true } }) : [],
-    prisma.orderItem.groupBy({ by: ["variantId"], where: { fulfilledAt: { not: null } }, _count: { _all: true } }),
-    prisma.productWatch.groupBy({ by: ["productId"], where: { type: "RESTOCK" }, _count: { _all: true } }),
+    // Scoped to the variants/products actually on this screen. Grouping the WHOLE
+    // OrderItem and ProductWatch tables and then reading a handful of rows out of
+    // the result aggregated every line the shop has ever sold, on every tap.
+    prisma.orderItem.groupBy({ by: ["variantId"], where: { variantId: { in: ids }, fulfilledAt: { not: null } }, _count: { _all: true } }),
+    prisma.productWatch.groupBy({ by: ["productId"], where: { productId: { in: products.map((p) => p.id) }, type: "RESTOCK" }, _count: { _all: true } }),
   ]);
   const stock = new Map<string, number>();
   for (const r of [...keys, ...accts]) stock.set(r.variantId, (stock.get(r.variantId) ?? 0) + r._count._all);

@@ -1,5 +1,5 @@
 import { prisma } from "@gis/database";
-import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
+import { enqueueTelegramBulk, type OutboxButton } from "./queues.js";
 import { loadConfig } from "@gis/config";
 import type { Currency } from "@gis/database";
 
@@ -51,25 +51,47 @@ export async function topWatched(type: WatchKind = "RESTOCK", limit = 10): Promi
   return grouped.map((g) => ({ productId: g.productId, name: names.get(g.productId) ?? "(deleted)", count: g._count._all }));
 }
 
+/**
+ * Watchers are read and enqueued a page at a time.
+ *
+ * A popular restock is the whole waiting list at once: the findMany had no
+ * bound, and every watcher cost one Redis round trip on the connection grammY
+ * reads sessions from — at the DEFAULT priority, so a paid customer's keys
+ * queued behind an alert blast. enqueueTelegramBulk pipelines each page and
+ * marks it low priority, which is exactly what fan-out is.
+ */
+const FANOUT_PAGE = 500;
+
 async function fanOut(productId: string, type: WatchKind, text: string, buttons?: OutboxButton[]): Promise<number> {
-  const rows = await prisma.productWatch.findMany({
-    where: { productId, type },
-    include: { user: { select: { telegramId: true, notifiable: true } } },
-  });
   let sent = 0;
-  const notified: string[] = [];
-  for (const r of rows) {
-    if (r.user.telegramId && r.user.notifiable) {
-      await enqueueTelegramMessage(r.user.telegramId, text, buttons ? { buttons } : {}).catch(() => undefined);
+  let after: string | undefined;
+  for (;;) {
+    const rows = await prisma.productWatch.findMany({
+      where: { productId, type, ...(after ? { id: { gt: after } } : {}) },
+      include: { user: { select: { telegramId: true, notifiable: true } } },
+      orderBy: { id: "asc" },
+      take: FANOUT_PAGE,
+    });
+    if (rows.length === 0) break;
+    after = rows[rows.length - 1]!.id;
+
+    const jobs: Array<{ telegramId: bigint; text: string; opts?: { buttons: OutboxButton[] } }> = [];
+    const notified: string[] = [];
+    for (const r of rows) {
+      if (!r.user.telegramId || !r.user.notifiable) continue;
+      jobs.push({ telegramId: r.user.telegramId, text, ...(buttons ? { opts: { buttons } } : {}) });
       notified.push(r.id);
-      sent++;
     }
+    if (jobs.length > 0) {
+      sent += await enqueueTelegramBulk(jobs);
+      // One notification per opt-in: clear the rows so a second small restock
+      // cannot spam the same people again. Only the rows we actually notified —
+      // deleting the whole list silently cancelled the subscription of everyone
+      // who had blocked the bot, so they were never told even after coming back.
+      await prisma.productWatch.deleteMany({ where: { id: { in: notified } } });
+    }
+    if (rows.length < FANOUT_PAGE) break;
   }
-  // One notification per opt-in: clear the list so a second small restock
-  // cannot spam the same people again. Only the rows we actually notified —
-  // deleting the whole list silently cancelled the subscription of everyone who
-  // had blocked the bot, so they were never told even after coming back.
-  if (notified.length > 0) await prisma.productWatch.deleteMany({ where: { id: { in: notified } } });
   return sent;
 }
 
@@ -100,35 +122,51 @@ export async function notifyPriceDrop(productId: string, newMinor: number, curre
   const sym = currency === "INR" ? "₹" : "$";
   const url = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
 
-  const rows = await prisma.productWatch.findMany({
-    where: { productId, type: "PRICE_DROP" },
-    include: { user: { select: { telegramId: true, notifiable: true } } },
-  });
+  const buttons: OutboxButton[] | undefined = url
+    ? [{ text: `⚡ Buy at ${sym}${(newMinor / 100).toFixed(2)}`, url, style: "success" }]
+    : undefined;
+
   let sent = 0;
-  const hit: string[] = [];
-  for (const r of rows) {
-    const base = r.basePriceMinor;
-    // Only tell them if it actually dropped below what they were watching.
-    if (base !== null && base !== undefined && newMinor >= base) continue;
-    if (!r.user.telegramId || !r.user.notifiable) continue;
-    const saved = base ? base - newMinor : 0;
-    await enqueueTelegramMessage(
-      r.user.telegramId,
-      [
-        "📉 <b>PRICE DROPPED!</b>",
-        "",
-        `${p.iconEmoji ? `${p.iconEmoji} ` : ""}<b>${esc(p.name)}</b>`,
-        base ? `❌ <s>${sym}${(base / 100).toFixed(2)}</s>  ➡️  ✅ <b>${sym}${(newMinor / 100).toFixed(2)}</b>` : `✅ Now <b>${sym}${(newMinor / 100).toFixed(2)}</b>`,
-        saved > 0 ? `💰 You save <b>${sym}${(saved / 100).toFixed(2)}</b>` : "",
-        "",
-        "🔔 You asked to be told when this got cheaper.",
-      ].filter(Boolean).join("\n"),
-      url ? { buttons: [{ text: `⚡ Buy at ${sym}${(newMinor / 100).toFixed(2)}`, url, style: "success" }] } : {},
-    ).catch(() => undefined);
-    hit.push(r.id);
-    sent++;
+  let after: string | undefined;
+  for (;;) {
+    const rows = await prisma.productWatch.findMany({
+      where: { productId, type: "PRICE_DROP", ...(after ? { id: { gt: after } } : {}) },
+      include: { user: { select: { telegramId: true, notifiable: true } } },
+      orderBy: { id: "asc" },
+      take: FANOUT_PAGE,
+    });
+    if (rows.length === 0) break;
+    after = rows[rows.length - 1]!.id;
+
+    const jobs: Array<{ telegramId: bigint; text: string; opts?: { buttons: OutboxButton[] } }> = [];
+    const hit: string[] = [];
+    for (const r of rows) {
+      const base = r.basePriceMinor;
+      // Only tell them if it actually dropped below what they were watching.
+      if (base !== null && base !== undefined && newMinor >= base) continue;
+      if (!r.user.telegramId || !r.user.notifiable) continue;
+      const saved = base ? base - newMinor : 0;
+      jobs.push({
+        telegramId: r.user.telegramId,
+        text: [
+          "📉 <b>PRICE DROPPED!</b>",
+          "",
+          `${p.iconEmoji ? `${p.iconEmoji} ` : ""}<b>${esc(p.name)}</b>`,
+          base ? `❌ <s>${sym}${(base / 100).toFixed(2)}</s>  ➡️  ✅ <b>${sym}${(newMinor / 100).toFixed(2)}</b>` : `✅ Now <b>${sym}${(newMinor / 100).toFixed(2)}</b>`,
+          saved > 0 ? `💰 You save <b>${sym}${(saved / 100).toFixed(2)}</b>` : "",
+          "",
+          "🔔 You asked to be told when this got cheaper.",
+        ].filter(Boolean).join("\n"),
+        ...(buttons ? { opts: { buttons } } : {}),
+      });
+      hit.push(r.id);
+    }
+    if (jobs.length > 0) {
+      sent += await enqueueTelegramBulk(jobs);
+      await prisma.productWatch.deleteMany({ where: { id: { in: hit } } });
+    }
+    if (rows.length < FANOUT_PAGE) break;
   }
-  if (hit.length > 0) await prisma.productWatch.deleteMany({ where: { id: { in: hit } } });
   return sent;
 }
 

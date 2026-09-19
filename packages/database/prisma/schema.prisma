@@ -1366,7 +1366,11 @@ model Review {
 model ReviewModeration {
   id        String   @id @default(cuid())
   reviewId  String
-  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  /// Restrict, NOT Cascade: this table is the audit trail. Cascading meant
+  /// deleting the review a decision was about erased the record of the decision
+  /// — exactly the evidence an append-only trail exists to keep. Deleting a
+  /// moderated review now fails loudly; soft-delete or archive it instead.
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Restrict)
   action    String // APPROVED | REJECTED | REPLIED | VERIFIED | REOPENED
   reason    String?
   actor     String // which admin

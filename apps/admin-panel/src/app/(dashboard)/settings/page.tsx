@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { apiData } from "@/lib/api";
-import { errorMessage, prettyJson } from "@/lib/utils";
+import { errorMessage } from "@/lib/utils";
 
 interface Setting { key: string; value: unknown }
 
@@ -26,7 +26,17 @@ export default function SettingsPage() {
 }
 
 function SettingRow({ setting, onSaved, toast }: { setting: Setting; onSaved: () => void; toast: (m: string, t?: "success" | "error") => void }) {
-  const [value, setValue] = useState(prettyJson(setting.value));
+  // NOT prettyJson: it renders null/undefined as "—", which is a display
+  // sentinel, not JSON. Seeding the editor with it meant a setting whose value
+  // is null could never be saved — every attempt failed the JSON.parse below
+  // until the admin noticed and deleted the em-dash by hand.
+  const [value, setValue] = useState(() => {
+    try {
+      return JSON.stringify(setting.value ?? null, null, 2);
+    } catch {
+      return "null";
+    }
+  });
   const save = useMutation({
     mutationFn: () => {
       let parsed: unknown;

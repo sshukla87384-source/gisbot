@@ -39,7 +39,9 @@ export default function UserDetail() {
   const removeRole = useMutation({ mutationFn: (r: string) => apiData(`/users/${id}/roles/${r}`, { method: "DELETE" }), onSuccess: () => { toast("Role removed"); invalidate(); }, onError: (e) => toast(errorMessage(e), "error") });
   const adjust = useMutation({
     mutationFn: () => {
-      const minor = toMinor(amount);
+      // In the WALLET's currency, not a blanket 2 decimals: a Stars wallet (XTR)
+      // has no minor unit, so ×100 credited a hundred times what was typed.
+      const minor = toMinor(amount, data?.wallet?.currency);
       if (minor === null) throw new Error("Enter a valid amount");
       return apiData(`/wallets/${id}/adjust`, { method: "POST", body: { amountMinor: sign === "debit" ? -minor : minor, note } });
     },

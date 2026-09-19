@@ -1,6 +1,7 @@
 import { prisma } from "@gis/database";
 import type { Currency } from "@gis/database";
 import { convertMinor, priceUsdFromInr } from "./fx.js";
+import { invalidate } from "./redis.js";
 
 /**
  * Money truth for the operator.
@@ -462,6 +463,10 @@ export async function runQualitySweep(): Promise<{ flagged: number; paused: numb
       await prisma.product.update({ where: { id: r.productId }, data: { status: "PAUSED" } }).catch(() => undefined);
       paused++;
     }
+    // Same as every other status change: without this the shop kept serving the
+    // cached listing, so the admin was told a bad product was "hidden from the
+    // shop" while customers could still buy it.
+    if (paused > 0) await invalidate("cat:*").catch(() => undefined);
   }
   return { flagged: bad.length, paused };
 }

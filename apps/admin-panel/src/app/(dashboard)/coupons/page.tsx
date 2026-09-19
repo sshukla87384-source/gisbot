@@ -92,5 +92,7 @@ export default function CouponsPage() {
 
 function formatMinorSafe(minor: number | null, currency: string | null): string {
   if (minor === null) return "—";
-  return fromMinor(minor) + " " + (currency ?? "");
+  // With the coupon's own currency: a 0-decimal one (XTR) printed as "1.00"
+  // when it is really 100 — a coupon worth a hundred times what it shows.
+  return fromMinor(minor, currency) + " " + (currency ?? "");
 }

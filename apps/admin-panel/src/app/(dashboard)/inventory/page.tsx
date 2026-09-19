@@ -76,13 +76,17 @@ export default function InventoryPage() {
       <Card>
         <div className="flex flex-wrap items-end gap-3">
           <div className="w-64"><Label>Product</Label>
-            <Select value={productId} onChange={(e) => { setProductId(e.target.value); setVariantId(""); setPage(1); }}>
+            <Select value={productId} onChange={(e) => { setProductId(e.target.value); setVariantId(""); setPage(1); setSelected([]); }}>
               <option value="">Select…</option>
               {(products?.data ?? []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
           </div>
           <div className="w-64"><Label>Variant</Label>
-            <Select value={variantId} onChange={(e) => { setVariantId(e.target.value); setPage(1); }} disabled={!detail}>
+            {/* The selection has to be cleared with the variant (and the page):
+                the ids stay checked otherwise, so the bar reads "5 selected"
+                over a table showing a DIFFERENT variant, and 🗑 then
+                permanently deletes five keys the admin can no longer see. */}
+            <Select value={variantId} onChange={(e) => { setVariantId(e.target.value); setPage(1); setSelected([]); }} disabled={!detail}>
               <option value="">Select…</option>
               {(detail?.variants ?? []).map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
             </Select>

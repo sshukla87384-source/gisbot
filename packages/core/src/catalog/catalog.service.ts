@@ -671,7 +671,11 @@ export async function listResellerPrices(
     select: {
       id: true, name: true, iconEmoji: true, salePercentBp: true, saleStartsAt: true, saleEndsAt: true,
       bulkMinQty: true, bulkPercentBp: true, bulkTiers: true,
-      variants: { where: { isActive: true, deletedAt: null }, take: 1, select: { prices: { where: { currency }, take: 1, select: { amountMinor: true } } } },
+      // RETAIL, and the FIRST variant by sort order — everywhere else in this
+      // file already pins both. Without the tier filter a RESELLER_L1 row (the
+      // admin API can write one) could be picked instead, so "what you pay us"
+      // showed a price from a different tier entirely.
+      variants: { where: { isActive: true, deletedAt: null }, orderBy: { sortOrder: "asc" }, take: 1, select: { prices: { where: { currency, tier: { name: "RETAIL" } }, take: 1, select: { amountMinor: true } } } },
     },
   });
   const mine = await prisma.userPrice.findMany({

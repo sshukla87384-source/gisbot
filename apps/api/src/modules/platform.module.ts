@@ -61,7 +61,7 @@ export class PlatformController {
     };
     const [total, rows] = await Promise.all([
       prisma.auditLog.count({ where }),
-      prisma.auditLog.findMany({ where, orderBy: { createdAt: "desc" }, skip: list.skip, take: list.take }),
+      prisma.auditLog.findMany({ where, orderBy: list.orderBy, skip: list.skip, take: list.take }),
     ]);
     return paginated(rows, list.page, list.perPage, total);
   }

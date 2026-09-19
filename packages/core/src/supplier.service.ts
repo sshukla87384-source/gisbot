@@ -949,20 +949,45 @@ export async function setAllSupplierProductsVisible(supplierId: string, visible:
 export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: boolean; reason?: string }> {
   const item = await prisma.orderItem.findUnique({ where: { id: orderItemId }, include: { variant: { include: { product: true } } } });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
+  // Already delivered — buying a second unit for it spends real money on a key
+  // manualFulfillItem would then refuse to attach.
+  if (item.fulfilledAt) return { ok: false, reason: "ALREADY_FULFILLED" };
   const { supplierId, supplierRef } = item.variant.product;
   if (!supplierId || !supplierRef) return { ok: false, reason: "NOT_SUPPLIER" };
-  // Stable per-order-line id → the supplier de-dupes retries instead of double-charging.
-  const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity, `oi-${orderItemId}`);
-  if (r.ok && r.keys.length > 0) {
-    await manualFulfillItem(orderItemId, r.keys.join("\n"));
-    return { ok: true };
+  // One purchase at a time per order line. The post-checkout auto-fulfil is
+  // fire-and-forget and the 60s retry sweep only waits a minute — a vendor that
+  // takes longer than that to answer had BOTH of them buying the same line, and
+  // the stable external id only helps with vendors that honour it.
+  const lockKey = `supfulfil:${orderItemId}`;
+  const got = await getRedis().set(lockKey, "1", "EX", 180, "NX").catch(() => "OK");
+  if (got !== "OK") return { ok: false, reason: "BUSY" };
+  // The alerts below are parse_mode: HTML and the product name came from a
+  // vendor's API — one "<" in it and Telegram drops the whole warning, which is
+  // the one message that says money was spent and nothing was delivered.
+  const esc = (x: string): string => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  try {
+    // Stable per-order-line id → the supplier de-dupes retries instead of double-charging.
+    const r = await placeSupplierOrder(supplierId, supplierRef, item.quantity, `oi-${orderItemId}`);
+    if (r.ok && r.keys.length > 0) {
+      const done = await manualFulfillItem(orderItemId, r.keys.join("\n"));
+      if (done.ok) return { ok: true };
+      // Bought and paid for, but the line was already delivered by then. Saying
+      // "ok" here threw the purchased key away without a word.
+      void logWallet("supplier.fulfil", `Supplier key bought but not attached: ${item.productNameSnap}`, { orderItemId, reason: done.reason ?? "unknown" });
+      await enqueueAdminAlert(
+        `⚠️ <b>Supplier key bought but NOT delivered</b>\nProduct: ${esc(item.productNameSnap)}\nReason: ${done.reason ?? "unknown"}\nThe purchase went through — keep it for the next order or refund it with the vendor.`,
+      ).catch(() => undefined);
+      return { ok: false, reason: done.reason ?? "NOT_ATTACHED" };
+    }
+    // A charge may have gone through but we couldn't read the key — never drop it silently.
+    void logWallet("supplier.fulfil", `Supplier charged but no key parsed: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
+    await enqueueAdminAlert(
+      `⚠️ <b>Supplier charged but no key parsed</b>\nProduct: ${esc(item.productNameSnap)}\nReason: ${r.reason ?? "unknown"}\nDeliver this order manually. Raw supplier response (send to support to fix mapping):\n<code>${esc(r.raw ?? "").slice(0, 400)}</code>`,
+    ).catch(() => undefined);
+    return { ok: false, reason: r.reason ?? "NO_KEY" };
+  } finally {
+    await getRedis().del(lockKey).catch(() => undefined);
   }
-  // A charge may have gone through but we couldn't read the key — never drop it silently.
-  void logWallet("supplier.fulfil", `Supplier charged but no key parsed: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
-  await enqueueAdminAlert(
-    `⚠️ <b>Supplier charged but no key parsed</b>\nProduct: ${item.productNameSnap}\nReason: ${r.reason ?? "unknown"}\nDeliver this order manually. Raw supplier response (send to support to fix mapping):\n<code>${(r.raw ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 400)}</code>`,
-  ).catch(() => undefined);
-  return { ok: false, reason: r.reason ?? "NO_KEY" };
 }
 
 /** Auto-buy + deliver every supplier-linked, still-unfulfilled item in an order. Returns count delivered. */

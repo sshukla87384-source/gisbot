@@ -33,7 +33,7 @@ export class BroadcastsController {
     const list = parseList(query, ["createdAt", "scheduledAt"]);
     const [total, rows] = await Promise.all([
       prisma.broadcast.count(),
-      prisma.broadcast.findMany({ orderBy: { createdAt: "desc" }, skip: list.skip, take: list.take }),
+      prisma.broadcast.findMany({ orderBy: list.orderBy, skip: list.skip, take: list.take }),
     ]);
     return paginated(rows, list.page, list.perPage, total);
   }

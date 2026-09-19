@@ -150,17 +150,26 @@ export async function dispatchDueBroadcasts(): Promise<number> {
       data: { status: "RUNNING", startedAt: now },
     });
     if (claimed.count === 0) continue;
-    await deliver(b);
-    const recurrence = (b.recurrence ?? "none") as BroadcastRecurrence;
-    if (recurrence === "none") {
-      await prisma.broadcast.update({ where: { id: b.id }, data: { status: "COMPLETED", completedAt: new Date() } });
-    } else {
-      await prisma.broadcast.update({
-        where: { id: b.id },
-        data: { status: "SCHEDULED", scheduledAt: nextOccurrence(b.scheduledAt ?? now, recurrence) },
-      });
+    try {
+      await deliver(b);
+      const recurrence = (b.recurrence ?? "none") as BroadcastRecurrence;
+      if (recurrence === "none") {
+        await prisma.broadcast.update({ where: { id: b.id }, data: { status: "COMPLETED", completedAt: new Date() } });
+      } else {
+        await prisma.broadcast.update({
+          where: { id: b.id },
+          data: { status: "SCHEDULED", scheduledAt: nextOccurrence(b.scheduledAt ?? now, recurrence) },
+        });
+      }
+      dispatched++;
+    } catch {
+      // The row is already claimed as RUNNING, and only SCHEDULED rows are ever
+      // picked up — so a throw in here used to strand the broadcast in RUNNING
+      // forever (a recurring one simply stopped recurring, silently) and abandon
+      // every other broadcast due in the same tick. PAUSED is visible in the
+      // panel and can be cancelled or rescheduled by hand.
+      await prisma.broadcast.update({ where: { id: b.id }, data: { status: "PAUSED" } }).catch(() => undefined);
     }
-    dispatched++;
   }
   return dispatched;
 }

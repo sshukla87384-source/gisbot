@@ -1,8 +1,8 @@
 import { loadConfig } from "@gis/config";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
-import { priceCart } from "./assign.js";
+import { couponLines, priceCart } from "./assign.js";
 import { confirmManualPayment } from "./manual-pay.service.js";
-import { resolveCartCouponTx, recordCouponUseTx } from "./coupon.service.js";
+import { resolveCartCouponTx, recordCouponUseTx, releaseCouponForOrderTx } from "./coupon.service.js";
 import { convertMinor, usdtRate } from "../fx.js";
 
 export interface StarsCheckoutResult {
@@ -44,27 +44,43 @@ export async function createStarsCheckout(userId: string): Promise<StarsCheckout
           const backMinor = sw.currency === so.currency
             ? so.walletUsedMinor
             : convertMinor(so.walletUsedMinor, so.currency as Currency, sw.currency as Currency);
-          const back = sw.balanceMinor + BigInt(backMinor);
-          await tx.walletTransaction.create({
-            data: {
-              walletId: sw.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
-              currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
-              idempotencyKey: `refund-cancel:${so.id}`,
-            },
+          // The expiry cron may have refunded this same order already. The unique
+          // idempotency key would then throw and abort the customer's new
+          // checkout, so check first — the same guard cancelStalePendingTx has.
+          const done = await tx.walletTransaction.findUnique({
+            where: { idempotencyKey: `refund-cancel:${so.id}` },
+            select: { id: true },
           });
-          await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
+          if (!done) {
+            const back = sw.balanceMinor + BigInt(backMinor);
+            await tx.walletTransaction.create({
+              data: {
+                walletId: sw.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
+                currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
+                idempotencyKey: `refund-cancel:${so.id}`,
+              },
+            });
+            await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
+          }
           await tx.order.update({ where: { id: so.id }, data: { walletUsedMinor: 0 } });
         }
       }
+      // Ids first, so the coupon burned on the attempt we are cancelling can be
+      // handed back — updateMany does not say which rows it touched.
+      const cancelling = await tx.order.findMany({
+        where: { userId, status: "PENDING_PAYMENT" },
+        select: { id: true },
+      });
       await tx.order.updateMany({
       where: { userId, status: "PENDING_PAYMENT" },
       data: { status: "CANCELLED", cancelledAt: new Date() },
     });
+    for (const co of cancelling) await releaseCouponForOrderTx(tx, co.id);
     const lines = await priceCart(tx, userId, user.currency);
     const subtotalMinor = lines.reduce((sum, l) => sum + l.unitPriceMinor * l.quantity, 0);
     // The cart coupon applies on THIS rail too. It used to be ignored here, so
     // a customer shown a discounted cart was invoiced the undiscounted total.
-    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor);
+    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor, couponLines(lines));
     const discountMinor = coupon?.discountMinor ?? 0;
     const totalMinor = Math.max(0, subtotalMinor - discountMinor);
     const orderNumber = await nextOrderNumber(tx);

@@ -182,6 +182,13 @@ services:
     env_file: ../../.env
     environment:
       NODE_ENV: production
+      # JWT_SECRET is optional in the shared config schema (the bot and worker
+      # do not need it). A `${JWT_SECRET:?}` guard here would be the natural
+      # fix, but compose interpolates the whole file BEFORE profiles apply, so
+      # it would refuse to start the bot-only stack too. The check lives in
+      # deploy.sh (only when deploying `full`) and in the API's own bootstrap,
+      # which exits with a clear message instead of serving a broken login.
+      JWT_SECRET: ${JWT_SECRET:-}
       # The API reads API_PORT (packages/config), not PORT. Pinning it here keeps
       # the container in sync with the healthcheck and the nginx upstream even if
       # .env sets a different API_PORT.

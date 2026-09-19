@@ -203,6 +203,13 @@ function money(minor: number, currency: Currency): string {
   return currency === "INR" ? `₹${v}` : `$${v}`;
 }
 
+/**
+ * Product names go into a parse_mode: HTML message, and supplier sync imports
+ * them straight from a vendor's API — one name containing a "<" made Telegram
+ * reject the whole statement, so the reseller simply never received it.
+ */
+const esc = (x: string): string => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 export function renderResellerDay(d: ResellerDay): string {
   const pct = (bp: number | null): string => (bp === null ? "—" : `${(bp / 100).toFixed(1)}%`);
   return [
@@ -222,13 +229,13 @@ export function renderResellerDay(d: ResellerDay): string {
         ]
       : ["<i>No special-pricing benefit on today's orders — you paid our public rate.</i>"]),
     ...(d.topProducts.length > 0
-      ? ["", "<b>Your top products today</b>", ...d.topProducts.map((p) => `• ${p.name.slice(0, 26)} — ${p.units}× · ${money(p.spentMinor, d.currency)}`)]
+      ? ["", "<b>Your top products today</b>", ...d.topProducts.map((p) => `• ${esc(p.name.slice(0, 26))} — ${p.units}× · ${money(p.spentMinor, d.currency)}`)]
       : []),
     ...(d.deals.length > 0
       ? [
           "",
           `💎 <b>Your special rates</b> (${d.deals.length})`,
-          ...d.deals.slice(0, 5).map((x) => `• ${x.name.slice(0, 24)} — <b>${money(x.yourMinor, d.currency)}</b> vs ${money(x.publicMinor, d.currency)} public <i>(${pct(x.offBp)} off)</i>`),
+          ...d.deals.slice(0, 5).map((x) => `• ${esc(x.name.slice(0, 24))} — <b>${money(x.yourMinor, d.currency)}</b> vs ${money(x.publicMinor, d.currency)} public <i>(${pct(x.offBp)} off)</i>`),
         ]
       : []),
     "",

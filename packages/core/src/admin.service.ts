@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
-import { effectiveHours, encryptSecret, decryptSecret, hoursToDays, normalizeLicenseKey, sha256Hex } from "@gis/shared";
+import { effectiveHours, encryptSecret, decryptSecret, hoursToDays, normalizeLicenseKey, safeEqual, sha256Hex } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { announceRestock } from "./broadcast.service.js";
@@ -1167,8 +1167,12 @@ export async function isAdminPasscodeConfigured(envPasscode?: string | null): Pr
 /** Verify an entered passcode against the DB override (preferred) or the env value. */
 export async function verifyAdminPasscode(plain: string, envPasscode?: string | null): Promise<boolean> {
   const dbHash = await getAdminPasscodeHash();
-  if (dbHash) return _pcHash(plain.trim()) === dbHash;
-  return !!envPasscode && plain === envPasscode;
+  // Compared byte-for-byte in constant time: `===` on a secret leaks how much of
+  // it you got right through how long the comparison took, and the passcode is
+  // the only thing between a stranger and the admin panel. The stored format is
+  // untouched — changing it would lock the operator out of their own bot.
+  if (dbHash) return safeEqual(_pcHash(plain.trim()), dbHash);
+  return !!envPasscode && safeEqual(plain, envPasscode);
 }
 
 // ───────────── Sales dashboard ─────────────
@@ -1516,7 +1520,13 @@ export async function listFundedUsers(limit = 25): Promise<FundedUserRow[]> {
       ],
     },
     include: { wallet: true },
-    take: limit,
+    // Without an orderBy this took whichever `limit` rows Postgres handed back
+    // and sorted THOSE — an admin looking for the biggest balances got a random
+    // handful. Balance + owed cannot be summed across the wallet relation in
+    // SQL, so order by both keys the database can see and read a wider window
+    // than we return; the exact ranking still happens below.
+    orderBy: [{ wallet: { balanceMinor: "desc" } }, { bnplOutstandingMinor: "desc" }],
+    take: Math.min(limit * 4, 400),
   });
   return rows
     .map((u) => ({
@@ -1530,7 +1540,8 @@ export async function listFundedUsers(limit = 25): Promise<FundedUserRow[]> {
       status: u.status,
     }))
     // Richest / most-owing first — that is what an admin wants to see.
-    .sort((a, b) => b.balanceMinor + b.bnplOwedMinor - (a.balanceMinor + a.bnplOwedMinor));
+    .sort((a, b) => b.balanceMinor + b.bnplOwedMinor - (a.balanceMinor + a.bnplOwedMinor))
+    .slice(0, limit);
 }
 
 export interface WalletHistoryRow {

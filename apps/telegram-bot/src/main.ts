@@ -65,7 +65,10 @@ async function main(): Promise<void> {
       await bot.api.setWebhook(`${config.WEBHOOK_DOMAIN}${path}`, {
         secret_token: config.TELEGRAM_SECRET_TOKEN,
         drop_pending_updates: false,
-        allowed_updates: ["message", "callback_query", "pre_checkout_query"],
+        // channel_post: /registergroup is documented as working from a channel,
+        // and a channel never sends "message" — without this Telegram simply
+        // never delivers the command.
+        allowed_updates: ["message", "channel_post", "callback_query", "pre_checkout_query"],
       });
       // eslint-disable-next-line no-console
       console.log(`bot: webhook mode on :${config.PORT}`);
@@ -73,7 +76,7 @@ async function main(): Promise<void> {
   } else {
     // eslint-disable-next-line no-console
     console.log("bot: long-polling mode (development)");
-    await bot.start({ allowed_updates: ["message", "callback_query", "pre_checkout_query"] });
+    await bot.start({ allowed_updates: ["message", "channel_post", "callback_query", "pre_checkout_query"] });
   }
 }
 

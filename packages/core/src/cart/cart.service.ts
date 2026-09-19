@@ -6,6 +6,9 @@ import { effectivePriceMinor } from "../pricing.js";
 export interface CartLine {
   itemId: string;
   variantId: string;
+  /** Carried so a PRODUCT/CATEGORY-scoped coupon can tell which lines it covers. */
+  productId: string;
+  categoryId: string;
   productName: string;
   variantName: string;
   quantity: number;
@@ -65,7 +68,13 @@ export async function clearCart(userId: string): Promise<void> {
   if (cart) await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
 }
 
-export async function getCartView(userId: string, currency: Currency): Promise<CartView> {
+/**
+ * `channel` picks which per-user price overrides apply, exactly as `priceCart`
+ * does on the checkout side. It defaults to DIRECT so every existing bot caller
+ * keeps the prices it always showed; an API caller passes "API" and gets the
+ * prices it will actually be charged, instead of the bot's.
+ */
+export async function getCartView(userId: string, currency: Currency, channel: "DIRECT" | "API" = "DIRECT"): Promise<CartView> {
   const cart = await prisma.cart.findUnique({
     where: { userId },
     include: {
@@ -83,14 +92,15 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
     },
   });
 
-  // Per-user custom price overrides (DIRECT beats BOTH), applied to the shown/charged price.
+  // Per-user custom price overrides (the channel-specific one beats BOTH),
+  // applied to the shown/charged price.
   const productIds = (cart?.items ?? []).map((i) => i.variant.productId);
-  const overrides = await prisma.userPrice.findMany({ where: { userId, productId: { in: productIds }, channel: { in: ["DIRECT", "BOTH"] } } });
+  const overrides = await prisma.userPrice.findMany({ where: { userId, productId: { in: productIds }, channel: { in: [channel, "BOTH"] } } });
   const overrideByProduct = new Map<string, number>();
   for (const o of overrides) {
     const amt = o.currency === currency ? o.amountMinor : convertMinor(o.amountMinor, o.currency as Currency, currency);
     const cur = overrideByProduct.get(o.productId);
-    if (cur === undefined || o.channel === "DIRECT") overrideByProduct.set(o.productId, amt);
+    if (cur === undefined || o.channel === channel) overrideByProduct.set(o.productId, amt);
   }
 
   const lines: CartLine[] = (cart?.items ?? []).map((item) => {
@@ -106,6 +116,8 @@ export async function getCartView(userId: string, currency: Currency): Promise<C
     return {
       itemId: item.id,
       variantId: item.variantId,
+      productId: item.variant.productId,
+      categoryId: item.variant.product.categoryId,
       productName: item.variant.product.name,
       variantName: item.variant.name,
       quantity: item.quantity,
