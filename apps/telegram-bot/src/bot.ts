@@ -1423,7 +1423,14 @@ export function createBot(): Bot<Ctx> {
             // Referral pitch only on the day's first delivery, not every order.
             (await shouldSendReferralNudge(user.id)) ? referralNudgeMessage(user.referralCode, ctx.me.username) : null,
           ].filter(Boolean).join("\n\n");
-          if (closing) await ctx.reply(closing, { parse_mode: "HTML" }).catch(() => undefined);
+          if (closing) {
+            await ctx.reply(closing, {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
+                .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
+            }).catch(() => undefined);
+          }
           break;
         }
         // Pay Later is credit — confirm the debt before it is taken on.
@@ -1493,7 +1500,14 @@ export function createBot(): Bot<Ctx> {
             await deliverAll(ctx, result.deliveries, result.orderNumber);
             if (result.pendingManualItems > 0) await ctx.reply(`🔄 ${result.pendingManualItems} item(s) are being prepared — arriving here shortly.`);
             const instr = await deliveryInstructionsMessage();
-            if (instr) await ctx.reply(instr, { parse_mode: "HTML" }).catch(() => undefined);
+            if (instr) {
+              await ctx.reply(instr, {
+                parse_mode: "HTML",
+                reply_markup: new InlineKeyboard()
+                  .text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
+                  .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
+              }).catch(() => undefined);
+            }
           } catch {
             await ctx.reply("❌ Couldn't place on Pay Later — your BNPL limit may be exceeded. Try another payment method.");
           }

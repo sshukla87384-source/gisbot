@@ -62,7 +62,12 @@ import { sbtn } from "./keyboard.js";
  * came out as "🈲🎬 Youtube 3 Months". When an icon is set it wins and the name's
  * own leading emoji is dropped; with no icon the name keeps whatever it has.
  */
-function withIcon(iconEmoji: string | null | undefined, name: string): string {
+function withIcon(iconEmoji: string | null | undefined, name: string, iconCustomEmojiId?: string | null): string {
+  // A premium icon is drawn by Telegram in front of the label, so the label
+  // must carry NO emoji of its own — neither the icon field nor the one at the
+  // front of the name. That pairing ("🈲" from the icon id, "🎬" from the name)
+  // is the double emoji that survived the first fix.
+  if (iconCustomEmojiId) return stripLeadingEmoji(name);
   return iconEmoji ? `${iconEmoji} ${stripLeadingEmoji(name)}` : name;
 }
 
@@ -98,7 +103,7 @@ export async function soldOutView(user: BotUser, page: number): Promise<View> {
   const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale, soldOutOnly: true });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
-    kb.add(sbtn(withIcon(p.iconEmoji, p.name), cb("shp", "prod", p.id), "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId), cb("shp", "prod", p.id), "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "soldout", result.page, result.pages);
   kb.row().text("🛍 Back to shop", cb("shp", "home", 1));
@@ -121,7 +126,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
-    const label = `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`;
+    const label = `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`;
     kb.add(sbtn(label, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
@@ -158,7 +163,7 @@ export async function productListView(
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
@@ -173,7 +178,7 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
   kb.row().add(sbtn("🔍 Search again", cb("shp", "find"), "primary")).row();
@@ -225,68 +230,51 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     : "—";
   const totalStock = priced.reduce((sum, v) => sum + (v.stock >= UNLIMITED ? 0 : v.stock), 0);
   const anyStock = priced.some((v) => v.stock >= UNLIMITED || v.stock > 0);
-  const stockStr = priced.some((v) => v.stock >= UNLIMITED)
-    ? "✅ Available"
+  // The card follows the layout customers know from other shops: name, price,
+  // the description as a bordered quote with a tick per line, stock, and one
+  // line saying how delivery works. The old card led with a banner and a
+  // "price can change" warning and left the description last and unstyled.
+  const titleHtml = translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name));
+  const title = p.iconEmoji ? `${p.iconEmoji} ${stripLeadingEmoji(titleHtml)}` : titleHtml;
+  const perUnit = p.type === "LICENSE_KEY" ? " / code" : p.type === "DIGITAL_ACCOUNT" ? " / account" : "";
+  // Description → one quote block. A line the operator did not mark gets a ✅;
+  // lines they marked themselves (✅ ⛔ ❌ ⚠️ …) are left exactly as written.
+  const descRaw = translated ? (p.description ?? "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : ""));
+  const descLines = (translated ? escapeHtml(descRaw) : descRaw).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const marked = /^(?:<[^>]+>)*\s*[\p{Extended_Pictographic}]/u;
+  const anyMarked = descLines.some((l) => marked.test(l));
+  const descBlock = descLines.length > 0
+    ? `<blockquote>${descLines.map((l) => (anyMarked || marked.test(l) ? l : `✅ ${l}`)).join("\n")}</blockquote>`
+    : "";
+  const stockLine = priced.some((v) => v.stock >= UNLIMITED)
+    ? "📊 <b>Stock:</b> Available"
     : anyStock
-      ? `<b>${num(totalStock)}</b> in Stock`
-      : "❌ <b>Sold out</b>";
-  // A hook line, chosen from the product's own state — the same urgency copy the
-  // promo templates use, so the card and the announcement speak with one voice.
-  const hook = !anyStock
-    ? "🔔 <i>Restocking soon — price may change with the new batch.</i>"
-    : p.onSale
-      ? "🔥 <i>Flash sale — this price will not last.</i>"
-      : totalStock > 0 && totalStock <= 5
-        ? "⚡ <i>Selling fast — only a few left. No reservations, no holds.</i>"
-        : "⚠️ <i>Price can change without notice.</i>";
+      ? `📊 <b>Stock:</b> ${num(totalStock)} available`
+      : "📊 <b>Stock:</b> ❌ Sold out";
   const lines = [
-    header(!anyStock ? "🔔 RESTOCKING SOON" : p.onSale ? "🔥 FLASH SALE" : "🔥 IN STOCK"),
+    ...(p.onSale ? ["🔥 <b>FLASH SALE</b> — this price will not last.", ""] : !anyStock ? ["🔔 <b>RESTOCKING SOON</b>", ""] : []),
+    `<b>${title}</b>`,
     "",
-    hook,
-    "",
-    `📦 ${bold("Product")}`,
-    p.iconEmoji
-      ? `${p.iconEmoji} ${stripLeadingEmoji(translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name)))}`
-      : (translated ? escapeHtml(p.name) : (p.nameHtml ?? escapeHtml(p.name))),
-    "",
-    `💎 ${bold("Price")}`,
-    priceStr,
+    `💲 <b>Price:</b> ${priceStr}${perUnit}`,
     // Advertised from the same helper the charge uses, so it cannot drift from
     // what the customer is actually billed.
     ...(p.bulkLadder.length > 0
-      ? ["", `📦 <b>BULK DISCOUNT ACTIVE</b>`,
-         ...p.bulkLadder.map((t) => `• Buy <b>${t.minQty}+</b> → <b>${fmt(t.unitPriceMinor, user.currency)}</b> each <i>(${(t.percentBp / 100).toFixed(t.percentBp % 100 === 0 ? 0 : 1)}% off)</i>`)]
+      ? [`📦 <b>Bulk:</b> ` + p.bulkLadder.map((t) => `${t.minQty}+ → <b>${fmt(t.unitPriceMinor, user.currency)}</b>`).join(" · ")]
       : []),
+    ...(descBlock ? ["", descBlock] : []),
     "",
-    `📈 ${bold("Available")}`,
-    stockStr,
-    // Out of stock is a waiting message, not a dead end.
-    ...(!anyStock
-      ? ["",
-         "┏━━━━━━━━━━━━━━━━━━",
-         "┃ 🔔 <b>RESTOCKING SOON</b>",
-         "┃",
-         "┃ This one sold out fast! 🔥",
-         "┃ Fresh stock is on the way —",
-         "┃ usually within a few hours.",
-         "┃",
-         "┃ 💡 <i>Price may change slightly",
-         "┃ with the new batch.</i>",
-         "┗━━━━━━━━━━━━━━━━━━",
-         "",
-         watchingStock
-           ? "🔔 <b>You're on the list</b> — we'll message you the moment it lands."
-           : "🔔 Tap <b>Notify me</b> below and you'll hear first.",
-         "",
-         "👉 Or tap 🛍 <b>All products</b> — plenty in stock right now!"]
-      : []),
+    stockLine,
+    ...(totalStock > 0 && totalStock <= 5 && !p.onSale ? ["⚡ <i>Selling fast — only a few left.</i>"] : []),
     "",
-    // A personal price the admin set for THIS customer.
-    ...(p.hasCustomPrice
-      ? [`💎 <b>Special price just for you, ${greetName(user)}!</b>`, "<i>This is your personal rate — not the public price.</i>"]
-      : user.isVip
-        ? [`${e("vip")} <b>VIP price applied</b>`]
-        : []),
+    (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked)
+      ? "⚡ Delivery is automatic after payment confirmation."
+      : "🕐 Delivered by our team after payment (~12 h).",
+    // Warranty shown exactly as the admin set it, with the day count.
+    p.warranty
+      ? (p.warrantyDays
+          ? `🛡 <b>${p.warrantyDays}-day replacement warranty</b>`
+          : "🛡 <b>Replacement warranty included</b>")
+      : "🏷 <i>As-is — no replacement warranty.</i>",
     // Real rating from visible reviews. Hidden under 3 so one early review
     // cannot define a product — the store rating is shown instead.
     rating.count >= 3
@@ -294,22 +282,26 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       : store.count >= 3
         ? `${store.stars} <b>${store.avg.toFixed(1)}</b>/5 store rating · <i>${num(store.count)} reviews</i>`
         : "",
-    (p.fulfillmentMode === "AUTOMATIC" || p.supplierBacked) ? "⚡ Instant Delivery" : "🕐 Manual Delivery (~12 h)",
-    // Warranty shown exactly as the admin set it, with the day count.
-    p.warranty
-      ? (p.warrantyDays
-          ? `🛡 <b>${p.warrantyDays}-day replacement warranty</b> — faulty item? we replace it free`
-          : "🛡 <b>Replacement warranty included</b> — faulty item? we replace it free")
-      : "🏷 <b>As-is deal</b> — no replacement warranty, priced accordingly",
-    p.isPlatform ? `🏬 Sold by ${escapeHtml(loadConfig().STORE_NAME)}` : "🏪 Verified Reseller",
-    translated ? (p.description ? escapeHtml(p.description) : "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : "")),
-    HR,
+    p.isPlatform ? "" : "🏪 Verified Reseller",
+    // A personal price the admin set for THIS customer.
+    ...(p.hasCustomPrice
+      ? ["", `💎 <b>Special price just for you, ${greetName(user)}!</b>`]
+      : user.isVip
+        ? ["", `${e("vip")} <b>VIP price applied</b>`]
+        : []),
+    // Out of stock is a waiting message, not a dead end.
+    ...(!anyStock
+      ? ["",
+         "This one sold out fast! 🔥 Fresh stock is on the way — usually within a few hours.",
+         watchingStock
+           ? "🔔 <b>You're on the list</b> — we'll message you the moment it lands."
+           : "🔔 Tap <b>Notify me</b> below and you'll hear first."]
+      : []),
     // Curated testimonials — clearly labelled, and never part of the star average.
     ...(quotes.length > 0
       ? ["", `💬 <b>What customers say</b>`,
           ...quotes.flatMap((q) => [
-            `${"⭐".repeat(q.rating)} <i>“${escapeHtml(q.body).slice(0, 220)}”</i>`,
-            `— <b>${escapeHtml(q.customerName)}</b>${q.company ? `, ${escapeHtml(q.company)}` : ""} ${q.verified ? "· ✅ verified purchase" : "· <i>shared with permission</i>"}`,
+            `<blockquote>${"⭐".repeat(q.rating)} <i>${escapeHtml(q.body).slice(0, 220)}</i>\n— <b>${escapeHtml(q.customerName)}</b>${q.company ? `, ${escapeHtml(q.company)}` : ""}${q.verified ? " · ✅ verified purchase" : ""}</blockquote>`,
           ])]
       : []),
   ].filter((l) => l !== "");
@@ -700,7 +692,7 @@ export async function categoryProductsView(user: BotUser, categoryId: string, pa
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
     kb.add(sbtn(
-      `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name)} — ${price}${stockTag(p)}`,
+      `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`,
       cb("shp", "prod", p.id),
       p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger",
       p.iconCustomEmojiId ?? undefined,

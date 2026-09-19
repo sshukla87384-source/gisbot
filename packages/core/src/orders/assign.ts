@@ -405,20 +405,17 @@ export function isDeliveredLink(value: string | undefined | null): value is stri
 }
 
 /**
- * Render a delivered link so the customer can TAP it in the chat.
+ * Render a delivered link: the URL itself, once, on its own line.
  *
- * A link shown only as <code> is not tappable — long sign-in URLs (Google/
- * YouTube redirect links run to 380+ characters) then look like a wall of text
- * the customer has to select by hand, and on some clients it wraps so badly it
- * reads as missing. Anchor first (one tap), raw value underneath (tap to copy).
+ * It used to be an anchor labelled "Tap here to open your link" with the raw
+ * URL repeated underneath in <code>. Two lines for one value, the words in
+ * front of every link, and a 380-character sign-in URL printed twice — the
+ * operator asked for the link, directly. Telegram auto-links a bare URL, so it
+ * is still one tap to open and a long-press to copy.
  */
 export function linkLines(url: string, indent = ""): string[] {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const href = esc(url.trim()).replace(/"/g, "&quot;");
-  return [
-    `${indent}🔗 <b><a href="${href}">Tap here to open your link</a></b>`,
-    `${indent}<code>${esc(url.trim())}</code>`,
-  ];
+  return [`${indent}${esc(url.trim())}`];
 }
 
 
@@ -432,9 +429,11 @@ export function buildDeliveryText(
 ): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(variantName)}`;
-  const lines = ["🎉🎊 <b>Congratulations — your order is delivered!</b> 🥳", "", `📦 <b>${esc(productName)}</b>${vn}`];
-  if (opts.amountLabel) lines.push(`💰 Amount paid: <b>${esc(opts.amountLabel)}</b>`);
-  lines.push("");
+  // Same shape as the multi-item delivery: header facts, then the value itself.
+  const lines = ["✅ <b>Order Delivered!</b>", "", `📦 <b>${esc(productName)}</b>${vn} (x1)`];
+  if (opts.amountLabel) lines.push(`💲 ${esc(opts.amountLabel)}`);
+  if (opts.orderNumber) lines.push(`🧾 #${esc(opts.orderNumber)}`);
+  lines.push("", "⚡ <b>Your Product:</b>");
 
   let renderedCreds = false;
   if (payload.key) {
@@ -446,19 +445,19 @@ export function buildDeliveryText(
       renderedCreds = true;
       rows.forEach((_, i) => {
         const c = creds[i] as { id: string; pw: string; twofa?: string };
-        if (rows.length > 1) lines.push(`<b>━━ Account ${i + 1} ━━</b>`);
+        if (rows.length > 1) lines.push(`<b>${i + 1}.</b>`);
         lines.push(`👤 <b>ID:</b>  <code>${esc(c.id)}</code>`);
         lines.push(`🔐 <b>Password:</b>  <code>${esc(c.pw)}</code>`);
         if (c.twofa) lines.push(`🔢 <b>2FA secret:</b>  <code>${esc(c.twofa)}</code>`);
         if (rows.length > 1 && i < rows.length - 1) lines.push("");
       });
     } else if (rows.length > 1) {
-      lines.push("🔑 <b>Your keys:</b>");
-      for (const r of rows) lines.push(...(isDeliveredLink(r) ? linkLines(r) : [`<code>${esc(r)}</code>`]));
+      // Numbered, value directly under the number — no label words in front.
+      rows.forEach((r, i) => lines.push(`<b>${i + 1}.</b>`, ...(isDeliveredLink(r) ? linkLines(r) : [`<code>${esc(r)}</code>`])));
     } else if (isDeliveredLink(rows[0] ?? payload.key)) {
-      lines.push(...linkLines((rows[0] ?? payload.key) as string));
+      lines.push("<b>1.</b>", ...linkLines((rows[0] ?? payload.key) as string));
     } else {
-      lines.push(`🔑 <b>Key:</b> <code>${esc(payload.key)}</code>`);
+      lines.push("<b>1.</b>", `<code>${esc(payload.key)}</code>`);
     }
   }
   const fixed = repairAccountPair(payload.username, payload.password);
@@ -562,6 +561,8 @@ export interface DeliveryLine {
 export interface DeliveryRenderOpts {
   /** Pre-formatted order total, e.g. "₹499.00". Shown so the customer can see what they paid. */
   amountLabel?: string;
+  /** Shown as "#GIS-…" in the single-item header (the multi-item builder takes it as a parameter). */
+  orderNumber?: string;
   /**
    * Number the items (`1)`, `2)` …). On by default; the .txt download offers a
    * version with this off, because a customer feeding the file to a script or
@@ -570,24 +571,43 @@ export interface DeliveryRenderOpts {
   numbered?: boolean;
 }
 
-/** One consolidated HTML message for a whole multi-item order (used when count ≤ threshold). */
+/**
+ * One consolidated HTML message for a whole multi-item order (used when count ≤ threshold).
+ *
+ * Shaped after what customers are used to from other shops: a short header
+ * (product, amount, order number), then "Your Products:" with every value
+ * numbered and shown DIRECTLY — a link is the link, a key is the key. The
+ * product name is said once per product, not once per unit: ten codes for the
+ * same item used to print the item's name ten times, which buried the codes.
+ */
 export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: string, opts: DeliveryRenderOpts = {}): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const out: string[] = [`🎉🎊 <b>Your order is delivered!</b> 🥳  (${items.length} item${items.length === 1 ? "" : "s"})`];
-  if (orderNumber) out.push(`🧾 Order <b>${esc(orderNumber)}</b>`);
-  if (opts.amountLabel) out.push(`💰 Amount paid: <b>${esc(opts.amountLabel)}</b>`);
-  out.push("");
-  // Anything identical for every unit is said ONCE, at the bottom. Repeating
-  // "Password can be changed", the 2fa.live hint and a copy-all line under each
-  // of ten accounts tripled the length of the message and buried the
-  // credentials themselves — the only part the customer is looking for.
+  const out: string[] = ["✅ <b>Order Delivered!</b>", ""];
+
+  // Group consecutive units of the same product/variant so the name appears once.
+  const groups: Array<{ productName: string; variantName: string; items: DeliveryLine[] }> = [];
+  for (const it of items) {
+    const last = groups[groups.length - 1];
+    if (last && last.productName === it.productName && last.variantName === it.variantName) last.items.push(it);
+    else groups.push({ productName: it.productName, variantName: it.variantName, items: [it] });
+  }
+  const label = (g: { productName: string; variantName: string; items: DeliveryLine[] }): string => {
+    const vn = g.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(g.variantName)}`;
+    return `📦 <b>${esc(g.productName)}</b>${vn} (x${g.items.length})`;
+  };
+  // One product: named here, once. Several: counted here, named at each section
+  // below — never both, so no name is printed twice.
+  if (groups.length === 1) out.push(label(groups[0]!));
+  else out.push(`📦 <b>${groups.length} products</b> · ${items.length} items`);
+  if (opts.amountLabel) out.push(`💲 ${esc(opts.amountLabel)}`);
+  if (orderNumber) out.push(`🧾 #${esc(orderNumber)}`);
+  out.push("", "⚡ <b>Your Products:</b>");
+
+  // Anything identical for every unit is said ONCE, at the bottom.
   const copyAll: string[] = [];
   let anyTwofa = false;
   const policies = new Set<boolean>();
   const mixedPolicy = (): boolean => policies.size > 1;
-  // Only an item that actually hands over a LOGIN has a password policy. A
-  // license-key order has no password at all, so it must not be told anything
-  // about changing one.
   const deliversLogin = (it: DeliveryLine): boolean => {
     const p = it.payload;
     if (p.password) return true;
@@ -596,50 +616,51 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
     return rows.length > 0 && rows.map(splitCredential).every((c) => c !== null);
   };
   items.forEach((it) => { if (deliversLogin(it)) policies.add(it.allowPwChange === true); });
-  items.forEach((it, i) => {
-    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${esc(it.variantName)}`;
-    out.push(`<b>${i + 1}.</b> 📦 <b>${esc(it.productName)}</b>${vn}`);
-    const p = it.payload;
-    if (p.key) {
-      const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
-      const creds = rows.map(splitCredential);
-      if (rows.length > 0 && creds.every((c) => c !== null)) {
-        rows.forEach((_, k) => {
-          const c = creds[k] as { id: string; pw: string; twofa?: string };
-          if (rows.length > 1) out.push(`   <b>${k + 1})</b>`);
-          out.push(`   👤 ID: <code>${esc(c.id)}</code>`);
-          out.push(`   🔐 Password: <code>${esc(c.pw)}</code>`);
-          if (c.twofa) { anyTwofa = true; out.push(`   🔢 2FA secret: <code>${esc(c.twofa)}</code>`); }
-          copyAll.push(`${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`);
-        });
-        // Only when the order mixes both policies does each item need its own.
-        if (mixedPolicy()) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
-      } else if (rows.length > 1) {
-        for (const r of rows) out.push(...(isDeliveredLink(r) ? linkLines(r, "   ") : [`   🔑 <code>${esc(r)}</code>`]));
-      } else if (isDeliveredLink(rows[0] ?? p.key)) {
-        out.push(...linkLines((rows[0] ?? p.key) as string, "   "));
-      } else {
-        out.push(`   🔑 Key: <code>${esc(p.key)}</code>`);
+
+  let n = 0;
+  for (const g of groups) {
+    // The heading only when there is more than one product — with a single
+    // product it is already in the header above, and repeating it is exactly
+    // the noise this layout removes.
+    if (groups.length > 1) out.push("", label(g));
+    for (const it of g.items) {
+      const p = it.payload;
+      const value: string[] = [];
+      if (p.key) {
+        const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+        const creds = rows.map(splitCredential);
+        if (rows.length > 0 && creds.every((c) => c !== null)) {
+          rows.forEach((_, k) => {
+            const c = creds[k] as { id: string; pw: string; twofa?: string };
+            if (rows.length > 1 && k > 0) value.push("");
+            value.push(`👤 ID: <code>${esc(c.id)}</code>`);
+            value.push(`🔐 Password: <code>${esc(c.pw)}</code>`);
+            if (c.twofa) { anyTwofa = true; value.push(`🔢 2FA secret: <code>${esc(c.twofa)}</code>`); }
+            copyAll.push(`${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`);
+          });
+        } else {
+          for (const r of rows) value.push(...(isDeliveredLink(r) ? linkLines(r) : [`<code>${esc(r)}</code>`]));
+        }
       }
+      const fx = repairAccountPair(p.username, p.password);
+      const cName = fx?.id ?? p.username;
+      const cPass = fx?.pw ?? p.password;
+      const cTwo = fx?.twofa ?? p.twofa;
+      if (cName) value.push(`👤 ID: <code>${esc(cName)}</code>`);
+      if (cPass) value.push(`🔐 Password: <code>${esc(cPass)}</code>`);
+      if (cTwo) { anyTwofa = true; value.push(`🔢 2FA secret: <code>${esc(cTwo)}</code>`); }
+      if (cName && cPass) copyAll.push(`${cName}|${cPass}${cTwo ? `|${cTwo}` : ""}`);
+      if (deliversLogin(it) && mixedPolicy()) value.push(it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password");
+      if (p.expiresAt) value.push(`⏳ Valid until ${p.expiresAt.slice(0, 10)}`);
+      n += 1;
+      out.push(`<b>${n}.</b>`, ...value);
     }
-    const fx = repairAccountPair(p.username, p.password);
-    const cName = fx?.id ?? p.username;
-    const cPass = fx?.pw ?? p.password;
-    const cTwo = fx?.twofa ?? p.twofa;
-    if (cName) out.push(`   👤 ID: <code>${esc(cName)}</code>`);
-    if (cPass) out.push(`   🔐 Password: <code>${esc(cPass)}</code>`);
-    if (cTwo) { anyTwofa = true; out.push(`   🔢 2FA secret: <code>${esc(cTwo)}</code>`); }
-    if (cName && cPass) copyAll.push(`${cName}|${cPass}${cTwo ? `|${cTwo}` : ""}`);
-    if (p.password && mixedPolicy()) out.push(`   ${it.allowPwChange ? "🔓 Password can be changed" : "🔒 Do not change the password"}`);
-    if (p.expiresAt) out.push(`   ⏳ ${p.expiresAt.slice(0, 10)}`);
-    out.push("");
-  });
-  // Said once, for the whole order.
+  }
+
   const blank = (): void => { if (out[out.length - 1] !== "") out.push(""); };
-  if (anyTwofa) out.push('🔢 <b>2FA:</b> paste a 2FA secret at <a href="https://2fa.live">2fa.live</a> to get its 6-digit code.');
+  if (anyTwofa) { blank(); out.push(`🔢 <b>2FA:</b> paste a 2FA secret at <a href="${TWOFA_SITE}">2fa.live</a> to get its 6-digit code.`); }
   if (!mixedPolicy() && policies.size === 1) {
-    // Plural follows the number of LOGINS, not of items: one account bought
-    // alongside three license keys still reads "This account is yours".
+    blank();
     const many = items.filter(deliversLogin).length > 1;
     out.push([...policies][0] === true
       ? `🔓 ${many ? "These accounts are" : "This account is"} yours — you're welcome to change the password${many ? "s" : ""}.`
@@ -650,7 +671,7 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
     out.push("📋 <b>Copy all credentials:</b>", ...copyAll.map((l) => `<code>${esc(l)}</code>`));
   }
   blank();
-  out.push("💾 <b>Saved in 📦 My Orders</b> — reopen it any time from 📦 View my orders.", "Enjoy! 🚀", "Problem? Open a 🎫 Support ticket.");
+  out.push("💾 Saved in 📦 My Orders — reopen any time.", "Problem? Open a 🎫 Support ticket.");
   return out.join("\n");
 }
 

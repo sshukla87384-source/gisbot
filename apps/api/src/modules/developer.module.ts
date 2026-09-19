@@ -54,6 +54,47 @@ const purchaseSchema = z.object({
   payWith: z.enum(["wallet", "bnpl"]).optional().default("wallet"),
 });
 
+/**
+ * What a partner's storefront should print for one delivered item.
+ *
+ * `secret` is kept for compatibility, but a partner that just dumped it showed
+ * their customer `{"product":"…","variant":"Standard","kind":"LICENSE_KEY",
+ * "secret":{"key":"https://…"}}` — the words around the value, not the value.
+ * So every item now also carries `value`: the key or link itself, or
+ * `username|password[|2fa]` for an account, one line per unit. The default
+ * variant ("Standard") is omitted rather than repeated on every line.
+ */
+function apiDeliveryItem(d: { productName: string; variantName: string; payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string }; activationGuide?: string | null }) {
+  const p = d.payload;
+  const values: string[] = [];
+  if (p.key) values.push(...p.key.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+  if (p.username || p.password) values.push([p.username ?? "", p.password ?? "", p.twofa ?? ""].filter(Boolean).join("|"));
+  const isDefaultVariant = d.variantName.trim().toLowerCase() === "standard";
+  return {
+    product: d.productName,
+    ...(isDefaultVariant ? {} : { variant: d.variantName }),
+    kind: p.kind,
+    value: values.join("\n"),
+    values,
+    ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}),
+    secret: p as unknown,
+    ...(d.activationGuide ? { activationGuide: d.activationGuide } : {}),
+  };
+}
+
+/** Plain, numbered text a storefront can show as-is: `1.` then the value, product name once. */
+function apiDeliveryText(items: Array<ReturnType<typeof apiDeliveryItem>>): string {
+  const out: string[] = [];
+  let n = 0;
+  let lastProduct = "";
+  for (const it of items) {
+    const label = it.variant ? `${it.product} — ${it.variant}` : it.product;
+    if (label !== lastProduct) { out.push(`${out.length ? "\n" : ""}${label}`); lastProduct = label; }
+    for (const v of it.values) { n += 1; out.push(`${n}.`, v); }
+  }
+  return out.join("\n");
+}
+
 @ApiTags("developer")
 @ApiSecurity("apiKey")
 @Public()
@@ -443,14 +484,12 @@ export class DeveloperController {
       placed = true;
       if (idemKey) await redis.set(idemKey, r.orderNumber, "EX", IDEM_TTL_SEC);
 
-      let items: Array<{ product: string; variant: string; kind: string; secret: unknown; activationGuide?: string | null }> =
-        r.deliveries.map((d) => ({
-          product: d.productName,
-          variant: d.variantName,
-          kind: d.kind as string,
-          secret: d.secret as unknown,
-          activationGuide: d.activationGuide,
-        }));
+      let items = r.deliveries.map((d) => apiDeliveryItem({
+        productName: d.productName,
+        variantName: d.variantName,
+        payload: { kind: d.kind, ...d.secret },
+        activationGuide: d.activationGuide,
+      }));
       let status: string = r.status;
       let pending = r.pendingManualItems;
 
@@ -468,12 +507,7 @@ export class DeveloperController {
           }
           const delivered = await revealOrderDeliveries(userId, r.orderId);
           if (delivered.length > items.length) {
-            items = delivered.map((d) => ({
-              product: d.productName,
-              variant: d.variantName,
-              kind: d.payload.kind,
-              secret: d.payload as unknown,
-            }));
+            items = delivered.map((d) => apiDeliveryItem(d));
             const fresh = await prisma.order.findUnique({ where: { id: r.orderId }, select: { status: true } });
             if (fresh) status = fresh.status;
             pending = Math.max(0, pending - (delivered.length - r.deliveries.length));
@@ -493,6 +527,8 @@ export class DeveloperController {
         totalMinor: r.totalMinor,
         pendingManualItems: pending,
         items,
+        // Ready to display: numbered values, the product named once.
+        deliveryText: apiDeliveryText(items),
       };
     } catch (e) {
       // Only release the claim when no order was actually created, otherwise a
@@ -747,6 +783,8 @@ export class DeveloperDocsController {
       '  price (raw): "variants[].priceMinor" + "nativeCurrency"  (integer MINOR units)',
       '  balance: "balance" / "balanceUsdt"  (USDT, 2dp string; currency is always "USDT")',
       '  pay later: "bnpl.availableUsdt"  (spend it with POST /orders {"payWith":"bnpl"})',
+      '  delivered value: "items[].value"  (the key / link / user|pass itself — show THIS, not "secret")',
+      '  ready-made text: "deliveryText"  (numbered values, product named once; "variant" is omitted for the default)',
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
       '  stock (display): "variants[].stockText"  (the number, or "Unlimited")',
       '  variant label: "variants[].label"  (product name, or "Product — Variant")',

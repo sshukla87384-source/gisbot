@@ -434,12 +434,45 @@ function extractDeliveredKeys(j: any, exclude: string[] = []): string[] {
   return [...new Set(out)];
 }
 
+/**
+ * Did the vendor say NO?
+ *
+ * A vendor can answer HTTP 200 and still refuse the order inside the body —
+ * `{"order":{"status":"failed","codes":[],"error":"bnpl_limit_exceeded"}}` is a
+ * real one. That used to be read as "accepted, no key yet", polled, and then
+ * reported to the admin as "Supplier CHARGED but no key parsed" — the opposite
+ * of what happened: nothing was charged, the vendor's own credit ran out.
+ * Returns the vendor's reason when the body is a refusal, else null.
+ */
+function supplierRejection(j: unknown): string | null {
+  if (!j || typeof j !== "object") return null;
+  const FAILED = new Set(["failed", "failure", "error", "rejected", "declined", "cancelled", "canceled", "insufficient_funds"]);
+  const look = (o: Record<string, unknown>): string | null => {
+    const status = typeof o.status === "string" ? o.status.toLowerCase() : "";
+    const flagged = o.success === false || o.ok === false || FAILED.has(status);
+    if (!flagged) return null;
+    const reason = [o.error, o.message, o.reason, o.detail, status]
+      .find((v): v is string => typeof v === "string" && v.trim() !== "");
+    return (reason ?? "rejected").slice(0, 160);
+  };
+  const top = look(j as Record<string, unknown>);
+  if (top) return top;
+  for (const key of ["order", "data", "result"]) {
+    const inner = (j as Record<string, unknown>)[key];
+    if (inner && typeof inner === "object") {
+      const r = look(inner as Record<string, unknown>);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
 export async function placeSupplierOrder(
   supplierId: string,
   ref: string,
   qty = 1,
   externalOrderId?: string,
-): Promise<{ ok: boolean; keys: string[]; reason?: string; raw?: string }> {
+): Promise<{ ok: boolean; keys: string[]; reason?: string; raw?: string; rejected?: boolean }> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { ok: false, keys: [], reason: "NO_SUPPLIER" };
   // "productRef|variantRef" — a sibling shop running this software needs the
@@ -472,8 +505,10 @@ export async function placeSupplierOrder(
         if (res.status === 404) continue;
         lastRaw = text.slice(0, 500);
         if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; break; }
-        const { keys } = readKeys(text);
+        const { keys, json } = readKeys(text);
         if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
+        const rej = supplierRejection(json);
+        if (rej) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
         lastReason = "ACCEPTED_NO_KEY";
         return { ok: false, keys: [], reason: lastReason, raw: lastRaw };
       } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
@@ -496,8 +531,11 @@ export async function placeSupplierOrder(
         continue;
       }
       if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; continue; }
-      const { keys } = readKeys(text);
+      const { keys, json } = readKeys(text);
       if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
+      // A refusal in a 200 body is final — polling it would only re-read the refusal.
+      const rej = supplierRejection(json);
+      if (rej) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
       // Accepted but still processing — poll the status endpoint once.
       const rec = await lookupSupplierOrder(s, extId, excl);
       if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
@@ -520,8 +558,10 @@ export async function placeSupplierOrder(
       const rec = await lookupSupplierOrder(s, extId, excl);
       if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
     } else if (res.ok) {
-      const { keys } = readKeys(text);
+      const { keys, json } = readKeys(text);
       if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
+      const rej = supplierRejection(json);
+      if (rej) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
       const rec = await lookupSupplierOrder(s, extId, excl);
       if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
       lastReason = "NO_KEY_IN_RESPONSE";
@@ -978,6 +1018,18 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
         `⚠️ <b>Supplier key bought but NOT delivered</b>\nProduct: ${esc(item.productNameSnap)}\nReason: ${done.reason ?? "unknown"}\nThe purchase went through — keep it for the next order or refund it with the vendor.`,
       ).catch(() => undefined);
       return { ok: false, reason: done.reason ?? "NOT_ATTACHED" };
+    }
+    if (r.rejected) {
+      // The vendor refused — nothing was bought. Say exactly that, and pull the
+      // vendor's catalogue again right now so a product they can no longer
+      // supply (out of stock, our credit with them exhausted) stops being sold
+      // for the next five minutes until the scheduled sync notices.
+      void logWallet("supplier.fulfil", `Supplier rejected the order: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
+      await enqueueAdminAlert(
+        `⛔ <b>Supplier REJECTED the order — not charged</b>\nProduct: ${esc(item.productNameSnap)}\nVendor says: <code>${esc(r.reason ?? "unknown")}</code>\n\nDeliver this order manually or refund it. If the reason is a balance / limit, top up your account with the vendor. Their catalogue is being re-synced now.`,
+      ).catch(() => undefined);
+      void syncSupplierProducts(supplierId).catch(() => undefined);
+      return { ok: false, reason: r.reason ?? "REJECTED" };
     }
     // A charge may have gone through but we couldn't read the key — never drop it silently.
     void logWallet("supplier.fulfil", `Supplier charged but no key parsed: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });

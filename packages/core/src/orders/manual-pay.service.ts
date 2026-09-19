@@ -469,7 +469,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money }), { buttons: deliveryButtons(credsOf(d.payload)) });
+      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload)) });
     } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
       await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
     } else if (outcome.deliveries.length > 1) {
@@ -483,7 +483,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
       }
       const instr = await deliveryInstructionsMessage();
-      if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
+      if (instr) await enqueueTelegramMessage(outcome.telegramId, instr, { buttons: DELIVERY_BUTTONS });
     }
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `⏳ <b>${outcome.pendingManual} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);

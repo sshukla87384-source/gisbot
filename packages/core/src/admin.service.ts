@@ -1310,7 +1310,20 @@ export async function setDeliveryInstructions(html: string): Promise<void> {
 /** The formatted instructions message, or null when unset. */
 export async function deliveryInstructionsMessage(): Promise<string | null> {
   const html = (await getDeliveryInstructions()).trim();
-  return html ? `📋 <b>Important — please read</b>\n${html}` : null;
+  if (!html) return null;
+  // Each paragraph the operator wrote becomes its own quote block, the way
+  // customers see instructions in other shops — a bordered card per point
+  // rather than one run-on paragraph under the keys. An operator who already
+  // wrote their own <blockquote> markup keeps it exactly as written.
+  const body = /<blockquote/i.test(html)
+    ? html
+    : html
+        .split(/\n\s*\n/)
+        .map((para) => para.trim())
+        .filter(Boolean)
+        .map((para) => `<blockquote>${para}</blockquote>`)
+        .join("\n");
+  return `ℹ️ <b>Instructions</b>\n${body}`;
 }
 
 // ───────────── Users management ─────────────
