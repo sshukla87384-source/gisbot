@@ -257,7 +257,7 @@ function stockOf(p: any): number | null {
 function parseProductArray(arr: any[]): SupplierProduct[] {
   return arr
     .map((p) => ({
-      ref: pickStr(p, ["id", "product_id", "productId", "sku", "code", "uuid", "_id"]),
+      ref: pickStr(p, ["id", "product_id", "productId", "service_id", "serviceId", "service", "sku", "code", "uuid", "_id"]),
       name: pickStr(p, ["name", "title", "product", "label", "productName", "product_name"]) || "Product",
       description: pickStr(p, ["description", "desc", "details", "info", "about", "content", "body", "long_description", "longDescription", "summary"]),
       // NOTE: "warranty" is deliberately NOT read here — warranty is a real
@@ -281,7 +281,9 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
 function findProductArray(json: any): any[] {
   if (Array.isArray(json)) return json;
   if (!json || typeof json !== "object") return [];
-  const KEYS = ["items", "data", "products", "result", "results", "list", "catalog", "stock", "rows"];
+  // "services": SMM-style panels (arrsnetworkzone.in among them) call every
+  // product a service — the catalogue came back fine and read as 0 products.
+  const KEYS = ["items", "data", "products", "services", "service", "offers", "plans", "result", "results", "list", "catalog", "stock", "rows"];
   for (const k of KEYS) {
     const v = json[k];
     if (Array.isArray(v)) return v;
@@ -585,7 +587,7 @@ export async function placeSupplierOrder(
       const res = await supFetch(s, orderPath, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": extId },
-        body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId }),
+        body: JSON.stringify({ product_id: pid, productId: pid, service_id: pid, serviceId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId }),
       });
       const text = await res.text().catch(() => "");
       if (res.status === 404 || res.status === 405) { lastReason = `${res.status} ${orderPath}`; continue; }
