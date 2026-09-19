@@ -272,6 +272,32 @@ function parseProductArray(arr: any[]): SupplierProduct[] {
     .filter((p) => p.ref && p.priceMinor > 0);
 }
 
+/**
+ * Where is the list in this body? Vendors wrap it every way there is:
+ * a bare array, `{data:[…]}`, `{products:[…]}`, and — the one the old code
+ * missed — an object one level down, `{success:true, data:{products:[…]}}`,
+ * which read as "parsed 0 products" and made a working API look broken.
+ */
+function findProductArray(json: any): any[] {
+  if (Array.isArray(json)) return json;
+  if (!json || typeof json !== "object") return [];
+  const KEYS = ["items", "data", "products", "result", "results", "list", "catalog", "stock", "rows"];
+  for (const k of KEYS) {
+    const v = json[k];
+    if (Array.isArray(v)) return v;
+  }
+  for (const k of KEYS) {
+    const v = json[k];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      for (const k2 of KEYS) {
+        const v2 = v[k2];
+        if (Array.isArray(v2)) return v2;
+      }
+    }
+  }
+  return [];
+}
+
 /** Try common product endpoints; return the parsed products, plus the path used and a raw sample for diagnostics. */
 async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string; trail?: string[] }> {
   let lastRaw = "";
@@ -289,9 +315,7 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
         if (!res.ok) { note(`docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
         let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
         const listed = atPath(json, doc.listField);
-        const arr: any[] = Array.isArray(listed)
-          ? listed
-          : Array.isArray(json) ? json : (json.items ?? json.data ?? json.products ?? json.result ?? json.list ?? []);
+        const arr: any[] = Array.isArray(listed) ? listed : findProductArray(json);
         const products = parseProductArray(Array.isArray(arr) ? arr : []);
         if (products.length > 0) return { products, path: `docs:${attempt}`, raw: text.slice(0, 400), note: "ok" };
         lastRaw = text.slice(0, 400);
@@ -306,8 +330,8 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       if (!res.ok) { note(`${path || "/"} → HTTP ${res.status} ${text.slice(0, 120)}`); continue; }
       let json: any;
       try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); note(`${path || "/"} → non-JSON response`); continue; }
-      const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
-      const products = parseProductArray(Array.isArray(arr) ? arr : []);
+      const arr: any[] = findProductArray(json);
+      const products = parseProductArray(arr);
       if (products.length > 0) {
         void prisma.supplier.update({ where: { id: s.id }, data: { docsConfig: { ...(doc ?? {}), productsPath: path } as never } }).catch(() => undefined);
         return { products, path: path || "/", raw: text.slice(0, 400), note: "ok" };
@@ -323,9 +347,7 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       const text = await res.text().catch(() => "");
       if (!res.ok) { note(`?action=${action} → HTTP ${res.status} ${text.slice(0, 120)}`); continue; }
       let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); note(`?action=${action} → non-JSON`); continue; }
-      const arr: any[] = Array.isArray(json)
-        ? json
-        : (json.products ?? json.data ?? json.result ?? json.items ?? json.list ?? json.catalog ?? json.stock ?? []);
+      const arr: any[] = findProductArray(json);
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
       if (products.length > 0) return { products, path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
       lastRaw = text.slice(0, 400);
@@ -343,8 +365,8 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       const text = await res.text().catch(() => "");
       if (!res.ok) { note(`POST ${JSON.stringify(body)} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
       let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
-      const arr: any[] = Array.isArray(json) ? json : (json.data ?? json.products ?? json.result ?? json.items ?? json.list ?? []);
-      const products = parseProductArray(Array.isArray(arr) ? arr : []);
+      const arr: any[] = findProductArray(json);
+      const products = parseProductArray(arr);
       if (products.length > 0) return { products, path: `POST ${JSON.stringify(body)}`, raw: text.slice(0, 400), note: "ok" };
       lastRaw = text.slice(0, 400);
     } catch (e) { note(`POST → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
@@ -380,12 +402,18 @@ export async function diagnoseSupplier(id: string): Promise<{ ok: boolean; detai
 }
 
 export async function getSupplierBalance(s: SupplierRow): Promise<number | null> {
-  const fields = ["balance", "amount", "credit", "wallet", "funds", "balance_usd"];
-  try {
-    const j = await getJson(s, "/balance");
-    const v = pickNum(j, fields) ?? pickNum(j.data ?? {}, fields);
-    if (v !== null) return v;
-  } catch { /* try the action-style endpoint */ }
+  const fields = ["balance", "amount", "credit", "wallet", "funds", "balance_usd", "balance_usdt", "credits"];
+  // The documented path first, then the spellings seen in the wild — a shop
+  // that reports the balance from GET /api/v1/me had no chance under "/balance".
+  const docCfg = (s.docsConfig ?? null) as DocsConfig | null;
+  const paths = [...new Set([docCfg?.balancePath, "/balance", "/me", "/account", "/user", "/wallet", "/profile"].filter((x): x is string => !!x).map((x) => (x.startsWith("/") ? x : `/${x}`)))];
+  for (const path of paths) {
+    try {
+      const j = await getJson(s, path);
+      const v = pickNum(j, fields) ?? pickNum(j.data ?? {}, fields) ?? pickNum(j.user ?? {}, fields) ?? pickNum(j.wallet ?? {}, fields) ?? pickNum(j.data?.wallet ?? {}, fields);
+      if (v !== null) return v;
+    } catch { /* next path */ }
+  }
   for (const action of ["balance", "get_balance", "wallet"]) {
     try {
       const res = await actionGet(s, { action });
@@ -545,35 +573,93 @@ export async function placeSupplierOrder(
     } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
   }
 
-  // Strategy B — conventional REST: POST /orders
-  try {
-    const res = await supFetch(s, "/orders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Idempotency-Key": extId },
-      body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId }),
-    });
-    const text = await res.text().catch(() => "");
-    lastRaw = text.slice(0, 500) || lastRaw;
-    if (res.status === 409) {
-      const rec = await lookupSupplierOrder(s, extId, excl);
-      if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
-    } else if (res.ok) {
+  // Strategy B — conventional REST. The path the vendor documents comes first
+  // (learnSupplierDocs records it and it was never read here), then the two
+  // spellings in the wild: `/orders` and `/order`. A shop such as
+  // arrsnetworkzone.in exposes POST /api/v1/order (singular) and answered 404
+  // to the only path this used to try.
+  const docCfg = (s.docsConfig ?? null) as DocsConfig | null;
+  const orderPaths = [...new Set([docCfg?.orderPath, "/orders", "/order"].filter((x): x is string => !!x).map((x) => (x.startsWith("/") ? x : `/${x}`)))];
+  for (const orderPath of orderPaths) {
+    try {
+      const res = await supFetch(s, orderPath, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": extId },
+        body: JSON.stringify({ product_id: pid, productId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId }),
+      });
+      const text = await res.text().catch(() => "");
+      if (res.status === 404 || res.status === 405) { lastReason = `${res.status} ${orderPath}`; continue; }
+      lastRaw = text.slice(0, 500) || lastRaw;
+      if (res.status === 409) {
+        const rec = await lookupSupplierOrder(s, extId, excl);
+        if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
+        lastReason = "409 duplicate, and the order lookup returned no key";
+        break;
+      }
+      if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; break; }
       const { keys, json } = readKeys(text);
       if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
       const rej = supplierRejection(json);
       if (rej) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
-      const rec = await lookupSupplierOrder(s, extId, excl);
+      // Accepted, still processing. Poll the order by ITS id at the same REST
+      // path (GET /order/{id}) a few times, then the action-style lookup.
+      const oid = supplierOrderId(json);
+      const rec = oid
+        ? await lookupSupplierOrderRest(s, orderPath, oid, excl)
+        : { keys: [], raw: "" };
       if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
-      lastReason = "NO_KEY_IN_RESPONSE";
-    } else {
-      lastReason = `${res.status} ${text.slice(0, 160)}`;
-    }
-  } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
+      const rec2 = await lookupSupplierOrder(s, extId, excl);
+      if (rec2.keys.length > 0) return { ok: true, keys: rec2.keys, raw: rec2.raw };
+      // The vendor ACCEPTED (2xx) — trying another path would buy a second one.
+      return { ok: false, keys: [], reason: "ACCEPTED_NO_KEY", raw: lastRaw };
+    } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
+  }
 
   return { ok: false, keys: [], reason: lastReason || "NO_KEY_IN_RESPONSE", raw: lastRaw };
 }
 
 /** Look an order up by our external id and pull the delivered accounts/keys out. */
+/** The vendor's own id for an order, from any of the usual places in a 2xx body. */
+function supplierOrderId(j: unknown): string | null {
+  if (!j || typeof j !== "object") return null;
+  const o = j as Record<string, unknown>;
+  for (const holder of [o, o.order, o.data, o.result]) {
+    if (!holder || typeof holder !== "object") continue;
+    const h = holder as Record<string, unknown>;
+    for (const k of ["id", "order_id", "orderId", "orderNumber", "order_number"]) {
+      const v = h[k];
+      if (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) return String(v);
+    }
+  }
+  return null;
+}
+
+/**
+ * Poll `GET <orderPath>/<id>` for the keys of an order the vendor accepted but
+ * had not filled at the moment it answered. Three tries, a moment apart —
+ * most vendors fill within a couple of seconds; the 60 s retry sweep covers
+ * the ones that do not.
+ */
+async function lookupSupplierOrderRest(s: SupplierRow, orderPath: string, id: string, excl: string[]): Promise<{ keys: string[]; raw: string }> {
+  const base = orderPath.replace(/\/$/, "");
+  const paths = [...new Set([`${base}/${encodeURIComponent(id)}`, `/order/${encodeURIComponent(id)}`, `/orders/${encodeURIComponent(id)}`])];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+    for (const path of paths) {
+      try {
+        const res = await supFetch(s, path, {}, false);
+        if (!res.ok) continue;
+        const text = await res.text().catch(() => "");
+        let j: unknown; try { j = JSON.parse(text); } catch { continue; }
+        const keys = extractDeliveredKeys(j, [...excl, id]);
+        if (keys.length > 0) return { keys, raw: text.slice(0, 500) };
+        if (supplierRejection(j)) return { keys: [], raw: text.slice(0, 500) };
+      } catch { /* next path */ }
+    }
+  }
+  return { keys: [], raw: "" };
+}
+
 async function lookupSupplierOrder(s: SupplierRow, extId: string, excl: string[]): Promise<{ keys: string[]; raw: string }> {
   for (const action of ["order_status", "order", "status", "check_order"]) {
     try {

@@ -118,10 +118,6 @@ export async function soldOutView(user: BotUser, page: number): Promise<View> {
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale });
-  // Sold-out products are hidden from the shelves by default, so this count is
-  // the only way back to them — and their card is the one place a customer can
-  // ask to be told when the item returns.
-  const soldOut = await listProducts({ currency: user.currency as Currency, page: 1, pageSize: 1, userId: user.id, locale: user.locale, soldOutOnly: true }).catch(() => null);
   const kb = new InlineKeyboard();
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
@@ -131,8 +127,10 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
   kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
-  if (soldOut && soldOut.total > 0) kb.text(`😴 Sold out (${soldOut.total})`, cb("shp", "soldout", 1)).row();
-  kb.text("📂 All Categories", cb("shp", "root"));
+  // "😴 Sold out (N)" and "📂 All Categories" were removed from this screen at
+  // the operator's request. Both destinations still exist — sold-out items
+  // are reachable through search and the category grid from the main menu —
+  // so the handlers stay; only the two rows here are gone.
   backToMenuRow(kb);
   return {
     text: result.items.length > 0
