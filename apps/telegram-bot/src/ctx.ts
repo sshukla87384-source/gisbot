@@ -143,6 +143,10 @@ export interface SessionData {
   bpField?: string;
   /** Payment QR message, so it can be cleared once the payment is submitted. */
   upiQrMsgId?: number;
+  /** Messages of the live payment conversation — see flow.ts ("one in, one out"). */
+  flowMsgIds?: number[];
+  /** The payment card of that conversation; kept until the flow ends. */
+  flowCardId?: number;
   /** One-shot banner shown at the top of the next admin view. */
   admFlash?: string;
   /** Bulk supplier-product picker state. */

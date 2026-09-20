@@ -112,6 +112,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, session } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
+import { flowEnd, flowRemember, flowSetCard, flowStart, flowStep } from "./flow.js";
 import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
@@ -806,10 +807,11 @@ export function createBot(): Bot<Ctx> {
       );
     }
     if (awaiting === "wallet_inr_amount") {
+      flowRemember(ctx, ctx.message);
       const val = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
       if (!Number.isFinite(val) || val <= 0) {
         ctx.session.awaiting = "wallet_inr_amount";
-        return ctx.reply("Please send a valid amount in ₹, e.g. <code>500</code>", { parse_mode: "HTML" });
+        return flowStep(ctx, () => ctx.reply("Please send a valid amount in ₹, e.g. <code>500</code>", { parse_mode: "HTML" }));
       }
       const minor = Math.round(val * 100);
       ctx.session.inrTopupMinor = minor;
@@ -845,14 +847,21 @@ export function createBot(): Bot<Ctx> {
         .copyText(`📋 Copy amount — ₹${rupees}`, rupees).row()
         .copyText(`📋 Copy UPI ID — ${upiId}`, upiId).row()
         .text("✖️ Cancel", "wal:view");
-      try {
-        const png = await QRCode.toBuffer(uri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
-        return ctx.replyWithPhoto(new InputFile(png, "upi-topup.png"), { caption, parse_mode: "HTML", reply_markup: kb });
-      } catch {
-        return ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb });
-      }
+      // The QR card replaces the "how much?" prompt and the typed amount, and
+      // is the one thing that stays on screen until the UTR is in.
+      const card = await (async () => {
+        try {
+          const png = await QRCode.toBuffer(uri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
+          return await ctx.replyWithPhoto(new InputFile(png, "upi-topup.png"), { caption, parse_mode: "HTML", reply_markup: kb });
+        } catch {
+          return ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb });
+        }
+      })();
+      await flowStart(ctx, card);
+      return card;
     }
     if (awaiting === "wallet_inr_utr") {
+      flowRemember(ctx, ctx.message);
       const utr = ctx.message.text.trim().slice(0, 64);
       const minor = ctx.session.inrTopupMinor ?? 0;
       const rate = await getInrPerUsdt();
@@ -862,21 +871,23 @@ export function createBot(): Bot<Ctx> {
       const digits = utr.replace(/\D/g, "");
       if (digits.length !== 12 || minor <= 0) {
         ctx.session.awaiting = "wallet_inr_utr";
-        return ctx.reply(
+        return flowStep(ctx, () => ctx.reply(
           "Please paste the <b>12-digit UTR</b> from your UPI receipt.\n\nIt's the long reference number on the payment confirmation — digits only.",
           { parse_mode: "HTML" },
-        );
+        ));
       }
       // One UTR is one payment. Without this the same reference could be
       // submitted repeatedly, and each submission raised a fresh approval
       // request that would credit the wallet again.
       const already = await hasUpiUtrBeenUsed(digits);
       if (already) {
-        ctx.session.awaiting = undefined;
-        return ctx.reply(
+        // Stay armed: the message invites the UTR of the NEW payment, which
+        // was impossible when this dropped the state.
+        ctx.session.awaiting = "wallet_inr_utr";
+        return flowStep(ctx, () => ctx.reply(
           "⚠️ That UTR has already been submitted.\n\nEach UPI payment can only be credited once. If you've paid again, send the UTR from the <b>new</b> payment, or open 🎫 Support.",
-          { parse_mode: "HTML" },
-        );
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
+        ));
       }
       await markUpiUtrPending(digits);
       const claimId = await stashUpiTopupClaim({ userId: ctx.user.id, inrMinor: minor, usdMinor, utr: digits });
@@ -898,43 +909,55 @@ export function createBot(): Bot<Ctx> {
           { text: "❌ Reject", callbackData: `adm:wdno:${claimId}`, style: "danger" },
         ],
       ).catch(() => undefined);
-      return ctx.reply(
+      // Submitted: the QR card, the prompts and the pasted UTR all go — this
+      // receipt is the one thing left of the conversation.
+      const receipt = await flowEnd(ctx, () => ctx.reply(
         [
           "🧾 <b>Thanks — payment submitted!</b>",
           "",
           `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
           `💰 You'll receive: <b>$${(usdMinor / 100).toFixed(2)}</b> <i>(${rate} INR = 1 USD)</i>`,
-          `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
+          `🧾 UTR: <code>${escapeHtml(digits)}</code>`,
           "",
           "🧑‍💼 Our team is verifying it now — UPI is approved by hand, so please allow a little time. Your wallet is credited as soon as it clears and you'll get a message here. 🙏",
           "",
           "⚡ <i>Tip: Binance (USDT) deposits are credited automatically, with no waiting.</i>",
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🏠 Menu", "mnu:home") },
-      );
+      ));
+      // …and once the credit lands, even the receipt is only in the way.
+      if (ctx.chat) await rememberChatClutter(ctx.chat.id, receipt.message_id);
+      return receipt;
     }
     if (awaiting === "binance_txnid") {
       const orderId = ctx.session.binanceOrderId ?? "";
       const txn = ctx.message.text.trim().slice(0, 128);
+      // The pasted ID is part of the conversation: it goes with the rest.
+      flowRemember(ctx, ctx.message);
       if (!orderId) {
-        return ctx.reply("That checkout expired — please start again from your 🛒 Cart.");
+        return flowEnd(ctx, () => ctx.reply("That checkout expired — please start again from your 🛒 Cart."));
       }
       // Obvious non-IDs (a stray word, a menu tap) shouldn't be sent to admins.
       if (txn.length < 6) {
         ctx.session.awaiting = "binance_txnid";
-        return ctx.reply(
+        return flowStep(ctx, () => ctx.reply(
           "🔎 That doesn't look like a Binance <b>Order ID</b>. Open the payment in Binance, copy the Order ID from the receipt and paste it here.",
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", `ord:binancehelp:${orderId}`) },
-        );
+        ));
       }
-      await ctx.reply("🔎 Verifying your payment…");
+      // "Verifying…" replaces the prompt and the paste; the card stays until
+      // the verdict is in.
+      await flowStep(ctx, () => ctx.reply("🔎 <b>Verifying your payment…</b>", { parse_mode: "HTML" }));
       const r = await verifyBinanceByTxnId(orderId, txn, ctx.user.id);
       if (r.ok) {
         ctx.session.binanceOrderId = undefined;
         ctx.session.payRetries = undefined;
-        return ctx.reply(
+        // Verified: card, prompt, paste and "verifying" all go at once — the
+        // delivery and this confirmation are all that is left.
+        return flowEnd(ctx, () => ctx.reply(
           [
             "✅ <b>Payment verified!</b>",
+            `🧾 Order ID: <code>${escapeHtml(txn)}</code>`,
             "",
             "🚀 Your order has been <b>delivered</b> — check the message above.",
             "💾 It is also saved in 📦 My Orders.",
@@ -945,7 +968,7 @@ export function createBot(): Bot<Ctx> {
               .text("📦 View my orders", cb("ord", "list", 1))
               .text("🛍 Buy more", cb("shp", "home", 1)),
           },
-        );
+        ));
       }
       // Not auto-verified → send admins an instant approve/reject card (fallback: ticket).
       const notified = await notifyAdminsForApproval(ctx, orderId, "Binance", txn);
@@ -970,16 +993,20 @@ export function createBot(): Bot<Ctx> {
       ctx.session.payRetries = tries;
       if (tries < 3) ctx.session.awaiting = "binance_txnid";
       else ctx.session.binanceOrderId = undefined;
-      const pending = await ctx.reply(
-        [
-          note ? `${note}` : "⏳ <b>We couldn't auto-verify that yet.</b>",
-          "",
-          "🧑‍💼 Our team has been notified and will verify and deliver shortly — you'll get a message here the moment it's confirmed.",
-          "",
-          "💡 Double-checked your receipt? Paste the correct Order ID here and we'll try again instantly.",
-        ].join("\n"),
-        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
-      );
+      const pendingText = [
+        note ? `${note}` : "⏳ <b>We couldn't auto-verify that yet.</b>",
+        `🧾 Order ID: <code>${escapeHtml(txn)}</code>`,
+        "",
+        "🧑‍💼 Our team has been notified and will verify and deliver shortly — you'll get a message here the moment it's confirmed.",
+        "",
+        ...(tries < 3 ? ["💡 Double-checked your receipt? Paste the correct Order ID here and we'll try again instantly."] : []),
+      ].join("\n");
+      const pendingOpts = { parse_mode: "HTML" as const, reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") };
+      // While they may still paste again the card (amount + Pay ID) stays; on
+      // the last try the whole conversation collapses to this one notice.
+      const pending = tries < 3
+        ? await flowStep(ctx, () => ctx.reply(pendingText, pendingOpts))
+        : await flowEnd(ctx, () => ctx.reply(pendingText, pendingOpts));
       // Once the payment IS confirmed this line is only in the way.
       if (ctx.chat) await rememberChatClutter(ctx.chat.id, pending.message_id);
       return pending;
@@ -1019,20 +1046,24 @@ export function createBot(): Bot<Ctx> {
         if (msg && ctx.chat) await rememberPaymentPrompt(orderId, ctx.chat.id, msg.message_id).catch(() => undefined);
       };
       await trackPay(ctx.message);
+      flowRemember(ctx, ctx.message);
       // A UPI UTR/RRN is exactly 12 digits. The old check took any 6+ characters.
       const digits = ref.replace(/\D/g, "");
       if (digits.length !== 12) {
         ctx.session.awaiting = "upi_ref"; // keep waiting instead of dropping the order
-        const retry = await ctx.reply(
+        // One in, one out: the retry replaces the previous prompt and the
+        // bad paste; the QR card stays so they can still pay.
+        const retry = await flowStep(ctx, () => ctx.reply(
           "🔎 That doesn't look like a <b>UTR</b>. Open your UPI app → the payment → copy the <b>12-digit</b> UTR / RRN / Transaction ID and paste it here.",
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid") },
-        );
+        ));
         await trackPay(retry);
         return retry;
       }
 
-      // Visible progress while the checks run, like a card terminal.
-      const progress = await ctx.reply("🔄 <b>Verifying your payment…</b>\n<code>▰▱▱▱▱</code>", { parse_mode: "HTML" });
+      // Visible progress while the checks run, like a card terminal. It takes
+      // the place of the prompt and the pasted UTR straight away.
+      const progress = await flowStep(ctx, () => ctx.reply("🔄 <b>Verifying your payment…</b>\n<code>▰▱▱▱▱</code>", { parse_mode: "HTML" }));
       await trackPay(progress);
       const step = async (bar: string, text: string): Promise<void> => {
         await ctx.api.editMessageText(progress.chat.id, progress.message_id, `${text}\n<code>${bar}</code>`, { parse_mode: "HTML" })
@@ -1044,24 +1075,29 @@ export function createBot(): Bot<Ctx> {
       // one order — a reference cannot be pasted into a second one.
       const claim = await claimUpiUtrForOrder(orderId, digits);
       if (!claim.ok) {
+        if (claim.reason === "ALREADY_USED") {
+          // The order is still payable: keep the QR, keep listening for the
+          // UTR of the right payment, and let the verdict replace the progress.
+          ctx.session.awaiting = "upi_ref";
+          return flowStep(ctx, () => ctx.reply(
+            "⚠️ That UTR has already been used for another payment.\n\nEach UPI payment can settle one order only. Paste the UTR from <b>this</b> payment, or open 🎫 Support if you think this is wrong.",
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🎫 Support", "mnu:home") },
+          ));
+        }
         ctx.session.awaiting = undefined;
         ctx.session.upiOrderId = undefined;
-        await step("▰▰▰▰▰", claim.reason === "ALREADY_USED" ? "⚠️ <b>Already used</b>" : "⚠️ <b>Order not awaiting payment</b>");
-        return ctx.reply(
-          claim.reason === "ALREADY_USED"
-            ? "⚠️ That UTR has already been used for another payment.\n\nEach UPI payment can settle one order only. Paste the UTR from <b>this</b> payment, or open 🎫 Support if you think this is wrong."
-            : "⚠️ This order is no longer awaiting payment. Check 📦 My orders, or open 🎫 Support.",
+        ctx.session.upiQrMsgId = undefined;
+        return flowEnd(ctx, () => ctx.reply(
+          "⚠️ This order is no longer awaiting payment. Check 📦 My orders, or open 🎫 Support.",
           { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🎫 Support", "mnu:home") },
-        );
+        ));
       }
       await step("▰▰▰▰▱", "🔄 <b>Confirming with our team…</b>");
 
       ctx.session.upiOrderId = undefined;
       // The payment is in; the QR is now stale whichever way this resolves.
-      if (ctx.session.upiQrMsgId) {
-        await ctx.api.deleteMessage(ctx.chat.id, ctx.session.upiQrMsgId).catch(() => undefined);
-        ctx.session.upiQrMsgId = undefined;
-      }
+      // (flowEnd below removes it; this keeps the id from going stale.)
+      ctx.session.upiQrMsgId = undefined;
 
       // Auto-delivery, when the operator has enabled it and this order sits
       // inside the risk limits. Nothing here proves the money landed — BharatPe
@@ -1072,10 +1108,10 @@ export function createBot(): Bot<Ctx> {
         try {
           await confirmManualPayment(orderId);
           await enqueueAdminAlert(`⚡ UPI auto-delivered ${orderId} — UTR ${digits}. Check BharatPe; if this payment never arrives, revoke and ban.`).catch(() => undefined);
-          return ctx.reply(
-            "✅ <b>Payment verified — your order is on its way!</b>\n\nCheck 📦 My orders for the delivery.",
+          return flowEnd(ctx, () => ctx.reply(
+            `✅ <b>Payment verified — your order is on its way!</b>\n🔢 UTR: <code>${escapeHtml(digits)}</code>\n\nCheck 📦 My orders for the delivery.`,
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
-          );
+          ));
         } catch {
           // Delivery failed after the claim — fall through to a human rather
           // than leaving the customer with a claimed UTR and nothing to show.
@@ -1085,7 +1121,9 @@ export function createBot(): Bot<Ctx> {
       await step("▰▰▰▰▰", "✅ <b>Reference accepted</b>");
       const ref2 = digits;
       if (notified === 0) await createTicket(ctx.user.id, "PAYMENT_ISSUE", `UPI payment for order ${orderId}, UTR: ${ref2}.`).catch(() => undefined);
-      const receipt = await ctx.reply(
+      // Submitted to the team: QR, prompts, paste and progress all go; the
+      // receipt is the one line left, and delivery clears even that.
+      const receipt = await flowEnd(ctx, () => ctx.reply(
         [
           "🧾 <b>Thanks — UTR received!</b>",
           "",
@@ -1094,7 +1132,7 @@ export function createBot(): Bot<Ctx> {
           "🧑‍💼 Our team is verifying your payment now. Your order is delivered here as soon as it clears. 🙏",
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") },
-      );
+      ));
       await trackPay(receipt);
       return receipt;
     }
@@ -1106,8 +1144,15 @@ export function createBot(): Bot<Ctx> {
     // contradicted that screen and has been removed.
     if (awaiting === "wallet_free_txn") {
       const txn = ctx.message.text.trim().slice(0, 128);
+      flowRemember(ctx, ctx.message);
+      await flowStep(ctx, () => ctx.reply("🔎 <b>Verifying your deposit…</b>", { parse_mode: "HTML" }));
       const r = await creditFreeTopup(ctx.user.id, txn);
-      if (r.ok) return ctx.reply(`✅ Deposited ${fmt(r.amountMinor, r.currency)} to your wallet! New balance: <b>${fmt(r.newBalanceMinor, r.currency)}</b>.`, { parse_mode: "HTML" });
+      if (r.ok) {
+        return flowEnd(ctx, () => ctx.reply(
+          `✅ Deposited ${fmt(r.amountMinor, r.currency)} to your wallet! New balance: <b>${fmt(r.newBalanceMinor, r.currency)}</b>.\n🧾 Order ID: <code>${escapeHtml(txn)}</code>`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🛍 Shop", cb("shp", "home", 1)) },
+        ));
+      }
       const msg: Record<string, string> = {
         NOT_FOUND: "❌ That Order ID wasn't found in Binance Pay history.",
         ALREADY_USED: "❌ That Order ID was already used.",
@@ -1117,7 +1162,13 @@ export function createBot(): Bot<Ctx> {
         WRONG_USER: "❌ That deposit isn't yours.",
       };
       await createTicket(ctx.user.id, "PAYMENT_ISSUE", `Wallet deposit — Order ID ${txn} (${r.ok ? "ok" : r.reason}).`).catch(() => undefined);
-      return ctx.reply(msg[r.reason] ?? "❌ Could not verify — support will check.");
+      // The deposit card stays (they may need the UID again); the verdict
+      // replaces the paste and the progress line.
+      ctx.session.awaiting = r.reason === "NOT_FOUND" || r.reason === "AMOUNT_MISMATCH" ? "wallet_free_txn" : undefined;
+      return flowStep(ctx, () => ctx.reply(
+        `${msg[r.reason] ?? "❌ Could not verify — support will check."}${ctx.session.awaiting ? "\n\n💡 Paste the correct Order ID to try again." : ""}`,
+        { reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🏠 Menu", "mnu:home") },
+      ));
     }
     if (awaiting === "reseller_price") {
       const pid = ctx.session.priceProductId ?? "";
@@ -1591,6 +1642,8 @@ export function createBot(): Bot<Ctx> {
           // was wrong whenever the card had to be re-sent (a photo product card
           // cannot be edited into text), which left the real card on screen.
           if (ctx.chat && bzCard) await rememberPaymentPrompt(bz.orderId, ctx.chat.id, bzCard.message_id);
+          // A fresh conversation: leftovers of an abandoned one go, this card stays.
+          await flowStart(ctx, bzCard);
           break;
         }
         case "ord:binancetxn": {
@@ -1600,10 +1653,10 @@ export function createBot(): Bot<Ctx> {
             break;
           }
           ctx.session.awaiting = "binance_txnid";
-          await ctx.reply(
+          await flowStep(ctx, () => ctx.reply(
             "🔎 Paste your Binance <b>Order ID</b> (open the payment in Binance → it’s the ID on the receipt):",
             { parse_mode: "HTML" },
-          );
+          ));
           break;
         }
         case "ord:binancehelp": {
@@ -1614,7 +1667,7 @@ export function createBot(): Bot<Ctx> {
             await createTicket(user.id, "PAYMENT_ISSUE", `Binance payment issue on order ${oid} — customer tapped "need help".`).catch(() => undefined);
           }
           ctx.session.awaiting = "binance_txnid"; // they can still paste the ID
-          const notice = await ctx.reply(
+          const notice = await flowStep(ctx, () => ctx.reply(
             [
               "🆘 <b>Our team has been notified</b>",
               "",
@@ -1623,7 +1676,7 @@ export function createBot(): Bot<Ctx> {
               "💡 If you have the Binance <b>Order ID</b> from your receipt, paste it here — that usually verifies instantly.",
             ].join("\n"),
             { parse_mode: "HTML" },
-          );
+          ));
           // Once the payment IS confirmed this notice is only in the way.
           if (ctx.chat) await rememberChatClutter(ctx.chat.id, notice.message_id);
           break;
@@ -1749,6 +1802,7 @@ export function createBot(): Bot<Ctx> {
             // order, and buries the delivered items under a dead screen.
             ctx.session.upiQrMsgId = qrMsg.message_id;
             if (ctx.chat) await rememberPaymentPrompt(up.orderId, ctx.chat.id, qrMsg.message_id);
+            await flowStart(ctx, qrMsg);
           } catch {
             // QR generation or photo send failed — still show the payment details.
             // These fallbacks used to store no id at all, so their card stayed on
@@ -1756,11 +1810,14 @@ export function createBot(): Bot<Ctx> {
             try {
               const m = await ctx.reply(caption, { parse_mode: "HTML", reply_markup: upiKb });
               if (ctx.chat) await rememberPaymentPrompt(up.orderId, ctx.chat.id, m.message_id);
+              ctx.session.upiQrMsgId = m.message_id;
+              await flowStart(ctx, m);
             } catch {
               const m = await ctx.reply(caption.replace(/<[^>]+>/g, ""), {
                 reply_markup: new InlineKeyboard().text("⚠️ I have paid — need help", "ord:upipaid").row().text("🏠 Menu", "mnu:home"),
               }).catch(() => undefined);
               if (ctx.chat && m) await rememberPaymentPrompt(up.orderId, ctx.chat.id, m.message_id);
+              if (m) { ctx.session.upiQrMsgId = m.message_id; await flowStart(ctx, m); }
             }
           }
           break;
@@ -1776,12 +1833,12 @@ export function createBot(): Bot<Ctx> {
           ctx.session.awaiting = undefined;
           // The payment card and the whole UTR conversation are dead weight now.
           if (cancelledOrder) await clearPaymentPrompts(cancelledOrder).catch(() => undefined);
-          await ctx.reply(comeBackMessage(user), {
+          await flowEnd(ctx, () => ctx.reply(comeBackMessage(user), {
             parse_mode: "HTML",
             reply_markup: new InlineKeyboard()
               .text("🛍 Pick it up again", cb("shp", "home", 1)).row()
               .text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home"),
-          });
+          }));
           break;
         }
         case "ord:upipaid": {
@@ -1789,7 +1846,7 @@ export function createBot(): Bot<Ctx> {
           const payOrderId = ctx.session.upiOrderId;
           if (!payOrderId) { await ctx.reply("This checkout expired. Please start again from your cart."); break; }
           ctx.session.awaiting = "upi_ref";
-          const ask = await ctx.reply("🔎 Paste your UPI <b>reference / UTR number</b>:", { parse_mode: "HTML" });
+          const ask = await flowStep(ctx, () => ctx.reply("🔎 Paste your UPI <b>reference / UTR number</b>:", { parse_mode: "HTML" }));
           if (ctx.chat) await rememberPaymentPrompt(payOrderId, ctx.chat.id, ask.message_id).catch(() => undefined);
           break;
         }
@@ -1949,7 +2006,7 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery();
           const uid = config.BINANCE_PAY_UID;
           if (!uid) { await ctx.reply("Wallet deposits aren't configured yet."); break; }
-          await ctx.reply(
+          const depositCard = await ctx.reply(
             [
               "💳 <b>Add funds to your Wallet — Binance (USDT)</b>",
               "━━━━━━━━━━━━━━━━━━━━",
@@ -1974,6 +2031,9 @@ export function createBot(): Bot<Ctx> {
                 .text("🏠 Menu", "mnu:home"),
             },
           );
+          // The deposit card is the anchor of this conversation until the
+          // Order ID is verified.
+          await flowStart(ctx, depositCard);
           break;
         }
         case "wal:bnplrepay": {
@@ -1997,16 +2057,17 @@ export function createBot(): Bot<Ctx> {
             break;
           }
           ctx.session.awaiting = "wallet_inr_amount";
-          await ctx.reply(
+          const askAmt = await ctx.reply(
             "🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).\n\n<i>Your wallet is held in USD and credited at the store rate.</i>",
-            { parse_mode: "HTML" },
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
           );
+          await flowStart(ctx, askAmt, { card: false });
           break;
         }
         case "wal:freetxn":
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "wallet_free_txn";
-          await ctx.reply("🔎 Paste your Binance <b>Order ID</b> now (from the completed payment in Binance → Pay → History). We will verify it and credit your wallet instantly:", { parse_mode: "HTML" });
+          await flowStep(ctx, () => ctx.reply("🔎 Paste your Binance <b>Order ID</b> now (from the completed payment in Binance → Pay → History). We will verify it and credit your wallet instantly:", { parse_mode: "HTML" }));
           break;
         case "api:home":
           await render(ctx, await views.apiKeysView(user), true);

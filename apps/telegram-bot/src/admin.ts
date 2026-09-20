@@ -3,6 +3,7 @@ import {
   addLicenseKeys,
   addStock,
   adminCancelOrder,
+  clearChatClutter,
   enqueueTelegramMessage,
   BOT_ADMIN_MEMBERS_KEY,
   adminDeleteProduct,
@@ -3496,6 +3497,8 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         // Plain text: dmUser escapes whatever it is handed, so tags would reach
         // the customer as a literal "<b>".
         await dmUser(uid, `✅ Wallet topped up!\n\n💰 $${(usdMinor / 100).toFixed(2)} added (₹${(inrMinor / 100).toFixed(2)} at 100 INR = 1 USD).\nYou can pay for any order instantly now. 🚀`).catch(() => undefined);
+        // The "we're verifying your UTR" receipt has done its job now.
+        if (tu?.telegramId) await clearChatClutter(tu.telegramId).catch(() => undefined);
       } else {
         await ctx.reply("❌ Couldn't credit that customer.");
       }
