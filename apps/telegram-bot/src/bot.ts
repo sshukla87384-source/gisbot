@@ -391,8 +391,9 @@ export function createBot(): Bot<Ctx> {
   // <tg-emoji> tags back to their fallback glyph so the message still sends.
   const stripEmoji = (html: string): string => html.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, "$1");
 
-  const render = async (ctx: Ctx, view: View, edit: boolean): Promise<void> => {
+  const render = async (ctx: Ctx, view: View, edit: boolean): Promise<number | undefined> => {
     const opts = { parse_mode: "HTML" as const, reply_markup: view.kb };
+    let sentId: number | undefined;
     const cap = (t: string) => (t.length > 1024 ? `${t.slice(0, 1021)}…` : t);
 
     // Telegram cannot turn a photo message into a text one or the reverse, and
@@ -413,15 +414,15 @@ export function createBot(): Bot<Ctx> {
 
     if (view.photo) {
       try {
-        await ctx.replyWithPhoto(view.photo, { caption: cap(view.text), parse_mode: "HTML", reply_markup: view.kb });
-        return;
+        const m = await ctx.replyWithPhoto(view.photo, { caption: cap(view.text), parse_mode: "HTML", reply_markup: view.kb });
+        return m.message_id;
       } catch (e) {
         // Retry without custom emoji first (bot may not own them), then plain.
         if (e instanceof GrammyError && e.description.includes("CUSTOM_EMOJI")) {
-          try { await ctx.replyWithPhoto(view.photo, { caption: cap(stripEmoji(view.text)), parse_mode: "HTML", reply_markup: view.kb }); return; } catch { /* fall through */ }
+          try { const m = await ctx.replyWithPhoto(view.photo, { caption: cap(stripEmoji(view.text)), parse_mode: "HTML", reply_markup: view.kb }); return m.message_id; } catch { /* fall through */ }
         }
-        await ctx.reply(cap(stripEmoji(view.text)), opts).catch(() => ctx.reply(cap(view.text.replace(/<[^>]+>/g, ""))).catch(() => undefined));
-        return;
+        const m = await ctx.reply(cap(stripEmoji(view.text)), opts).catch(() => ctx.reply(cap(view.text.replace(/<[^>]+>/g, ""))).catch(() => undefined));
+        return m?.message_id;
       }
     }
     // Telegram hard-caps a text message at 4096 chars. Views that list one row per
@@ -433,17 +434,37 @@ export function createBot(): Bot<Ctx> {
       if (edit && ctx.callbackQuery?.message) {
         await ctx.editMessageText(fit(text), opts);
       } else {
-        await ctx.reply(fit(text), opts);
+        const m = await ctx.reply(fit(text), opts);
+        sentId = m.message_id;
       }
     };
     try {
       await send(view.text);
     } catch (e) {
-      if (e instanceof GrammyError && e.description.includes("message is not modified")) return;
+      if (e instanceof GrammyError && e.description.includes("message is not modified")) return sentId;
       // Most likely an unowned custom emoji — retry with tg-emoji stripped.
       try { await send(stripEmoji(view.text)); }
-      catch { await ctx.reply(stripEmoji(view.text), opts).catch(() => ctx.reply(view.text.replace(/<[^>]+>/g, ""))); }
+      catch {
+        const m = await ctx.reply(stripEmoji(view.text), opts).catch(() => ctx.reply(view.text.replace(/<[^>]+>/g, "")).catch(() => undefined));
+        sentId = m?.message_id;
+      }
     }
+    return sentId;
+  };
+
+  /**
+   * The home card, exactly once: /start and /menu replace the previous home
+   * card instead of stacking a new one under it. The command message itself
+   * goes too — a chat full of "/start" lines is nobody's idea of a shop.
+   */
+  const showHome = async (ctx: Ctx): Promise<void> => {
+    await ctx.deleteMessage().catch(() => undefined);
+    if (ctx.chat && ctx.session.menuMsgId) {
+      await ctx.api.deleteMessage(ctx.chat.id, ctx.session.menuMsgId).catch(() => undefined);
+      ctx.session.menuMsgId = undefined;
+    }
+    const id = await render(ctx, await views.menuView(ctx.user), false);
+    if (id) ctx.session.menuMsgId = id;
   };
 
   /**
@@ -553,36 +574,38 @@ export function createBot(): Bot<Ctx> {
       case "orders": return render(ctx, await views.ordersView(ctx.user, 1), false);
       default: break;
     }
-    // Standalone single emoji → Telegram plays a fullscreen animation for the user.
-    if (config.CELEBRATION_EMOJI) {
-      const em = await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
-      if (em && ctx.chat) await rememberChatClutter(ctx.chat.id, em.message_id);
-    }
-    const who = greetName(ctx.user);
-    const welcomeLines = [
-      `👋 <b>Welcome, ${who}!</b> 🙏`,
-      `It's a real pleasure to have you at <b>${escapeHtml(config.STORE_NAME)}</b>. We're honoured to serve you.`,
-      `<i>Digital products · instant delivery · best prices.</i>`,
-    ];
+    // The celebration and the warm welcome are for the FIRST visit. A returning
+    // customer tapping /start used to get the confetti, a "Welcome" paragraph
+    // and then the home card that says "Welcome back" again — three messages
+    // repeating one another, every single time. Now: first visit = one
+    // welcome + the home card; every later /start = the home card alone,
+    // replacing the previous one.
     if (ctx.session.isNewUser) {
-      welcomeLines.push("", "💱 Your currency is set to <b>USD</b> — you can switch anytime from ⚙️ the menu.");
+      if (config.CELEBRATION_EMOJI) {
+        const em = await ctx.reply(config.CELEBRATION_EMOJI).catch(() => undefined);
+        if (em && ctx.chat) await rememberChatClutter(ctx.chat.id, em.message_id);
+      }
+      const who = greetName(ctx.user);
+      const welcomeText = [
+        `👋 <b>Welcome, ${who}!</b> 🙏`,
+        `It's a real pleasure to have you at <b>${escapeHtml(config.STORE_NAME)}</b>.`,
+        "",
+        "💱 Your currency is set to <b>USD</b> — switch anytime from the menu.",
+      ].join("\n");
+      const emojiPrefix = config.CUSTOM_EMOJI_ID ? `<tg-emoji emoji-id="${config.CUSTOM_EMOJI_ID}">✨</tg-emoji> ` : "";
+      let welcomeMsg;
+      try {
+        welcomeMsg = await ctx.reply(`${emojiPrefix}${welcomeText}`, { parse_mode: "HTML" });
+      } catch {
+        welcomeMsg = await ctx.reply(welcomeText, { parse_mode: "HTML" }).catch(() => undefined);
+      }
+      // Cleared on their first delivery, so it never sits above their keys.
+      if (welcomeMsg && ctx.chat) await rememberChatClutter(ctx.chat.id, welcomeMsg.message_id);
+      ctx.session.isNewUser = false;
     }
-    const welcomeText = welcomeLines.join("\n");
-    const emojiPrefix = config.CUSTOM_EMOJI_ID ? `<tg-emoji emoji-id="${config.CUSTOM_EMOJI_ID}">✨</tg-emoji> ` : "";
-    // Remembered so the greeting does not sit above a customer's delivered keys
-    // for ever — it is cleared on their next delivery.
-    let welcomeMsg;
-    try {
-      welcomeMsg = await ctx.reply(`${emojiPrefix}${welcomeText}`, { parse_mode: "HTML" });
-    } catch {
-      // Telegram rejects custom emoji the bot doesn't own — fall back to plain text.
-      welcomeMsg = await ctx.reply(welcomeText, { parse_mode: "HTML" }).catch(() => undefined);
-    }
-    if (welcomeMsg && ctx.chat) await rememberChatClutter(ctx.chat.id, welcomeMsg.message_id);
-    ctx.session.isNewUser = false;
-    return render(ctx, await views.menuView(ctx.user), false);
+    return showHome(ctx);
   });
-  bot.command("menu", async (ctx) => render(ctx, await views.menuView(ctx.user), false));
+  bot.command("menu", async (ctx) => showHome(ctx));
   bot.command("shop", async (ctx) => render(ctx, await views.shopHomeView(ctx.user, 1), false));
   bot.command("cart", async (ctx) => render(ctx, await views.cartViewKb(ctx.user), false));
   bot.command("orders", async (ctx) => render(ctx, await views.ordersView(ctx.user, 1), false));

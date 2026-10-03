@@ -183,6 +183,8 @@ export interface SessionData {
   npKeyTmp?: string;
   /** Terminal chain whose payout address is being entered. */
   tmChain?: string;
+  /** The current home card, replaced (not stacked) on the next /start or /menu. */
+  menuMsgId?: number;
   /** Pending price-change announcement offered to the admin. */
   priceAlert?: { productId: string; oldMinor: number; newMinor: number; currency: string };
   /** Auto-translate provider being configured. */
