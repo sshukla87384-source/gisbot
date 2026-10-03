@@ -64,7 +64,7 @@ export const CRYPTO_NETWORKS: readonly CryptoNetwork[] = [
   { code: "xrp", label: "XRP", asset: "XRP", chain: "XRP Ledger", emoji: "⚫", stable: false, memo: true },
 ];
 
-export const DEFAULT_CRYPTO_NETWORKS = ["usdttrc20", "usdtbsc", "usdtsol", "usdtton"];
+export const DEFAULT_CRYPTO_NETWORKS = ["usdttrc20", "usdtbsc", "usdtsol", "usdtton", "ltc"];
 
 export function cryptoNetwork(code: string): CryptoNetwork | null {
   const c = code.toLowerCase();
@@ -625,7 +625,7 @@ export async function checkCryptoPayment(kind: "order" | "topup", refId: string,
       if (!t || t.userId !== userId) throw new CoreError("VALIDATION_FAILED", "Top-up not found");
       paymentId = t.binanceTxnId?.replace(/^np:/, "") ?? null;
     }
-  } else if (card.userId !== userId) {
+  } else if (card && card.userId !== userId) {
     throw new CoreError("VALIDATION_FAILED", "Not your payment");
   }
   if (!paymentId) throw new CoreError("VALIDATION_FAILED", "No payment on record");
