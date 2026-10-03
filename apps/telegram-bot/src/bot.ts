@@ -1943,7 +1943,7 @@ export function createBot(): Bot<Ctx> {
           // The picker it was tapped from is done with.
           await ctx.deleteMessage().catch(() => undefined);
           const card = await sendCryptoCard(ctx, co, co.networkInfo);
-          if (ctx.chat && card) await rememberPaymentPrompt(co.orderId, ctx.chat.id, card.message_id);
+          if (ctx.chat && card) await rememberPaymentPrompt(co.refId, ctx.chat.id, card.message_id);
           await flowStart(ctx, card);
           break;
         }
