@@ -1126,7 +1126,7 @@ async function refRatesView(ctx: Ctx): Promise<void> {
   ].join("\n"), kb, true);
 }
 
-const EMOJI_NAME_HINTS = "wallet, cart, vip, diamond, fire, gift, rocket, star, bolt, shop, money, chart, home, support";
+const EMOJI_NAME_HINTS = "wallet, cart, vip, diamond, fire, gift, rocket, star, bolt, shop, money, chart, home, support · crypto buttons: crypto, deposit, usdt, bnb, tron, polygon, ton, sol, ltc (or a network code like usdttrc20)";
 
 async function emojiRegistryView(ctx: Ctx): Promise<void> {
   const reg = await getCustomEmojiRegistry();

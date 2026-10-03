@@ -56,6 +56,7 @@ import type { BotUser } from "./ctx.js";
 import { backToMenuRow, navRow, escapeHtml, fmt, mainMenuKeyboard, mainMenuText, paginationRow } from "./ui.js";
 import { LOCALES, t } from "./i18n.js";
 import { header, bold, num, HR, e } from "./premium.js";
+import { iconId, networkIconId } from "./emoji.js";
 import { sbtn } from "./keyboard.js";
 
 /**
@@ -456,7 +457,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       kb.add(sbtn("🪙 Pay via Binance (USDT) ⚡ instant", cb("ord", "paybinance"), "success")).row();
     }
     if (cryptoReady) {
-      kb.add(sbtn("🌐 Pay with Crypto — BEP20 / TRC20 / Solana / LTC… ⚡ auto", cb("ord", "crypto"), "success")).row();
+      kb.add(sbtn(`${iconId("crypto") ? "" : "🌐 "}Pay with Crypto — BEP20 / TRC20 / Solana / LTC… ⚡ auto`, cb("ord", "crypto"), "success", iconId("crypto"))).row();
     }
     // UPI is INR-only — hidden from USD/USDT customers, when switched off, and
     // above the admin's UPI cap.
@@ -552,7 +553,7 @@ export async function walletView(user: BotUser): Promise<View> {
   else if (upiW.ok) kb.text("➕ Top up (UPI)", cb("wal", "topupinr"));
   else if (cryptoOn) kb.text("➕ Top up", cb("wal", "crypto"));
   kb.text("📜 History", cb("wal", "hist", 1)).row();
-  if (cryptoOn) kb.add(sbtn("🌐 Deposit crypto — BEP20 / TRC20 / Solana / LTC…", cb("wal", "crypto"), "success")).row();
+  if (cryptoOn) kb.add(sbtn(`${iconId("deposit") ?? iconId("crypto") ? "" : "🌐 "}Deposit crypto — BEP20 / TRC20 / Solana / LTC…`, cb("wal", "crypto"), "success", iconId("deposit") ?? iconId("crypto"))).row();
   if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
   backToMenuRow(kb);
   const spendable = wallet.balanceMinor > 0n;
@@ -1650,7 +1651,7 @@ export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; us
     ? `💰 Deposit: <b>${fmt(mode.amountMinor, user.currency)}</b>`
     : "";
   const lines = [
-    header(`🌐 ${bold("Choose a payment network")}`),
+    header(`${e("crypto")} ${bold("Choose a payment network")}`),
     "",
     amountLine,
     "Pick the <b>network</b> you will send from. You get a <b>fresh address just for this payment</b> — send the exact amount shown and it confirms automatically.",
@@ -1664,8 +1665,11 @@ export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; us
   const data = (code: string) => mode.kind === "topup" ? cb("wal", "cryptonet", code) : cb("ord", "cryptonet", code, ...w);
   // Catalogue order = popularity order (BEP20, TRC20, Solana, LTC, TON, …).
   let i = 0;
+  // A premium coin logo (🎨 Custom Emoji → "usdt", "tron", "ton", …) becomes
+  // the button's animated icon; without one the plain glyph is shown.
   for (const n of nets) {
-    kb.add(sbtn(`${n.emoji} ${n.label}`, data(n.code), n.stable ? "success" : "primary"));
+    const icon = networkIconId(n.code);
+    kb.add(sbtn(icon ? n.label : `${n.emoji} ${n.label}`, data(n.code), n.stable ? "success" : "primary", icon));
     if (++i % 2 === 0) kb.row();
   }
   if (i % 2 === 1) kb.row();

@@ -127,6 +127,7 @@ import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
 import { LOCALES, t } from "./i18n.js";
 import { vipAnimation, successCard, num } from "./premium.js";
+import { e as pe, networkEmoji } from "./emoji.js";
 import * as views from "./views.js";
 import type { View } from "./views.js";
 
@@ -478,14 +479,14 @@ export function createBot(): Bot<Ctx> {
     const isTopup = card.kind === "topup";
     const mins = Math.max(1, Math.round((new Date(card.expiresAt).getTime() - Date.now()) / 60_000));
     const caption = [
-      `🌐 <b>Pay with ${escapeHtml(net.asset)} · ${escapeHtml(net.chain)}</b>`,
+      `${networkEmoji(net.code, net.emoji)} <b>Pay with ${escapeHtml(net.asset)} · ${escapeHtml(net.chain)}</b>`,
       isTopup ? `💳 Wallet deposit <b>${fmt(card.owedMinor, card.currency)}</b>` : `🧾 Order <b>${escapeHtml(card.orderNumber)}</b> — ${fmt(card.owedMinor, card.currency)}`,
       "",
       "┏━━━━━━━━━━━━━━━━━━",
-      `┃ 💵 <b>Send exactly</b>`,
+      `┃ ${pe("money")} <b>Send exactly</b>`,
       `┃ <code>${escapeHtml(card.payAmount)}</code> ${escapeHtml(net.asset)}`,
       "┃",
-      `┃ 📬 <b>To this address</b> <i>(yours only)</i>`,
+      `┃ ${pe("deposit")} <b>To this address</b> <i>(yours only)</i>`,
       `┃ <code>${escapeHtml(card.payAddress)}</code>`,
       ...(card.payinExtraId ? ["┃", `┃ 📝 <b>Memo / Tag — REQUIRED</b>`, `┃ <code>${escapeHtml(card.payinExtraId)}</code>`] : []),
       "┗━━━━━━━━━━━━━━━━━━",
