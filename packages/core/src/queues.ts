@@ -219,7 +219,7 @@ export function isCopyable(value: string | undefined): value is string {
  * Values too long for a copy_text button are simply not given one — the value
  * itself is always in the message body, where it can be tapped to copy.
  */
-export function deliveryButtons(creds?: { id?: string; pw?: string; twofa?: string; key?: string }): OutboxButton[] {
+export function deliveryButtons(creds?: { id?: string; pw?: string; twofa?: string; key?: string }, ref?: { orderId: string }): OutboxButton[] {
   const out: OutboxButton[] = [];
   if (isCopyable(creds?.id)) out.push({ text: "📋 Copy ID", copyText: creds.id });
   if (isCopyable(creds?.pw)) out.push({ text: "📋 Copy password", copyText: creds.pw });
@@ -227,8 +227,13 @@ export function deliveryButtons(creds?: { id?: string; pw?: string; twofa?: stri
   if (creds?.id && creds.pw) {
     const all = `${creds.id}|${creds.pw}${creds.twofa ? `|${creds.twofa}` : ""}`;
     if (isCopyable(all)) out.push({ text: "📋 Copy ALL credentials", copyText: all });
+    else if (ref) out.push({ text: "📋 Copy ALL credentials", callbackData: `dl:copyall:${ref.orderId}` });
   } else if (isCopyable(creds?.key)) {
     out.push({ text: "📋 Copy key", copyText: creds.key });
+  } else if (creds?.key && ref) {
+    // Too long for copy_text (a long activation link): the bot answers the
+    // tap with the value alone in a tap-to-copy code block.
+    out.push({ text: "📋 Copy link", callbackData: `dl:copy:${ref.orderId}:1` });
   }
   return [...out, ...DELIVERY_BUTTONS];
 }

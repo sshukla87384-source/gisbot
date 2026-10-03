@@ -85,6 +85,8 @@ import {
   splitCredential,
   repairAccountPair,
   revealOrderDeliveries,
+  deliveredValue,
+  enqueueTelegramMessage,
   getOrderSummary,
   setUserCurrency,
   setUserLocale,
@@ -1771,6 +1773,34 @@ export function createBot(): Bot<Ctx> {
         case "ord:binancepaid": {
           await ctx.answerCallbackQuery({ text: "Thanks! We’ll verify and deliver soon.", show_alert: true });
           await createTicket(user.id, "PAYMENT_ISSUE", `Binance payment sent for order ${args[0] ?? ""}. Please verify UID and confirm.`).catch(() => undefined);
+          break;
+        }
+        // 📋 Copy for a delivered value too long for a native copy_text button:
+        // the value alone, in a code block (tap = copy), self-deleting.
+        case "dl:copy":
+        case "dl:copyall": {
+          const orderId = args[0] ?? "";
+          const rows = await revealOrderDeliveries(user.id, orderId).catch(() => []);
+          const values = rows.filter((r) => !r.replaced).map((r) => deliveredValue(r.payload)).filter((v) => v.length > 0);
+          if (values.length === 0) { await ctx.answerCallbackQuery({ text: "Nothing to copy for this order.", show_alert: true }); break; }
+          let picked: string[];
+          if (route === "dl:copy") {
+            const n = intArg(args, 1, 1);
+            const v = values[n - 1];
+            if (!v) { await ctx.answerCallbackQuery({ text: "That item is no longer on this order.", show_alert: true }); break; }
+            picked = [v];
+          } else {
+            picked = values;
+          }
+          await ctx.answerCallbackQuery({ text: "📋 Tap the text below to copy" });
+          if (user.telegramId !== null) {
+            const body = picked.map((v) => `<code>${escapeHtml(v)}</code>`).join("\n\n");
+            await enqueueTelegramMessage(
+              user.telegramId,
+              `${body}\n\n<i>Tap to copy · this message disappears in 10 minutes. 💾 Always in 📦 My orders.</i>`,
+              { deleteAfterSec: 600 },
+            );
+          }
           break;
         }
         case "ord:list":

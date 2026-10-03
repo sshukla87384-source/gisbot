@@ -2,6 +2,7 @@ import type { Currency, Prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { convertMinor, convertPriceMinor } from "../fx.js";
 import { CoreError, decryptSecret, effectiveHours, encryptSecret } from "@gis/shared";
+import { DELIVERY_BUTTONS, isCopyable, type OutboxButton } from "../queues.js";
 import { effectivePriceMinor } from "../pricing.js";
 
 /**
@@ -392,6 +393,39 @@ export function credsOf(payload: DeliveryPayload): { id?: string; pw?: string; t
     }
   }
   return {};
+}
+
+/** The one string a customer copies for a delivered unit: the key / link, or "id|password[|2fa]". */
+export function deliveredValue(payload: DeliveryPayload): string {
+  const c = credsOf(payload);
+  if (c.id && c.pw) return `${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`;
+  if (c.key) return c.key;
+  return (payload.key ?? payload.username ?? "").trim();
+}
+
+/** At most this many per-item copy buttons on one delivery (plus Copy ALL). */
+const COPY_BUTTON_CAP = 12;
+
+/**
+ * One copy button per delivered unit, plus Copy ALL, then the usual
+ * navigation. A value short enough rides in a native copy_text button; a long
+ * one (a 300-character activation link) cannot — Telegram caps copy_text at
+ * 256 — so it gets a callback button instead, which the bot answers with the
+ * value alone in a tap-to-copy code block (`dl:copy:<orderId>:<n>`).
+ */
+export function combinedDeliveryButtons(items: DeliveryLine[], orderId: string): OutboxButton[] {
+  const values = items.map((it) => deliveredValue(it.payload)).filter((v) => v.length > 0);
+  const out: OutboxButton[] = [];
+  values.slice(0, COPY_BUTTON_CAP).forEach((v, i) => {
+    const n = i + 1;
+    const text = values.length === 1 ? "📋 Copy" : `📋 Copy #${n}`;
+    out.push(isCopyable(v) ? { text, copyText: v } : { text, callbackData: `dl:copy:${orderId}:${n}` });
+  });
+  if (values.length > 1) {
+    const all = values.join("\n");
+    out.push(isCopyable(all) ? { text: "📋 Copy ALL", copyText: all } : { text: "📋 Copy ALL", callbackData: `dl:copyall:${orderId}` });
+  }
+  return [...out, ...DELIVERY_BUTTONS];
 }
 
 /** The 2FA helper site customers paste the secret into. */

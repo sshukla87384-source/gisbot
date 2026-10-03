@@ -9,7 +9,7 @@ import { repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, couponLines, credsOf, deliveryExpiry, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, couponLines, credsOf, deliveryExpiry, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx, releaseCouponForOrderTx } from "./coupon.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
@@ -469,11 +469,11 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload)) });
+      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }) });
     } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
       await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
     } else if (outcome.deliveries.length > 1) {
-      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: DELIVERY_BUTTONS });
+      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId) });
     }
     if (outcome.deliveries.length > 0) {
       await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));

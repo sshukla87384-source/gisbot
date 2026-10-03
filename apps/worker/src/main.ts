@@ -81,13 +81,16 @@ async function main(): Promise<void> {
                 return base;
               })
           : undefined;
-        // Copy buttons get their own row (long labels); the rest share one row.
-        const rows = btns
-          ? [
-              ...btns.filter((b) => "copy_text" in b).map((b) => [b]),
-              ...(btns.some((b) => !("copy_text" in b)) ? [btns.filter((b) => !("copy_text" in b))] : []),
-            ]
-          : undefined;
+        // Copy buttons — native copy_text AND the callback kind the bot answers
+        // with a tap-to-copy block (dl:copy…) — sit apart from navigation: two
+        // per row, so an order with several items stays compact; the
+        // remaining buttons share one row at the bottom.
+        const isCopy = (b: Record<string, unknown>) => "copy_text" in b || String(b.callback_data ?? "").startsWith("dl:copy");
+        const copies = btns ? btns.filter(isCopy) : [];
+        const others = btns ? btns.filter((b) => !isCopy(b)) : [];
+        const copyRows: Array<Array<Record<string, unknown>>> = [];
+        for (let i = 0; i < copies.length; i += 2) copyRows.push(copies.slice(i, i + 2));
+        const rows = btns ? [...copyRows, ...(others.length > 0 ? [others] : [])] : undefined;
         replyMarkup = rows ? ({ inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
         const reply_markup = replyMarkup;
         let msg;
