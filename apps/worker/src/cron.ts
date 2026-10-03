@@ -464,8 +464,11 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(3600, "reconcile", 86_390, reconcileWallets),
     every(120, "binancepoll", 110, binancePoll),
     every(60, "cryptopoll", 55, cryptoPoll, true),
-    every(30, "terminalpoll", 28, terminalPoll, true),
-    every(60, "terminalsweep", 58, terminalSweep, true),
+    // Lock TTLs are generous on purpose: a poll walks up to 150 addresses with
+    // 15 s RPC timeouts and a sweep waits for on-chain receipts. The lock is
+    // released when the run ends, so the TTL only matters if a run hangs.
+    every(30, "terminalpoll", 300, terminalPoll, true),
+    every(60, "terminalsweep", 600, terminalSweep, true),
     every(300, "recovery", 290, recoverAbandonedCheckouts),
     every(3600, "quality", 21_590, qualitySweep),
     every(3600, "moneysummary", 86_390, dailyMoneySummary),

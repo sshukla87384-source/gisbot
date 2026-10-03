@@ -223,11 +223,15 @@ export async function checkTerminalPayment(id: string) {
   if (scan.confirmed > 0n) status = "PARTIAL";
   else if (scan.pending > 0n) status = "CONFIRMING";
   else status = "WAITING";
-  const updated = await prisma.terminalPayment.update({
-    where: { id },
+  // Guarded: the poll and the customer's "Check payment" tap can race, and a
+  // scan taken a moment before the other side flipped PAID must not write
+  // the row back to open (which would settle it twice on the next tick).
+  const upd = await prisma.terminalPayment.updateMany({
+    where: { id, status: { in: OPEN } },
     data: { status, receivedAmount: received, pendingAmount: pending, txids: scan.txids, lastCheckedAt: new Date() },
   });
-  if (status === "PARTIAL" && row.partialNotified !== received) await notifyPartial(updated.id, scan.confirmed, expected, chain);
+  const updated = (await prisma.terminalPayment.findUnique({ where: { id } })) ?? row;
+  if (upd.count > 0 && status === "PARTIAL" && row.partialNotified !== received) await notifyPartial(updated.id, scan.confirmed, expected, chain);
   return updated;
 }
 
@@ -360,12 +364,22 @@ export async function sweepTerminalPayments(limit = 10): Promise<number> {
   if (!(await hasTerminalSeed())) return 0;
   const cfg = await getTerminalConfig();
   const now = new Date();
+  const stale = new Date(now.getTime() - 15 * 60_000);
   const rows = await prisma.terminalPayment.findMany({
     where: {
       OR: [
         { sweepStatus: { in: ["PENDING", "RETRY"] }, OR: [{ nextSweepAt: null }, { nextSweepAt: { lte: now } }] },
-        // Stranded money on non-settled slots, looked at once an hour.
-        { status: { in: ["PARTIAL", "EXPIRED"] }, sweepStatus: { in: ["NONE", "SKIPPED"] }, OR: [{ nextSweepAt: null }, { nextSweepAt: { lte: now } }], receivedAmount: { not: "0" } },
+        // A sweep that claimed the row and never finished (process died mid-call).
+        { sweepStatus: "SWEEPING", updatedAt: { lt: stale } },
+        // Stranded money on slots the poll has STOPPED watching (its window is
+        // 24 h). Sweeping a PARTIAL slot any earlier empties the address the
+        // customer was just told to top up, and the balance-based chains then
+        // never see the full amount arrive.
+        {
+          status: { in: ["PARTIAL", "EXPIRED"] }, sweepStatus: { in: ["NONE", "SKIPPED"] },
+          createdAt: { lt: new Date(now.getTime() - 24 * 3600_000) },
+          OR: [{ nextSweepAt: null }, { nextSweepAt: { lte: now } }], receivedAmount: { not: "0" },
+        },
       ],
     },
     orderBy: { updatedAt: "asc" },
@@ -373,6 +387,14 @@ export async function sweepTerminalPayments(limit = 10): Promise<number> {
   });
   let swept = 0;
   for (const r of rows) {
+    // Claim the row first: the worker's tick and an admin's "Sweep now" in
+    // the bot process can overlap, and two full-balance transfers from one
+    // address means the second one fails with the gas already spent.
+    const claimed = await prisma.terminalPayment.updateMany({
+      where: { id: r.id, sweepStatus: r.sweepStatus, updatedAt: r.updatedAt },
+      data: { sweepStatus: "SWEEPING" },
+    });
+    if (claimed.count === 0) continue;
     const chain = terminalChain(r.chain);
     const payout = cfg.payout[r.chain];
     if (!chain || !payout) {
@@ -445,7 +467,7 @@ export async function terminalStats(): Promise<{ open: number; paid24h: number; 
   const [open, paid, unswept] = await Promise.all([
     prisma.terminalPayment.count({ where: { status: { in: OPEN }, expiresAt: { gt: new Date() } } }),
     prisma.terminalPayment.findMany({ where: { status: { in: SETTLED }, paidAt: { gte: since } }, select: { expectedUsd: true } }),
-    prisma.terminalPayment.count({ where: { sweepStatus: { in: ["PENDING", "RETRY"] } } }),
+    prisma.terminalPayment.count({ where: { sweepStatus: { in: ["PENDING", "RETRY", "SWEEPING"] } } }),
   ]);
   return { open, paid24h: paid.length, unswept, usd24h: paid.reduce((s, p) => s + Number(p.expectedUsd), 0) };
 }

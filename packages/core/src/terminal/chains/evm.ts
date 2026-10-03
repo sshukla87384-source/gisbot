@@ -50,6 +50,8 @@ interface EvmSpec {
   transferGas: bigint;
   /** Below this native balance on slot 0 the operator is warned. */
   lowGas: bigint;
+  /** BIP-44 account for this chain's payment slots (slot 0 is shared). */
+  account: number;
 }
 
 const SPECS: Record<string, EvmSpec> = {
@@ -64,6 +66,7 @@ const SPECS: Record<string, EvmSpec> = {
     gasSymbol: "BNB",
     transferGas: 70_000n,
     lowGas: 3_000_000_000_000_000n, // 0.003 BNB ≈ 10 sweeps
+    account: 0,
   },
   usdtmatic: {
     code: "usdtmatic",
@@ -76,6 +79,7 @@ const SPECS: Record<string, EvmSpec> = {
     gasSymbol: "POL",
     transferGas: 80_000n,
     lowGas: 1_000_000_000_000_000_000n, // 1 POL
+    account: 1,
   },
 };
 
@@ -107,7 +111,7 @@ export class EvmUsdtAdapter implements ChainAdapter {
   }
 
   private async account(index: number) {
-    const { privateKey } = await deriveSecp(PATHS.evm(index));
+    const { privateKey } = await deriveSecp(index === 0 ? PATHS.evm(0) : PATHS.evm(index, this.spec.account));
     return privateKeyToAccount(`0x${bytesToHex(privateKey)}` as Hex);
   }
 
@@ -181,6 +185,11 @@ export class EvmUsdtAdapter implements ChainAdapter {
     const hash = await wallet.writeContract({
       address: this.spec.token, abi: ERC20, functionName: "transfer", args: [payout as Address, balance], gas: this.spec.transferGas,
     });
+    // A hash is only a broadcast. A reverted transfer must come back as an
+    // error so the row retries instead of being marked swept with the USDT
+    // still on the payment address.
+    const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 90_000 });
+    if (receipt.status !== "success") throw new Error(`transfer reverted ${hash}`);
     return { kind: "done", txid: hash, amount: balance };
   }
 

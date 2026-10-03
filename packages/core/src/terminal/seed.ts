@@ -113,7 +113,13 @@ export async function deriveEd25519Seed(path: string): Promise<Uint8Array> {
 }
 
 export const PATHS = {
-  evm: (i: number) => `m/44'/60'/0'/0/${i}`,
+  /**
+   * EVM slots live under a per-chain ACCOUNT so BSC slot 7 and Polygon slot 7
+   * are different addresses — the same address live for two customers on two
+   * chains meant a wrong-network send credited a stranger's order. Slot 0
+   * (the gas / main address) stays on account 0 for every chain.
+   */
+  evm: (i: number, account = 0) => `m/44'/60'/${account}'/0/${i}`,
   tron: (i: number) => `m/44'/195'/0'/0/${i}`,
   ltc: (i: number) => `m/84'/2'/0'/0/${i}`,
   sol: (i: number) => `m/44'/501'/${i}'/0'`,

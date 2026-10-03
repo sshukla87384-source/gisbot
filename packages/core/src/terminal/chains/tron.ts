@@ -22,9 +22,11 @@ import { fmtUnits, httpJson } from "../types.js";
 const USDT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
 const b58 = createBase58check(sha256);
 const SUN = 1_000_000n;
-/** TRX forwarded for one TRC-20 transfer (energy burn + bandwidth + activation). */
-const GAS_TRX = 28n * SUN;
+/** Fallback TRX for one TRC-20 transfer when the dry run cannot price it. */
+const GAS_TRX = 30n * SUN;
 const LOW_TRX = 60n * SUN;
+/** Worst-case energy price (sun per unit) — the chain's dynamic price tops out around here. */
+const SUN_PER_ENERGY = 420n;
 
 function grid(): string {
   return "https://api.trongrid.io";
@@ -70,6 +72,22 @@ function signTx(tx: TronTx, priv: Uint8Array): TronTx {
   const v = (sig.recovery ?? 0) + 27;
   const hex = bytesToHex(sig.toCompactRawBytes()) + v.toString(16).padStart(2, "0");
   return { ...tx, signature: [hex] };
+}
+
+/** Wait for a broadcast transaction to be executed; throw if it failed or never showed. */
+async function awaitReceipt(txid: string): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const info = await httpJson<{ id?: string; receipt?: { result?: string }; result?: string; resMessage?: string }>(`${grid()}/wallet/gettransactioninfobyid`, {
+      method: "POST", headers: headers(), body: JSON.stringify({ value: txid }),
+    }).catch(() => null);
+    if (!info?.id) continue; // not yet in a block
+    const res = info.receipt?.result ?? (info.result === "FAILED" ? "FAILED" : "SUCCESS");
+    if (res === "SUCCESS") return;
+    const msg = info.resMessage ? Buffer.from(info.resMessage, "hex").toString("utf8") : res;
+    throw new Error(`tron tx ${txid} failed: ${msg}`);
+  }
+  throw new Error(`tron tx ${txid} not confirmed in time`);
 }
 
 async function broadcast(tx: TronTx): Promise<string> {
@@ -128,16 +146,23 @@ export class TronUsdtAdapter implements ChainAdapter {
   }
 
   async scan(address: string): Promise<{ confirmed: bigint; pending: bigint; txids: string[] }> {
+    type Row = { transaction_id: string; value: string; to: string; type?: string };
     const q = (extra: string) =>
-      httpJson<{ data?: Array<{ transaction_id: string; value: string; to: string }> }>(
+      httpJson<{ data?: Row[] }>(
         `${grid()}/v1/accounts/${address}/transactions/trc20?only_to=true&contract_address=${USDT}&limit=50&${extra}`,
         { headers: headers() },
       );
-    const [conf, unconf] = await Promise.all([q("only_confirmed=true"), q("only_unconfirmed=true").catch(() => ({ data: [] }))]);
-    const sum = (rows: Array<{ value: string }> | undefined) => (rows ?? []).reduce((s, r) => s + BigInt(r.value || "0"), 0n);
-    const confirmedIds = new Set((conf.data ?? []).map((r) => r.transaction_id));
-    const pendingRows = (unconf.data ?? []).filter((r) => !confirmedIds.has(r.transaction_id));
-    return { confirmed: sum(conf.data), pending: sum(pendingRows), txids: [...confirmedIds] };
+    const [conf, unconf] = await Promise.all([q("only_confirmed=true"), q("only_unconfirmed=true").catch(() => ({ data: [] as Row[] }))]);
+    // The endpoint also lists Approval events, where `to` is the spender and
+    // `value` the allowance — anyone could approve a payment address for a
+    // million USDT for a few TRX and have it counted as money received. Only
+    // actual transfers count.
+    const transfers = (rows: Row[] | undefined): Row[] => (rows ?? []).filter((r) => r.type === "Transfer" && r.to === address);
+    const confRows = transfers(conf.data);
+    const sum = (rows: Row[]) => rows.reduce((s, r) => s + BigInt(r.value || "0"), 0n);
+    const confirmedIds = new Set(confRows.map((r) => r.transaction_id));
+    const pendingRows = transfers(unconf.data).filter((r) => !confirmedIds.has(r.transaction_id));
+    return { confirmed: sum(confRows), pending: sum(pendingRows), txids: [...confirmedIds] };
   }
 
   async sweep(index: number, payout: string, minUnits: bigint): Promise<SweepResult> {
@@ -146,11 +171,24 @@ export class TronUsdtAdapter implements ChainAdapter {
     if (balance === 0n) return { kind: "skipped", note: "nothing to sweep" };
     if (balance < minUnits) return { kind: "skipped", note: `below sweep minimum (${fmtUnits(balance, 6, 2)} USDT)` };
 
+    // Price the transfer with a dry run: energy differs a lot depending on
+    // whether the payout wallet already holds USDT, and a flat budget that
+    // comes up short burns every TRX of it on a failed transfer.
+    let gasNeeded = GAS_TRX;
+    try {
+      const dry = await httpJson<{ energy_used?: number; result?: { result?: boolean } }>(`${grid()}/wallet/triggerconstantcontract`, {
+        method: "POST", headers: headers(),
+        body: JSON.stringify({ owner_address: payer.base58, contract_address: USDT, function_selector: "transfer(address,uint256)", parameter: abiAddress(payout) + abiUint(balance), visible: true }),
+      });
+      if (dry.energy_used && dry.energy_used > 0) {
+        gasNeeded = (BigInt(dry.energy_used) * SUN_PER_ENERGY * 13n) / 10n + 2n * SUN; // +30 % and bandwidth
+      }
+    } catch { /* fall back to the flat budget */ }
     const trx = await this.trxBalance(payer.base58);
-    if (trx < GAS_TRX) {
+    if (trx < gasNeeded) {
       const main = await this.key(0);
       const mainTrx = await this.trxBalance(main.base58);
-      const need = GAS_TRX - trx;
+      const need = gasNeeded - trx;
       if (mainTrx < need + 2n * SUN) {
         return { kind: "pending", note: `main address ${main.base58} needs TRX for energy (has ${fmtUnits(mainTrx, 6, 2)}, needs ≥ ${fmtUnits(need + 2n * SUN, 6, 2)})` };
       }
@@ -166,7 +204,7 @@ export class TronUsdtAdapter implements ChainAdapter {
       method: "POST", headers: headers(),
       body: JSON.stringify({
         owner_address: payer.base58, contract_address: USDT, function_selector: "transfer(address,uint256)",
-        parameter: abiAddress(payout) + abiUint(balance), fee_limit: 60_000_000, call_value: 0, visible: true,
+        parameter: abiAddress(payout) + abiUint(balance), fee_limit: Number(gasNeeded), call_value: 0, visible: true,
       }),
     });
     if (!trig.result?.result || !trig.transaction) {
@@ -174,6 +212,9 @@ export class TronUsdtAdapter implements ChainAdapter {
       throw new Error(`tron triggersmartcontract: ${msg}`);
     }
     const txid = await broadcast(signTx(trig.transaction, payer.privateKey));
+    // "Broadcast accepted" is not "executed": an OUT_OF_ENERGY transfer would
+    // otherwise be recorded as swept while the USDT sits where it was.
+    await awaitReceipt(txid);
     return { kind: "done", txid, amount: balance };
   }
 
@@ -185,7 +226,7 @@ export class TronUsdtAdapter implements ChainAdapter {
       symbol: "TRX",
       balance: fmtUnits(bal, 6, 2),
       low: bal < LOW_TRX,
-      hint: `Keep TRX here; every USDT sweep forwards ≈ ${fmtUnits(GAS_TRX, 6, 0)} TRX of energy to the payment address. Staking TRX for energy on this address makes sweeps nearly free.`,
+      hint: `Keep TRX here; every USDT sweep forwards ≈ ${fmtUnits(GAS_TRX, 6, 0)} TRX of energy to the payment address (priced per transfer by a dry run). Staking TRX for energy on this address makes sweeps nearly free.`,
     };
   }
 }
