@@ -23,6 +23,23 @@ function build(): Map<PaymentProviderId, PaymentProvider> {
   return registry;
 }
 
+/**
+ * Install (or remove) a provider built from credentials that live outside the
+ * environment — the admin panel stores the NOWPayments keys encrypted in the
+ * database, and @gis/payments has no database access of its own. An installed
+ * provider replaces the env-built one for the same id; null removes it and
+ * falls back to the environment again.
+ */
+export function installProvider(id: PaymentProviderId, provider: PaymentProvider | null): void {
+  const reg = build();
+  if (provider) reg.set(id, provider);
+  else {
+    reg.delete(id);
+    const config = loadConfig();
+    if (id === "nowpayments" && config.NOWPAYMENTS_API_KEY && config.NOWPAYMENTS_IPN_SECRET) reg.set(id, new NowPaymentsProvider());
+  }
+}
+
 export function getProvider(id: string): PaymentProvider | null {
   return build().get(id as PaymentProviderId) ?? null;
 }
@@ -37,5 +54,5 @@ export function enabledProviderIds(): PaymentProviderId[] {
 
 export const PROVIDER_LABELS: Record<PaymentProviderId, string> = {
   razorpay: "🇮🇳 UPI / Cards (Razorpay)",
-  nowpayments: "₿ Crypto (BTC/ETH/USDT)",
+  nowpayments: "₿ Crypto invoice page (BTC/ETH/USDT)",
 };

@@ -22,7 +22,19 @@ export interface CheckoutSession {
   providerRef: string;
 }
 
-export type NormalizedEventType = "payment.succeeded" | "payment.failed" | "refund.processed";
+export type NormalizedEventType = "payment.succeeded" | "payment.failed" | "payment.partial" | "refund.processed";
+
+/**
+ * What actually moved on-chain for a crypto payment. `payAmount` is what the
+ * customer was asked to send, `actuallyPaid` what arrived so far — both in
+ * `payCurrency` (a NOWPayments code such as "usdttrc20"), as decimal strings.
+ */
+export interface CryptoPayDetail {
+  payCurrency: string;
+  payAmount: string;
+  actuallyPaid: string;
+  payAddress?: string;
+}
 
 export interface NormalizedPaymentEvent {
   provider: PaymentProviderId;
@@ -36,6 +48,8 @@ export interface NormalizedPaymentEvent {
   amountMinor: number | null;
   currency: string | null;
   failureReason?: string;
+  /** Present on crypto events: how much of the asked amount has arrived. */
+  crypto?: CryptoPayDetail;
 }
 
 export interface PaymentProvider {

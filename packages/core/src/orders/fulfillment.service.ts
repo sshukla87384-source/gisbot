@@ -11,6 +11,7 @@ import { logWallet } from "../logs.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
+import { creditCryptoTopup, cryptoNetwork, getCryptoCard, paidFraction, topupIdFromOrderRef } from "./crypto-checkout.service.js";
 
 /**
  * Webhook-driven fulfillment (PRD §6.1 steps 6-13, Security doc §5).
@@ -34,6 +35,13 @@ export async function processWebhookEvent(webhookEventId: string): Promise<void>
     return;
   }
 
+  // Wallet top-ups ride the same webhook: their order_id is "topup:<id>".
+  const topupId = topupIdFromOrderRef(normalized.orderId);
+  if (topupId) {
+    await handleTopupEvent(event.id, topupId, normalized);
+    return;
+  }
+
   switch (normalized.type) {
     case "payment.succeeded":
       await handleSuccess(event.id, normalized);
@@ -41,10 +49,80 @@ export async function processWebhookEvent(webhookEventId: string): Promise<void>
     case "payment.failed":
       await handleFailure(event.id, normalized);
       break;
+    case "payment.partial":
+      await handlePartial(event.id, normalized);
+      break;
     case "refund.processed":
       await handleRefund(event.id, normalized);
       break;
   }
+}
+
+/** A crypto wallet deposit changed state: credit it (fully or what arrived). */
+async function handleTopupEvent(eventId: string, topupId: string, normalized: NormalizedPaymentEvent): Promise<void> {
+  const topup = await prisma.walletTopup.findUnique({ where: { id: topupId } });
+  if (!topup) { await markProcessed(eventId, "top-up not found"); return; }
+  const owner = await prisma.user.findUnique({ where: { id: topup.userId }, select: { telegramId: true } });
+  const net = cryptoNetwork(topup.binanceAsset.replace(/^np:/, ""));
+  if (normalized.type === "payment.succeeded") {
+    await creditCryptoTopup(topupId);
+  } else if (normalized.type === "payment.partial") {
+    // What arrived is theirs: credit the paid share of the quoted amount.
+    const frac = paidFraction(normalized);
+    const minor = Math.floor(topup.amountMinor * frac);
+    if (minor >= 1) {
+      const r = await creditCryptoTopup(topupId, minor);
+      if (r.credited && owner?.telegramId != null) {
+        await enqueueTelegramMessage(
+          owner.telegramId,
+          `ℹ️ Your ${net?.asset ?? "crypto"} deposit arrived short (${normalized.crypto?.actuallyPaid ?? "?"} of ${normalized.crypto?.payAmount ?? "?"} ${(normalized.crypto?.payCurrency ?? "").toUpperCase()}), so that part has been credited. Nothing is lost — start a new deposit for the rest.`,
+        ).catch(() => undefined);
+      }
+    }
+  } else if (normalized.type === "payment.failed") {
+    await prisma.walletTopup.updateMany({ where: { id: topupId, status: "PENDING" }, data: { status: "EXPIRED" } });
+  }
+  await markProcessed(eventId);
+}
+
+/**
+ * Crypto underpayment on an order. The address stays live and NOWPayments
+ * finishes the payment once the rest lands, so: tell the customer exactly how
+ * much is missing, tell the admin, and keep the payment PENDING for the poll.
+ */
+async function handlePartial(eventId: string, normalized: NormalizedPaymentEvent): Promise<void> {
+  const orderId = await findOrderId(normalized);
+  if (orderId) {
+    const order = await prisma.order.findUnique({ where: { id: orderId }, include: { user: true } });
+    const c = normalized.crypto;
+    const asked = Number(c?.payAmount);
+    const got = Number(c?.actuallyPaid);
+    const missing = Number.isFinite(asked) && Number.isFinite(got) ? Math.max(0, asked - got) : null;
+    const unit = (c?.payCurrency ?? "").toUpperCase();
+    const card = await getCryptoCard("order", orderId);
+    if (order?.user.telegramId != null && order.status === "PENDING_PAYMENT") {
+      const lines = [
+        `⚠️ <b>Payment received short</b> — order <b>${order.orderNumber}</b>`,
+        "",
+        `Received: <b>${c?.actuallyPaid ?? "?"} ${unit}</b> of <b>${c?.payAmount ?? "?"} ${unit}</b>.`,
+        ...(missing !== null && missing > 0 ? [`Send the remaining <b>${trimNum(missing)} ${unit}</b> to the <b>same address</b> and it completes automatically:`] : []),
+        ...(card?.payAddress ? [`<code>${card.payAddress}</code>`] : []),
+        ...(card?.payinExtraId ? [`Memo / tag: <code>${card.payinExtraId}</code>`] : []),
+        "",
+        "💡 Exchanges deduct a network fee from what you send — add it on top next time.",
+      ];
+      await enqueueTelegramMessage(order.user.telegramId, lines.join("\n")).catch(() => undefined);
+    }
+    await enqueueAdminAlert(`⚠️ Crypto underpayment on ${order?.orderNumber ?? orderId}: ${c?.actuallyPaid ?? "?"} of ${c?.payAmount ?? "?"} ${unit}. Waiting for the rest; if it never comes, credit the wallet from the panel.`).catch(() => undefined);
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "order.payment.partial", entityType: "Order", entityId: orderId, after: { ...(c ?? {}), provider: normalized.provider } },
+    }).catch(() => undefined);
+  }
+  await markProcessed(eventId);
+}
+
+function trimNum(n: number): string {
+  return n.toFixed(8).replace(/\.?0+$/, "") || "0";
 }
 
 async function markProcessed(eventId: string, error?: string): Promise<void> {
@@ -75,6 +153,12 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
     return;
   }
 
+  // A crypto transfer can land after the order's own window closed (the sweep
+  // marked it EXPIRED and gave any wallet part back). It is still paid for and
+  // still delivered below; the admin just needs to know the wallet part is
+  // not covered.
+  const before = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true, orderNumber: true, walletUsedMinor: true } });
+
   const outcome = await prisma.$transaction(
     async (tx) => {
       const order = await tx.order.findUnique({
@@ -89,10 +173,18 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         return { kind: "skip" as const, note: "already processed" };
       }
 
-      // Amount + currency verification — mismatch never auto-fulfills.
+      // Amount + currency verification — mismatch never auto-fulfills. The
+      // figure to match is what WE asked the gateway for: the Payment row.
+      // That is the order total for the hosted gateways, but a crypto order
+      // is invoiced in USD whatever currency the order itself is priced in.
+      const asked = normalized.providerRef
+        ? await tx.payment.findFirst({ where: { orderId: order.id, providerRef: normalized.providerRef }, select: { amountMinor: true, currency: true } })
+        : null;
+      const expectedMinor = asked?.amountMinor ?? order.totalMinor;
+      const expectedCurrency = asked?.currency ?? order.currency;
       if (
-        (normalized.amountMinor !== null && normalized.amountMinor !== order.totalMinor) ||
-        (normalized.currency !== null && normalized.currency !== order.currency)
+        (normalized.amountMinor !== null && normalized.amountMinor !== expectedMinor) ||
+        (normalized.currency !== null && normalized.currency !== expectedCurrency)
       ) {
         await tx.order.update({ where: { id: order.id }, data: { status: "MANUAL_REVIEW" } });
         await tx.auditLog.create({
@@ -102,7 +194,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
             entityType: "Order",
             entityId: order.id,
             after: {
-              expected: { amountMinor: order.totalMinor, currency: order.currency },
+              expected: { amountMinor: expectedMinor, currency: expectedCurrency },
               received: { amountMinor: normalized.amountMinor, currency: normalized.currency },
             },
           },
@@ -303,6 +395,9 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
   if (outcome.kind === "fulfilled") {
     await clearPaymentPrompts(orderId).catch(() => undefined);
     await clearChatClutter(outcome.telegramId).catch(() => undefined);
+  }
+  if (outcome.kind === "fulfilled" && before?.status === "EXPIRED") {
+    await enqueueAdminAlert(`ℹ️ ${before.orderNumber} was paid AFTER it expired and has been delivered. If part of it had been paid from the wallet, that part was refunded at expiry — check the customer's wallet.`).catch(() => undefined);
   }
   if (outcome.kind === "mismatch") {
     await enqueueAdminAlert(`🚨 Amount mismatch on ${outcome.orderNumber} — order set to MANUAL_REVIEW`);

@@ -61,13 +61,13 @@ export interface UpiCheckoutResult {
 }
 
 
-type TxM = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+export type TxM = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 /**
  * Cancel any stale PENDING_PAYMENT orders, REFUNDING wallet money already
  * applied to them. Never silently keep a customer's balance for a dead order.
  */
-async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
+export async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
   const stale = await tx.order.findMany({
     where: { userId, status: "PENDING_PAYMENT" },
     select: { id: true, orderNumber: true, walletUsedMinor: true, currency: true },
@@ -115,7 +115,7 @@ async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
  * still owed via the payment method. A $3 order with $1 in the wallet leaves $2
  * to pay by UPI/Binance.
  */
-async function applyWalletTx(
+export async function applyWalletTx(
   tx: TxM,
   userId: string,
   orderId: string,

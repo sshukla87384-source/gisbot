@@ -12,6 +12,7 @@ import {
   splitTelegramHtml,
   stripTelegramHtml,
   TELEGRAM_TEXT_MAX,
+  ensureCryptoProvider,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -260,6 +261,8 @@ async function main(): Promise<void> {
   });
 
   const server = startWebhookServer(config.PORT);
+  // Install the DB-configured crypto provider before the first IPN or poll.
+  await ensureCryptoProvider(true).catch(() => undefined);
   const timers = startCronJobs();
 
   // eslint-disable-next-line no-console

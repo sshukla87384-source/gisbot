@@ -10,6 +10,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   sendResellerStatements,
   pollBinancePayments,
   pollUpiCredits,
+  pollCryptoPayments,
   convertMinor,
   clearPaymentPrompts,
   sweepResolvedOrderPrompts,
@@ -365,6 +366,20 @@ async function binancePoll(): Promise<void> {
   }
 }
 
+/**
+ * Crypto terminal: ask NOWPayments about every open payment (every 60 s).
+ * The IPN is the fast path; this is what still confirms payments when no
+ * IPN can reach the server (no PUBLIC_API_URL, a proxy in the way).
+ */
+async function cryptoPoll(): Promise<void> {
+  const n = await pollCryptoPayments();
+  if (n > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.cryptoPoll", entityType: "Payment", after: { advanced: n } },
+    }).catch(() => undefined);
+  }
+}
+
 /** Daily statement to every API user / reseller (once a day). */
 async function resellerStatements(): Promise<void> {
   const { sent, skipped } = await sendResellerStatements();
@@ -423,6 +438,7 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     // survives the restart the timer did not.
     every(3600, "reconcile", 86_390, reconcileWallets),
     every(120, "binancepoll", 110, binancePoll),
+    every(60, "cryptopoll", 55, cryptoPoll, true),
     every(300, "recovery", 290, recoverAbandonedCheckouts),
     every(3600, "quality", 21_590, qualitySweep),
     every(3600, "moneysummary", 86_390, dailyMoneySummary),

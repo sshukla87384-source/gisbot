@@ -105,6 +105,9 @@ export interface SessionData {
     | "admin_variant_validity"
     | "wallet_inr_amount"
     | "wallet_inr_utr"
+    | "wallet_crypto_amount"
+    | "admin_np_key"
+    | "admin_np_ipn"
     | "admin_bnpl_user"
     | "admin_bnpl_add"
     | "admin_bnpl_deduct"
@@ -171,6 +174,10 @@ export interface SessionData {
   payRetries?: number;
   /** INR wallet top-up being requested (minor units). */
   inrTopupMinor?: number;
+  /** Crypto wallet deposit being requested (minor units, user currency). */
+  cryptoTopupMinor?: number;
+  /** NOWPayments API key held between the two admin prompts. */
+  npKeyTmp?: string;
   /** Pending price-change announcement offered to the admin. */
   priceAlert?: { productId: string; oldMinor: number; newMinor: number; currency: string };
   /** Auto-translate provider being configured. */

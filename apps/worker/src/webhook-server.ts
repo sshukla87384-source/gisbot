@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { enqueueFulfillment } from "@gis/core";
+import { enqueueFulfillment, ensureCryptoProvider } from "@gis/core";
 import { prisma, type PaymentProvider as PaymentProviderEnum } from "@gis/database";
 import { getProvider } from "@gis/payments";
 
@@ -115,6 +115,10 @@ export function startWebhookServer(port: number): Server {
       if (done) return;
       done = true;
       void (async () => {
+        // The NOWPayments keys may live in the database (admin-set); make sure
+        // the registry holds a provider built from the current pair before an
+        // IPN is verified against it.
+        if (providerName === "nowpayments") await ensureCryptoProvider().catch(() => undefined);
         const provider = getProvider(providerName);
         const providerEnum = PROVIDER_ENUM[providerName];
         if (!provider || !providerEnum) {

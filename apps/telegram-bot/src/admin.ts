@@ -135,6 +135,13 @@ import {
   setProductBulkTiers,
   testBinanceApi,
   setBinanceCreds,
+  CRYPTO_NETWORKS,
+  getEnabledCryptoNetworks,
+  toggleCryptoNetwork,
+  getNowPaymentsCreds,
+  setNowPaymentsCreds,
+  clearNowPaymentsCreds,
+  testNowPayments,
   listSuppliers,
   addSupplier,
   removeSupplier,
@@ -409,6 +416,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🏦 BharatPe verification", cb("adm", "bharatpe"), "primary"]],
       [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
       [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
+      [["🌐 Crypto terminal — TRC20 / BEP20 / Solana…", cb("adm", "crypto"), "success"]],
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
       [["📊 Reseller statements", cb("adm", "rstmt"), "success"]],
@@ -817,6 +825,41 @@ async function groupsView(ctx: Ctx): Promise<void> {
     kb.text(`🗑 Remove ${(t.title ?? t.chatId).slice(0, 18)}`, cb("adm", "grpdel", t.id)).row();
   }
   kb.text("◀️ Back", cb("adm", "home"));
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+/**
+ * Crypto terminal settings: NOWPayments keys + which networks customers see.
+ * Every payment gets its own deposit address from NOWPayments, so nothing
+ * here asks for wallet addresses.
+ */
+async function cryptoView(ctx: Ctx): Promise<void> {
+  const [creds, enabled] = await Promise.all([getNowPaymentsCreds(), getEnabledCryptoNetworks()]);
+  const kb = new InlineKeyboard();
+  const lines = [
+    "🌐 <b>Crypto terminal</b>",
+    "",
+    creds
+      ? `🔑 NOWPayments key: <code>…${escapeHtml(creds.apiKey.slice(-4))}</code> ✅`
+      : "🔑 NOWPayments key: <b>not set</b> — tap <b>Set API key</b> below.",
+    `📡 Networks on: <b>${enabled.length}</b> of ${CRYPTO_NETWORKS.length}`,
+    "",
+    "Each customer payment gets a <b>fresh deposit address</b> on the network they choose; it confirms automatically (IPN + a 60 s poll) and delivers like Binance.",
+    "",
+    "<b>Setup (once):</b> account.nowpayments.io → Store settings → <b>API keys</b> (copy) and <b>IPN secret</b> (generate &amp; copy) → enable the coins you want under <b>Coins</b> → set your payout wallet. Then tap <b>🧪 Test</b>.",
+    "",
+    "Tap a network to turn it on/off:",
+  ];
+  let i = 0;
+  for (const n of CRYPTO_NETWORKS) {
+    const on = enabled.includes(n.code);
+    kb.text(`${on ? "✅" : "☐"} ${n.label}`, cb("adm", "cryptotg", n.code));
+    if (++i % 2 === 0) kb.row();
+  }
+  if (i % 2 === 1) kb.row();
+  kb.text("🔑 Set API key + IPN secret", cb("adm", "npkey")).text("🧪 Test", cb("adm", "nptest")).row();
+  if (creds) kb.text("🗑 Remove keys", cb("adm", "npclear")).row();
+  kb.text("◀️ Back", cb("adm", "m_pay"));
   await show(ctx, lines.join("\n"), kb, true);
 }
 
@@ -3885,6 +3928,26 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       flash(ctx, n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
+    case "crypto": return cryptoView(ctx);
+    case "cryptotg": {
+      const next = await toggleCryptoNetwork(id);
+      flash(ctx, next.includes(id) ? "✅ Network on." : "☐ Network off.");
+      return cryptoView(ctx);
+    }
+    case "npkey":
+      ctx.session.awaiting = "admin_np_key";
+      await askStep(ctx, "🔑 <b>NOWPayments · step 1/2</b>\nSend your NOWPayments <b>API key</b> (account.nowpayments.io → Store settings → API keys). Your messages are deleted after.");
+      return;
+    case "nptest": {
+      await ctx.reply("🧪 Testing NOWPayments…");
+      const r = await testNowPayments();
+      await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ NOWPayments failed:\n<code>${escapeHtml(r.detail)}</code>\n\nCheck the API key, and that the coins are enabled on your NOWPayments account.`, { parse_mode: "HTML" });
+      return cryptoView(ctx);
+    }
+    case "npclear":
+      await clearNowPaymentsCreds();
+      flash(ctx, "🗑 NOWPayments keys removed — the crypto button is hidden until new keys are set.");
+      return cryptoView(ctx);
     case "binapi":
       ctx.session.awaiting = "admin_binance_key";
       await askStep(ctx, "🔗 <b>Set Binance API</b>\nSend your Binance <b>API Key</b> (read-only key with Pay/Wallet read access). Your messages are deleted after.");
@@ -4218,6 +4281,25 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const t = await testSupplier(id);
     await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`, { parse_mode: "HTML" });
     await suppliersView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_np_key") {
+    await ctx.deleteMessage().catch(() => undefined);
+    ctx.session.npKeyTmp = text.trim();
+    ctx.session.awaiting = "admin_np_ipn";
+    await askStep(ctx, "🔑 <b>NOWPayments · step 2/2</b>\nNow send the <b>IPN secret key</b> (Store settings → Instant payment notifications → generate). It signs the payment callbacks.");
+    return true;
+  }
+  if (awaiting === "admin_np_ipn") {
+    await ctx.deleteMessage().catch(() => undefined);
+    const key = ctx.session.npKeyTmp ?? ""; ctx.session.npKeyTmp = undefined;
+    const ipn = text.trim();
+    if (!key || !ipn) { await ctx.reply("Missing key or IPN secret — tap 🔑 Set API key to retry."); return true; }
+    await setNowPaymentsCreds(key, ipn);
+    await ctx.reply("🔐 Saved (encrypted). Testing the connection…");
+    const r = await testNowPayments();
+    await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ ${escapeHtml(r.detail)}`, { parse_mode: "HTML" });
+    await cryptoView(ctx);
     return true;
   }
   if (awaiting === "admin_binance_key") {

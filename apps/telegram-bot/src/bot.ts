@@ -18,6 +18,13 @@ import {
   createGatewayCheckout,
   createBinanceManualCheckout,
   verifyBinanceByTxnId,
+  createCryptoCheckout,
+  createCryptoTopup,
+  checkCryptoPayment,
+  cancelCryptoOrder,
+  cryptoNetwork,
+  type CryptoCard,
+  type CryptoNetwork,
   creditFreeTopup,
   buildCombinedDeliveryText,
   buildDeliveryTxt,
@@ -458,6 +465,64 @@ export function createBot(): Bot<Ctx> {
       await ctx.deleteMessage().catch(() => undefined);
     }
     return ctx.reply(text, opts).catch(() => undefined);
+  };
+
+  /**
+   * The crypto payment card: a unique address, the exact amount, the network,
+   * and a QR of the address. One per payment; the flow helpers keep it as the
+   * anchor until the payment settles.
+   */
+  const sendCryptoCard = async (ctx: Ctx, card: CryptoCard, net: CryptoNetwork): Promise<{ message_id: number } | undefined> => {
+    const isTopup = card.kind === "topup";
+    const mins = Math.max(1, Math.round((new Date(card.expiresAt).getTime() - Date.now()) / 60_000));
+    const caption = [
+      `🌐 <b>Pay with ${escapeHtml(net.asset)} · ${escapeHtml(net.chain)}</b>`,
+      isTopup ? `💳 Wallet deposit <b>${fmt(card.owedMinor, card.currency)}</b>` : `🧾 Order <b>${escapeHtml(card.orderNumber)}</b> — ${fmt(card.owedMinor, card.currency)}`,
+      "",
+      "┏━━━━━━━━━━━━━━━━━━",
+      `┃ 💵 <b>Send exactly</b>`,
+      `┃ <code>${escapeHtml(card.payAmount)}</code> ${escapeHtml(net.asset)}`,
+      "┃",
+      `┃ 📬 <b>To this address</b> <i>(yours only)</i>`,
+      `┃ <code>${escapeHtml(card.payAddress)}</code>`,
+      ...(card.payinExtraId ? ["┃", `┃ 📝 <b>Memo / Tag — REQUIRED</b>`, `┃ <code>${escapeHtml(card.payinExtraId)}</code>`] : []),
+      "┗━━━━━━━━━━━━━━━━━━",
+      "",
+      `🔗 Network: <b>${escapeHtml(net.chain)}</b> — send <b>only</b> on this network.`,
+      "✅ Confirms <b>automatically</b> a few minutes after it lands — nothing to paste.",
+      `⏳ Pay within <b>${mins} minutes</b>.`,
+      "💡 From an exchange? Add the withdrawal fee on top so the <b>full amount</b> arrives.",
+    ].join("\n");
+    const kb = new InlineKeyboard()
+      .copyText(`📋 Copy address`, card.payAddress).row()
+      .copyText(`📋 Copy amount — ${card.payAmount}`, card.payAmount).row();
+    if (card.payinExtraId) kb.copyText(`📋 Copy memo — ${card.payinExtraId}`, card.payinExtraId).row();
+    kb.text("🔄 Check payment", isTopup ? cb("wal", "cryptochk", card.refId) : cb("ord", "cryptochk", card.refId)).row();
+    if (isTopup) kb.text("✖️ Cancel", cb("wal", "view")).text("🏠 Menu", "mnu:home");
+    else kb.text("✖️ Cancel", cb("ord", "cryptocancel", card.refId)).text("🏠 Menu", "mnu:home");
+    try {
+      const png = await QRCode.toBuffer(card.payAddress, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
+      return await ctx.replyWithPhoto(new InputFile(png, "crypto-pay.png"), { caption, parse_mode: "HTML", reply_markup: kb });
+    } catch {
+      return ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb }).catch(() => undefined);
+    }
+  };
+
+  /** Human line for a polled NOWPayments status. */
+  const cryptoStatusLine = (r: { status: string; actuallyPaid: string; payAmount: string; payCurrency: string }): string => {
+    const unit = r.payCurrency.toUpperCase();
+    switch (r.status) {
+      case "waiting": return "⏳ Not seen on the network yet. Send the exact amount to the address and check again in a minute.";
+      case "confirming": return "🔄 Seen on-chain — waiting for network confirmations. Almost there!";
+      case "confirmed":
+      case "sending": return "✅ Confirmed on-chain — crediting now, a moment please.";
+      case "partially_paid": return `⚠️ Received ${r.actuallyPaid} of ${r.payAmount} ${unit}. Send the remaining amount to the SAME address and it completes automatically.`;
+      case "finished": return "✅ Payment complete!";
+      case "expired": return "❌ This payment window expired. Start again from your cart.";
+      case "failed": return "❌ The payment failed. Please contact support.";
+      case "refunded": return "↩️ This payment was refunded.";
+      default: return `Status: ${r.status}`;
+    }
   };
 
   // ── Commands ──
@@ -1142,6 +1207,17 @@ export function createBot(): Bot<Ctx> {
     // button always answered "that top-up request has expired". 💳 Wallet says
     // "deposit any amount", which is exactly this flow; the amount-first island
     // contradicted that screen and has been removed.
+    if (awaiting === "wallet_crypto_amount") {
+      flowRemember(ctx, ctx.message);
+      const val = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(val) || val <= 0) {
+        ctx.session.awaiting = "wallet_crypto_amount";
+        return flowStep(ctx, () => ctx.reply(`Please send a valid amount in ${ctx.user.currency}, e.g. <code>10</code>`, { parse_mode: "HTML" }));
+      }
+      ctx.session.cryptoTopupMinor = Math.round(val * 100);
+      const v = await views.cryptoNetworkView(ctx.user, { kind: "topup", amountMinor: ctx.session.cryptoTopupMinor });
+      return flowStep(ctx, () => ctx.reply(v.text, { parse_mode: "HTML", reply_markup: v.kb }));
+    }
     if (awaiting === "wallet_free_txn") {
       const txn = ctx.message.text.trim().slice(0, 128);
       flowRemember(ctx, ctx.message);
@@ -1841,6 +1917,67 @@ export function createBot(): Bot<Ctx> {
           }));
           break;
         }
+        case "ord:crypto": {
+          await ctx.answerCallbackQuery();
+          await render(ctx, await views.cryptoNetworkView(user, { kind: "order", useWallet: args[0] === "w" }), true);
+          break;
+        }
+        case "ord:cryptonet": {
+          const code = args[0] ?? "";
+          const useWallet = args[1] === "w";
+          const net = cryptoNetwork(code);
+          if (!net) { await ctx.answerCallbackQuery({ text: "Unknown network", show_alert: true }); break; }
+          await ctx.answerCallbackQuery({ text: `⏳ Creating your ${net.asset} address…` });
+          let co;
+          try {
+            co = await createCryptoCheckout(user.id, { network: net.code, useWallet });
+          } catch (e) {
+            const msg = isCoreError(e) ? (ERROR_COPY[e.code] ?? e.message) : "Could not create the crypto payment.";
+            await ctx.reply(`⚠️ ${escapeHtml(msg)}`, {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text("🌐 Other network", cb("ord", "crypto", ...(useWallet ? ["w"] : []))).text("🛒 Cart", cb("crt", "view")),
+            });
+            break;
+          }
+          ctx.session.awaiting = undefined;
+          // The picker it was tapped from is done with.
+          await ctx.deleteMessage().catch(() => undefined);
+          const card = await sendCryptoCard(ctx, co, co.networkInfo);
+          if (ctx.chat && card) await rememberPaymentPrompt(co.orderId, ctx.chat.id, card.message_id);
+          await flowStart(ctx, card);
+          break;
+        }
+        case "ord:cryptochk": {
+          const oid = args[0] ?? "";
+          try {
+            const r = await checkCryptoPayment("order", oid, user.id);
+            if (r.settled || r.status === "finished") {
+              await ctx.answerCallbackQuery({ text: "✅ Payment confirmed!" });
+              await flowEnd(ctx, () => ctx.reply(
+                "✅ <b>Payment confirmed — your order is on its way!</b>\n\nThe delivery lands here within moments; it is also saved in 📦 My orders.",
+                { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)) },
+              ));
+            } else {
+              await ctx.answerCallbackQuery({ text: cryptoStatusLine(r).replace(/<[^>]+>/g, "").slice(0, 190), show_alert: r.status !== "waiting" });
+            }
+          } catch (e) {
+            await ctx.answerCallbackQuery({ text: isCoreError(e) ? e.message : "Could not check right now — try again in a minute.", show_alert: true });
+          }
+          break;
+        }
+        case "ord:cryptocancel": {
+          await ctx.answerCallbackQuery();
+          const oid = args[0] ?? "";
+          await cancelCryptoOrder(oid, user.id).catch(() => false);
+          ctx.session.awaiting = undefined;
+          await flowEnd(ctx, () => ctx.reply(comeBackMessage(user), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🛍 Pick it up again", cb("shp", "home", 1)).row()
+              .text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home"),
+          }));
+          break;
+        }
         case "ord:upipaid": {
           await ctx.answerCallbackQuery();
           const payOrderId = ctx.session.upiOrderId;
@@ -2062,6 +2199,56 @@ export function createBot(): Bot<Ctx> {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
           );
           await flowStart(ctx, askAmt, { card: false });
+          break;
+        }
+        case "wal:crypto": {
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "wallet_crypto_amount";
+          const ask = await ctx.reply(
+            `🌐 <b>Deposit crypto to your wallet</b>\n\nHow much do you want to add? Send the amount in <b>${user.currency}</b> (e.g. <code>10</code>).\n\n<i>Next you pick the network — USDT on TRC20 / BEP20 / Solana / TON and more. You get a fresh address just for this deposit.</i>`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
+          );
+          await flowStart(ctx, ask, { card: false });
+          break;
+        }
+        case "wal:cryptonet": {
+          const code = args[0] ?? "";
+          const net = cryptoNetwork(code);
+          const amount = ctx.session.cryptoTopupMinor ?? 0;
+          if (!net) { await ctx.answerCallbackQuery({ text: "Unknown network", show_alert: true }); break; }
+          if (amount <= 0) { await ctx.answerCallbackQuery({ text: "That deposit expired — tap Deposit crypto again.", show_alert: true }); break; }
+          await ctx.answerCallbackQuery({ text: `⏳ Creating your ${net.asset} address…` });
+          let tp;
+          try {
+            tp = await createCryptoTopup(user.id, amount, net.code);
+          } catch (e) {
+            const msg = isCoreError(e) ? (ERROR_COPY[e.code] ?? e.message) : "Could not create the deposit.";
+            await ctx.reply(`⚠️ ${escapeHtml(msg)}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")) });
+            break;
+          }
+          ctx.session.cryptoTopupMinor = undefined;
+          await ctx.deleteMessage().catch(() => undefined);
+          const card = await sendCryptoCard(ctx, tp, tp.networkInfo);
+          // Cleared when the credit lands (creditCryptoTopup → clearChatClutter).
+          if (ctx.chat && card) await rememberChatClutter(ctx.chat.id, card.message_id);
+          await flowStart(ctx, card);
+          break;
+        }
+        case "wal:cryptochk": {
+          const tid = args[0] ?? "";
+          try {
+            const r = await checkCryptoPayment("topup", tid, user.id);
+            if (r.settled) {
+              await ctx.answerCallbackQuery({ text: "✅ Credited!" });
+              await flowEnd(ctx, () => ctx.reply("✅ <b>Deposit credited to your wallet!</b>", {
+                parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🛍 Shop", cb("shp", "home", 1)),
+              }));
+            } else {
+              await ctx.answerCallbackQuery({ text: cryptoStatusLine(r).replace(/<[^>]+>/g, "").slice(0, 190), show_alert: r.status !== "waiting" });
+            }
+          } catch (e) {
+            await ctx.answerCallbackQuery({ text: isCoreError(e) ? e.message : "Could not check right now — try again in a minute.", show_alert: true });
+          }
           break;
         }
         case "wal:freetxn":
