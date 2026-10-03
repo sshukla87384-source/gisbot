@@ -440,7 +440,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     if (upiOn) {
       kb.add(sbtn(`🇮🇳 Use wallet + pay rest via UPI 🕐`, cb("ord", "payupi", "w"), "primary")).row();
     }
-    kb.add(sbtn(`➕ Or top up ${fmt(need, walletCur)} first`, cb("wal", "topup"), "primary")).row();
+    kb.add(sbtn(`➕ Or top up ${fmt(need, walletCur)} first`, cb("wal", "crypto"), "primary")).row();
   }
   // BNPL is held in the USER's currency (getBnplStatus reads user.currency), not
   // the wallet's. Comparing a wallet-currency amount against the credit limit —
@@ -549,9 +549,10 @@ export async function walletView(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   // "Top up" opens the Binance deposit card; when Binance is switched off it
   // goes to UPI instead, and when both are off the crypto terminal is the way.
-  if (binanceOn) kb.text("➕ Top up", cb("wal", "topup"));
-  else if (upiW.ok) kb.text("➕ Top up (UPI)", cb("wal", "topupinr"));
-  else if (cryptoOn) kb.text("➕ Top up", cb("wal", "crypto"));
+  // ONE "Top up": amount first, then every method the shop offers — crypto
+  // networks, Binance Pay, UPI — in one picker. Binance alone used to be the
+  // whole deposit screen.
+  if (cryptoOn || binanceOn || upiW.ok) kb.text("➕ Top up", cb("wal", "crypto"));
   kb.text("📜 History", cb("wal", "hist", 1)).row();
   if (cryptoOn) kb.add(sbtn(`${iconId("deposit") ?? iconId("crypto") ? "" : "🌐 "}Deposit crypto — BEP20 / TRC20 / Solana / LTC…`, cb("wal", "crypto"), "success", iconId("deposit") ?? iconId("crypto"))).row();
   if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
@@ -758,7 +759,7 @@ export async function profileView(user: BotUser): Promise<View> {
   );
   const done = orders.items.filter((o) => o.status === "COMPLETED").length;
   const kb = new InlineKeyboard()
-    .add(sbtn("➕ Add balance", cb("wal", "topup"), "success")).row()
+    .add(sbtn("➕ Add balance", cb("wal", "crypto"), "success")).row()
     // My Orders (the full list), not a truncated "recent" view. Replacement lives
     // on each order now — you pick the exact unit there — so a separate button
     // would just be a second, vaguer way in.
@@ -946,7 +947,7 @@ export async function resellerPricesView(user: BotUser): Promise<View> {
 
 export async function apiBalanceView(user: BotUser): Promise<View> {
   const wallet = await getWallet(user.id);
-  const kb = new InlineKeyboard().text("➕ Top up", cb("wal", "topup")).row();
+  const kb = new InlineKeyboard().text("➕ Top up", cb("wal", "crypto")).row();
   navRow(kb, cb("api", "home"));
   return {
     text: [
@@ -1651,14 +1652,15 @@ export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; us
     ? `💰 Deposit: <b>${fmt(mode.amountMinor, user.currency)}</b>`
     : "";
   const lines = [
-    header(`${e("crypto")} ${bold("Choose a payment network")}`),
+    header(`${e("crypto")} ${bold(mode.kind === "topup" ? "Choose a payment method" : "Choose a payment network")}`),
     "",
     amountLine,
-    "Pick the <b>network</b> you will send from. You get a <b>fresh address just for this payment</b> — send the exact amount shown and it confirms automatically.",
+    mode.kind === "topup" ? "Select a payment method to add funds to your wallet:" : "Pick the <b>network</b> you will send from. You get a <b>fresh address just for this payment</b> — send the exact amount shown and it confirms automatically.",
     "",
-    "💡 <b>USDT</b> = no price swings. Cheapest fees: BEP20, TRC20, Solana, TON.",
-    "⚠️ Send on the <b>same network</b> you pick here — a different network loses the funds.",
-    nets.length === 0 ? "\n⚠️ No crypto network is available right now — please pay with Binance or UPI." : "",
+    ...(nets.length > 0 ? [
+      "💡 <b>USDT</b> = no price swings. Cheapest fees: BEP20, TRC20, Solana, TON.",
+      "⚠️ Send on the <b>same network</b> you pick here — a different network loses the funds.",
+    ] : []),
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
   const w = mode.kind === "order" && mode.useWallet ? ["w"] : [];

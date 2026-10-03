@@ -1503,7 +1503,7 @@ export function createBot(): Bot<Ctx> {
             {
               parse_mode: "HTML",
               reply_markup: after < 0
-                ? new InlineKeyboard().text("➕ Add balance", cb("wal", "topup")).row().text("✖️ Cancel", cb("crt", "view"))
+                ? new InlineKeyboard().text("➕ Add balance", cb("wal", "crypto")).row().text("✖️ Cancel", cb("crt", "view"))
                 : new InlineKeyboard()
                     .add(sbtn(`✅ Confirm & pay ${fmt(charge, walletCur)}`, cb("ord", "paywalletok"), "success")).row()
                     .text("✖️ Cancel", cb("crt", "view")),
@@ -2270,7 +2270,7 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "wallet_crypto_amount";
           const ask = await ctx.reply(
-            `🌐 <b>Deposit crypto to your wallet</b>\n\nHow much do you want to add? Send the amount in <b>${user.currency}</b> (e.g. <code>10</code>).\n\n<i>Next you pick the network — USDT on BEP20 / TRC20 / Solana, LTC, TON and more. You get a fresh address just for this deposit.</i>`,
+            `💳 <b>Add funds to your wallet</b>\n\nHow much do you want to add? Send the amount in <b>${user.currency}</b> (e.g. <code>10</code>).\n\n<i>Next you pick how to pay — USDT on BEP20 / TRC20 / Solana, LTC, TON, Binance Pay or UPI.</i>`,
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
           );
           await flowStart(ctx, ask, { card: false });
