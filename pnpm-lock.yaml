@@ -241,14 +241,14 @@ importers:
         specifier: ^1.95.4
         version: 1.99.0(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       '@ton/core':
-        specifier: ^0.59.0
-        version: 0.59.1(@ton/crypto@3.3.0)
+        specifier: ^0.62.0
+        version: 0.62.1(@ton/crypto@3.3.0)
       '@ton/crypto':
         specifier: ^3.3.0
         version: 3.3.0
       '@ton/ton':
         specifier: ^15.1.0
-        version: 15.4.0(@ton/core@0.59.1(@ton/crypto@3.3.0))(@ton/crypto@3.3.0)
+        version: 15.4.0(@ton/core@0.62.1(@ton/crypto@3.3.0))(@ton/crypto@3.3.0)
       bullmq:
         specifier: ^5.34.0
         version: 5.80.2
@@ -894,8 +894,8 @@ packages:
   '@tokenizer/token@0.3.0':
     resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
 
-  '@ton/core@0.59.1':
-    resolution: {integrity: sha512-SxFBAvutYJaIllTkv82vbHTJhJI6NxzqUhi499CDEjJEZ9i6i9lHJiK2df4dlLAb/4SiWX6+QUzESkK4DEdnCw==}
+  '@ton/core@0.62.1':
+    resolution: {integrity: sha512-RaEGBo9gCf6ZHyS8SKq1K53pswvYW9E5A6vwUuzFBTRX14g4qMDlB9F+fq4aBE5kN7XyVr8ScQtOJfQj41usCw==}
     peerDependencies:
       '@ton/crypto': '>=3.2.0'
 
@@ -2812,10 +2812,9 @@ snapshots:
 
   '@tokenizer/token@0.3.0': {}
 
-  '@ton/core@0.59.1(@ton/crypto@3.3.0)':
+  '@ton/core@0.62.1(@ton/crypto@3.3.0)':
     dependencies:
       '@ton/crypto': 3.3.0
-      symbol.inspect: 1.0.1
 
   '@ton/crypto-primitives@2.1.0':
     dependencies:
@@ -2827,9 +2826,9 @@ snapshots:
       jssha: 3.2.0
       tweetnacl: 1.0.3
 
-  '@ton/ton@15.4.0(@ton/core@0.59.1(@ton/crypto@3.3.0))(@ton/crypto@3.3.0)':
+  '@ton/ton@15.4.0(@ton/core@0.62.1(@ton/crypto@3.3.0))(@ton/crypto@3.3.0)':
     dependencies:
-      '@ton/core': 0.59.1(@ton/crypto@3.3.0)
+      '@ton/core': 0.62.1(@ton/crypto@3.3.0)
       '@ton/crypto': 3.3.0
       axios: 1.18.1
       dataloader: 2.2.3
