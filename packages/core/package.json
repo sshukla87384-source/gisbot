@@ -22,7 +22,7 @@
     "@scure/bip39": "^1.4.0",
     "@scure/btc-signer": "^1.5.0",
     "@solana/web3.js": "^1.95.4",
-    "@ton/core": "^0.59.0",
+    "@ton/core": "^0.62.0",
     "@ton/crypto": "^3.3.0",
     "@ton/ton": "^15.1.0",
     "bullmq": "^5.34.0",
