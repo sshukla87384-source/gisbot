@@ -99,6 +99,7 @@ enum PaymentProvider {
   PAYPAL // reserved
   TELEGRAM_STARS // reserved
   WALLET
+  TERMINAL // self-hosted crypto terminal (own seed, unique address per payment)
 }
 
 enum PaymentStatus {
@@ -1526,4 +1527,41 @@ model UpiCredit {
 
   @@index([creditedAt])
   @@index([amountMinor, creditedAt])
+}
+
+/// One payment on the self-hosted crypto terminal: a fresh HD-derived address
+/// per order / top-up, watched on-chain and swept to the operator's payout
+/// wallet once settled. (chain, index) is the derivation slot; index 0 of every
+/// chain is the gas/main address and is never allocated to a payment.
+model TerminalPayment {
+  id              String    @id @default(cuid())
+  kind            String // ORDER | TOPUP
+  refId           String // Order.id or WalletTopup.id
+  userId          String
+  chain           String // usdtbsc | usdttrc20 | usdtmatic | sol | ton | ltc
+  index           Int
+  address         String
+  expectedAmount  String // asset units, decimal string
+  expectedUsd     String
+  receivedAmount  String    @default("0") // confirmed, asset units
+  pendingAmount   String    @default("0") // seen but not yet confirmed
+  status          String    @default("WAITING") // WAITING | CONFIRMING | PARTIAL | PAID | EXPIRED
+  partialNotified String? // last PARTIAL amount the customer was told about
+  txids           String[]
+  sweepStatus     String    @default("NONE") // NONE | PENDING | RETRY | DONE | SKIPPED
+  sweepTxid       String?
+  sweepError      String?
+  sweepAttempts   Int       @default(0)
+  nextSweepAt     DateTime?
+  lastCheckedAt   DateTime?
+  paidAt          DateTime?
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([chain, index])
+  @@index([status, expiresAt])
+  @@index([sweepStatus, nextSweepAt])
+  @@index([kind, refId])
+  @@index([userId, createdAt])
 }

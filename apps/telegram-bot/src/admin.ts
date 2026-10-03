@@ -144,6 +144,19 @@ import {
   testNowPayments,
   getPaymentRails,
   setPaymentRails,
+  TERMINAL_CHAINS,
+  hasTerminalSeed,
+  terminalFingerprint,
+  createTerminalSeed,
+  importTerminalSeed,
+  removeTerminalSeed,
+  getTerminalConfig,
+  toggleTerminalChain,
+  setTerminalPayout,
+  terminalGasReport,
+  terminalStats,
+  sweepTerminalNow,
+  recentTerminalPayments,
   listSuppliers,
   addSupplier,
   removeSupplier,
@@ -256,7 +269,7 @@ import {
 } from "@gis/core";
 import type { SyncResult } from "@gis/core";
 import { CLAIM_WINDOW_MIN } from "@gis/core";
-import { cb, effectiveHours, encryptSecret, decryptSecret, formatDuration, parseDurationHours } from "@gis/shared";
+import { cb, effectiveHours, encryptSecret, decryptSecret, formatDuration, isCoreError, parseDurationHours } from "@gis/shared";
 import { InlineKeyboard, InputFile } from "grammy";
 import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
@@ -418,7 +431,8 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🏦 BharatPe verification", cb("adm", "bharatpe"), "primary"]],
       [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
       [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
-      [["🌐 Crypto terminal — BEP20 / TRC20 / Solana / LTC…", cb("adm", "crypto"), "success"]],
+      [["🔐 Private crypto terminal (own seed)", cb("adm", "tm"), "success"]],
+      [["🌐 NOWPayments terminal (processor)", cb("adm", "crypto"), "primary"]],
       [["🎛 Payment methods on/off · UPI limit", cb("adm", "rails"), "primary"]],
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
@@ -883,6 +897,40 @@ async function railsView(ctx: Ctx): Promise<void> {
   kb.text(`${r.binanceEnabled ? "⛔ Turn Binance Pay OFF" : "✅ Turn Binance Pay ON"}`, cb("adm", "railbin")).row();
   kb.text(`${r.upiEnabled ? "⛔ Turn UPI OFF" : "✅ Turn UPI ON"}`, cb("adm", "railupi")).row();
   kb.text("🔝 Set UPI order limit", cb("adm", "railmax")).text("♾ No UPI limit", cb("adm", "railmax0")).row();
+  kb.text("◀️ Back", cb("adm", "m_pay"));
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+/**
+ * Self-hosted crypto terminal: a 12-word seed on this server, a fresh address
+ * per payment, auto-sweep to the operator's own wallet. No processor, no KYC.
+ */
+async function terminalView(ctx: Ctx): Promise<void> {
+  const [seeded, cfg, stats] = await Promise.all([hasTerminalSeed(), getTerminalConfig(), terminalStats().catch(() => null)]);
+  const fp = seeded ? await terminalFingerprint() : "";
+  const kb = new InlineKeyboard();
+  const lines = [
+    "🔐 <b>Private crypto terminal</b>",
+    "",
+    seeded ? `🔑 Seed: <b>loaded</b> (id <code>${fp}</code>)` : "🔑 Seed: <b>none yet</b> — create one or import your 12 words.",
+    stats ? `📊 Open: <b>${stats.open}</b> · Paid 24h: <b>${stats.paid24h}</b> (${stats.usd24h.toFixed(2)}) · Awaiting sweep: <b>${stats.unswept}</b>` : "",
+    "",
+    "Every order / deposit gets a <b>fresh address</b> from this seed on the network the customer picks. The worker watches the chain, delivers on confirmation and <b>sweeps the money to your payout wallet</b>.",
+    "",
+    "<b>Per network:</b> tap the name to turn it on/off, 🏦 to set where swept funds go (your Trust Wallet address on that network). A network is live only when it is ON <i>and</i> has a payout address.",
+    "⛽ BEP20 / Polygon / TRC20 sweeps need a little gas on the main address — see Gas balances.",
+  ].filter((l) => l !== "");
+  for (const c of TERMINAL_CHAINS) {
+    const on = cfg.enabled.includes(c.code);
+    const payout = cfg.payout[c.code];
+    kb.text(`${on ? "✅" : "☐"} ${c.asset} · ${c.chainLabel}`, cb("adm", "tmtg", c.code));
+    kb.text(payout ? `🏦 …${payout.slice(-6)}` : "🏦 set payout", cb("adm", "tmpay", c.code)).row();
+  }
+  if (!seeded) kb.text("🆕 Create 12-word seed", cb("adm", "tmnew")).text("📥 Import seed", cb("adm", "tmimport")).row();
+  else {
+    kb.text("⛽ Gas balances", cb("adm", "tmgas")).text("🧹 Sweep now", cb("adm", "tmsweep")).row();
+    kb.text("📜 Recent payments", cb("adm", "tmrecent")).text("🗑 Remove seed", cb("adm", "tmdel")).row();
+  }
   kb.text("◀️ Back", cb("adm", "m_pay"));
   await show(ctx, lines.join("\n"), kb, true);
 }
@@ -3952,6 +4000,83 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       flash(ctx, n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
+    case "tm": return terminalView(ctx);
+    case "tmtg": {
+      const next = await toggleTerminalChain(id);
+      const on = next.enabled.includes(id);
+      flash(ctx, on ? (next.payout[id] ? "✅ Network on." : "✅ Network on — now set its 🏦 payout address to go live.") : "☐ Network off.");
+      return terminalView(ctx);
+    }
+    case "tmpay": {
+      ctx.session.tmChain = id;
+      ctx.session.awaiting = "admin_tm_payout";
+      const c = TERMINAL_CHAINS.find((x) => x.code === id);
+      await askStep(ctx, `🏦 <b>Payout address — ${escapeHtml(c?.asset ?? id)} on ${escapeHtml(c?.chainLabel ?? id)}</b>\nSend the address swept funds should go to (e.g. your Trust Wallet <b>${escapeHtml(c?.asset ?? "")}</b> receive address on <b>${escapeHtml(c?.chainLabel ?? "")}</b>).\n⚠️ Wrong network = lost funds. Double-check.`);
+      return;
+    }
+    case "tmnew": {
+      if (await hasTerminalSeed()) { flash(ctx, "A seed already exists."); return terminalView(ctx); }
+      const words = await createTerminalSeed();
+      await ctx.reply(
+        [
+          "🆕 <b>Your terminal recovery phrase — write it down NOW</b>",
+          "",
+          `<code>${escapeHtml(words)}</code>`,
+          "",
+          "• This is shown <b>once</b>. It restores every payment address and every coin ever received.",
+          "• Keep it offline (paper). Anyone with these 12 words controls the money.",
+          "• It is stored encrypted on the server (hot wallet) — set a payout address per network so funds are swept out automatically.",
+          "",
+          "Tap the button below once it is written down — this message is deleted.",
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Saved it — delete this message", cb("adm", "tmnewok")) },
+      );
+      return;
+    }
+    case "tmnewok":
+      await ctx.deleteMessage().catch(() => undefined);
+      flash(ctx, "🔐 Seed created. Now turn networks on and set payout addresses.");
+      return terminalView(ctx);
+    case "tmimport":
+      ctx.session.awaiting = "admin_tm_seed";
+      await askStep(ctx, "📥 <b>Import recovery phrase</b>\nSend the 12 (or 24) words separated by spaces. The message is deleted immediately after it is read and the phrase is stored encrypted.\n\n⚠️ Prefer a <b>dedicated</b> phrase for the shop, not your personal wallet's.");
+      return;
+    case "tmgas": {
+      await ctx.reply("⛽ Reading gas balances…");
+      const rows = await terminalGasReport();
+      const text = rows.length === 0
+        ? "No chain here needs gas funding."
+        : rows.map((g) => `${g.low ? "🔴" : "🟢"} <b>${escapeHtml(g.symbol)}</b> ${escapeHtml(g.balance)}\n<code>${escapeHtml(g.address)}</code>\n<i>${escapeHtml(g.hint)}</i>`).join("\n\n");
+      await ctx.reply(`⛽ <b>Gas / main addresses</b>\n\n${text}\n\n<i>SOL, TON and LTC pay their own fee from the swept amount.</i>`, { parse_mode: "HTML" });
+      return;
+    }
+    case "tmsweep": {
+      await ctx.reply("🧹 Sweeping…");
+      const n = await sweepTerminalNow().catch((e: unknown) => { void e; return -1; });
+      await ctx.reply(n < 0 ? "❌ Sweep run failed — check logs." : `🧹 Sweep pass done — ${n} transfer(s) sent. Details arrive as alerts.`);
+      return terminalView(ctx);
+    }
+    case "tmrecent": {
+      const rows = await recentTerminalPayments(12);
+      const text = rows.length === 0 ? "No terminal payments yet." : rows.map((r) => {
+        const c = TERMINAL_CHAINS.find((x) => x.code === r.chain);
+        const st = r.status === "PAID" ? "✅" : r.status === "PARTIAL" ? "⚠️" : r.status === "EXPIRED" ? "⌛" : "⏳";
+        const sw = r.sweepStatus === "DONE" ? "🧹✓" : r.sweepStatus === "NONE" ? "" : `🧹${r.sweepStatus.toLowerCase()}`;
+        return `${st} ${r.kind === "ORDER" ? "order" : "top-up"} · ${escapeHtml(r.expectedAmount)} ${c?.asset ?? r.chain} (${escapeHtml(c?.chainLabel ?? r.chain)}) · got ${escapeHtml(r.receivedAmount)} ${sw}\n<code>${escapeHtml(r.address)}</code>${r.sweepError ? `\n<i>${escapeHtml(r.sweepError.slice(0, 120))}</i>` : ""}`;
+      }).join("\n\n");
+      await ctx.reply(`📜 <b>Recent terminal payments</b>\n\n${text}`, { parse_mode: "HTML" });
+      return;
+    }
+    case "tmdel":
+      await ctx.reply("🗑 <b>Remove the terminal seed?</b>\nNew payments stop at once. Addresses already issued keep working on-chain, but the server can no longer watch or sweep them — make sure everything is swept and you have the phrase backed up.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🗑 Yes, remove", cb("adm", "tmdelok")).text("✖️ Keep", cb("adm", "tm")),
+      });
+      return;
+    case "tmdelok":
+      await removeTerminalSeed();
+      flash(ctx, "🗑 Seed removed.");
+      return terminalView(ctx);
     case "rails": return railsView(ctx);
     case "railbin": {
       const cur = await getPaymentRails();
@@ -4326,6 +4451,29 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const t = await testSupplier(id);
     await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`, { parse_mode: "HTML" });
     await suppliersView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_tm_seed") {
+    await ctx.deleteMessage().catch(() => undefined);
+    try {
+      const r = await importTerminalSeed(text);
+      await ctx.reply(`🔐 Imported a ${r.words}-word phrase (id <code>${r.fingerprint}</code>), stored encrypted. Now turn networks on and set payout addresses.`, { parse_mode: "HTML" });
+    } catch (e) {
+      await ctx.reply(`❌ ${escapeHtml(e instanceof Error ? e.message : String(e))}`, { parse_mode: "HTML" });
+    }
+    await terminalView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_tm_payout") {
+    const chain = ctx.session.tmChain ?? "";
+    ctx.session.tmChain = undefined;
+    try {
+      await setTerminalPayout(chain, text);
+      await ctx.reply("🏦 Payout address saved. Swept funds for this network now go there.");
+    } catch (e) {
+      await ctx.reply(`❌ ${escapeHtml(isCoreError(e) ? e.message : e instanceof Error ? e.message : String(e))}`, { parse_mode: "HTML" });
+    }
+    await terminalView(ctx);
     return true;
   }
   if (awaiting === "admin_upi_max") {

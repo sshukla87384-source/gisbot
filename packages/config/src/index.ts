@@ -65,6 +65,14 @@ const envSchema = z
     RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
     NOWPAYMENTS_API_KEY: z.string().optional(),
     NOWPAYMENTS_IPN_SECRET: z.string().optional(),
+    // ── Self-hosted crypto terminal (own seed; see packages/core/src/terminal) ──
+    // All optional: public endpoints are used when unset. Keys raise rate limits.
+    BSC_RPC_URL: z.string().url().optional(),
+    POLYGON_RPC_URL: z.string().url().optional(),
+    SOLANA_RPC_URL: z.string().url().optional(),
+    TRONGRID_API_KEY: z.string().optional(),
+    TONCENTER_API_KEY: z.string().optional(),
+    LTC_API_URL: z.string().url().optional(), // mempool-style API, default litecoinspace.org
     // UPI (manual — customer pays to this VPA/ID, admin confirms)
     // Telegram Stars checkout (native ⭐ invoice)
     STARS_ENABLED: envBool(false),

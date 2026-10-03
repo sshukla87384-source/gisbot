@@ -11,6 +11,8 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   pollBinancePayments,
   pollUpiCredits,
   pollCryptoPayments,
+  pollTerminalPayments,
+  sweepTerminalPayments,
   convertMinor,
   clearPaymentPrompts,
   sweepResolvedOrderPrompts,
@@ -380,6 +382,29 @@ async function cryptoPoll(): Promise<void> {
   }
 }
 
+/**
+ * Self-hosted crypto terminal: watch every open payment address (every 30 s)
+ * and move settled funds to the payout wallet (every 60 s). Both are no-ops
+ * until an admin has created a seed.
+ */
+async function terminalPoll(): Promise<void> {
+  const n = await pollTerminalPayments();
+  if (n > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.terminalPoll", entityType: "TerminalPayment", after: { advanced: n } },
+    }).catch(() => undefined);
+  }
+}
+
+async function terminalSweep(): Promise<void> {
+  const n = await sweepTerminalPayments();
+  if (n > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.terminalSweep", entityType: "TerminalPayment", after: { swept: n } },
+    }).catch(() => undefined);
+  }
+}
+
 /** Daily statement to every API user / reseller (once a day). */
 async function resellerStatements(): Promise<void> {
   const { sent, skipped } = await sendResellerStatements();
@@ -439,6 +464,8 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(3600, "reconcile", 86_390, reconcileWallets),
     every(120, "binancepoll", 110, binancePoll),
     every(60, "cryptopoll", 55, cryptoPoll, true),
+    every(30, "terminalpoll", 28, terminalPoll, true),
+    every(60, "terminalsweep", 58, terminalSweep, true),
     every(300, "recovery", 290, recoverAbandonedCheckouts),
     every(3600, "quality", 21_590, qualitySweep),
     every(3600, "moneysummary", 86_390, dailyMoneySummary),

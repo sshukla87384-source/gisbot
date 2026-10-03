@@ -10,6 +10,7 @@ import { couponLines, priceCart } from "./assign.js";
 import { recordCouponUseTx, releaseCouponForOrderTx, resolveCartCouponTx } from "./coupon.service.js";
 import { applyWalletTx, cancelStalePendingTx } from "./manual-pay.service.js";
 import { clearChatClutter, clearPaymentPrompts } from "./pay-prompt.service.js";
+import { allocateTerminalPayment, checkTerminalPayment, terminalActiveChains, terminalChain, terminalHandles, terminalPaymentFor } from "../terminal/terminal.service.js";
 
 /**
  * The crypto "terminal": a fresh deposit address for every payment.
@@ -160,8 +161,12 @@ export async function toggleCryptoNetwork(code: string): Promise<string[]> {
   return getEnabledCryptoNetworks();
 }
 
-/** Shows the crypto button at checkout: keys present and at least one network on. */
+/**
+ * Shows the crypto button at checkout: the self-hosted terminal has at least
+ * one network live, or NOWPayments keys are present with a network on.
+ */
 export async function cryptoTerminalReady(): Promise<boolean> {
+  if ((await terminalActiveChains().catch(() => [])).length > 0) return true;
   const p = await ensureCryptoProvider();
   if (!p) return false;
   return (await getEnabledCryptoNetworks()).length > 0;
@@ -186,13 +191,22 @@ async function merchantCoins(p: NowPaymentsProvider): Promise<Set<string> | null
   }
 }
 
-/** Networks to offer: enabled by the admin AND accepted by the merchant account. */
+/**
+ * Networks to offer, in catalogue order: every chain the self-hosted terminal
+ * has live, plus — when NOWPayments is configured — the networks enabled there
+ * and accepted by the merchant account. The terminal wins for a network both
+ * can take.
+ */
 export async function availableCryptoNetworks(): Promise<CryptoNetwork[]> {
+  const own = new Set((await terminalActiveChains().catch(() => [])).map((c) => c.code));
   const p = await ensureCryptoProvider();
-  if (!p) return [];
-  const enabled = await getEnabledCryptoNetworks();
-  const coins = await merchantCoins(p);
-  return CRYPTO_NETWORKS.filter((n) => enabled.includes(n.code) && (coins === null || coins.has(n.code)));
+  let viaProcessor = new Set<string>();
+  if (p) {
+    const enabled = await getEnabledCryptoNetworks();
+    const coins = await merchantCoins(p);
+    viaProcessor = new Set(enabled.filter((c) => coins === null || coins.has(c)));
+  }
+  return CRYPTO_NETWORKS.filter((n) => own.has(n.code) || viaProcessor.has(n.code));
 }
 
 /** Admin diagnostic: reach the API and report which enabled networks it will take. */
@@ -242,6 +256,10 @@ export interface CryptoCard {
   owedMinor: number;
   currency: Currency;
   expiresAt: string;
+  /** Who watches the address: our own terminal or the processor. */
+  provider: "terminal" | "nowpayments";
+  /** Confirmations the customer is told to expect (terminal only). */
+  confirmations?: number;
 }
 
 const cardKey = (kind: "order" | "topup", refId: string): string => `cryptocard:${kind}:${refId}`;
@@ -280,8 +298,11 @@ function ipnUrl(): string | undefined {
 export async function createCryptoCheckout(userId: string, opts: { network: string; useWallet?: boolean }): Promise<CryptoCheckoutResult> {
   const net = cryptoNetwork(opts.network);
   if (!net) throw new CoreError("VALIDATION_FAILED", "Unknown network");
-  if (!(await getEnabledCryptoNetworks()).includes(net.code)) throw new CoreError("VALIDATION_FAILED", "That network is not enabled");
-  const p = await requireProvider();
+  // Our own terminal first; the processor only for networks it does not cover.
+  const ownTerminal = await terminalHandles(net.code);
+  if (!ownTerminal && !(await getEnabledCryptoNetworks()).includes(net.code)) throw new CoreError("VALIDATION_FAILED", "That network is not enabled");
+  const p = ownTerminal ? null : await requireProvider();
+  const providerEnum = ownTerminal ? "TERMINAL" as const : "NOWPAYMENTS" as const;
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const currency = user.currency as Currency;
@@ -341,7 +362,7 @@ export async function createCryptoCheckout(userId: string, opts: { network: stri
     await tx.order.update({ where: { id: order.id }, data: { binanceAmount: usd } });
     await tx.payment.create({
       data: {
-        orderId: order.id, provider: "NOWPAYMENTS", status: "CREATED",
+        orderId: order.id, provider: providerEnum, status: "CREATED",
         currency: "USD", amountMinor: Math.round(Number.parseFloat(usd) * 100),
         idempotencyKey: `crypto:${order.id}`,
       },
@@ -355,19 +376,27 @@ export async function createCryptoCheckout(userId: string, opts: { network: stri
     return { orderId: order.id, orderNumber, totalMinor: owedRecorded, orderTotalMinor: totalMinor, walletUsedMinor: applied.walletUsed, usd };
   }, { timeout: 15_000 });
 
-  let pay: DirectCryptoPayment;
+  // A unique address for this order — from our own seed, or from the processor.
+  let pay: { paymentId: string; payAddress: string; payAmount: string; payCurrency: string; payinExtraId: string | null; confirmations?: number };
   try {
-    pay = await p.createPayment({
-      orderId: created.orderId,
-      priceAmount: Number.parseFloat(created.usd),
-      priceCurrency: "USD",
-      payCurrency: net.code,
-      description: `${loadConfig().STORE_NAME} order ${created.orderNumber}`,
-      ipnCallbackUrl: ipnUrl(),
-    });
+    if (ownTerminal || !p) {
+      const a = await allocateTerminalPayment({ kind: "ORDER", refId: created.orderId, userId, chain: net.code, usd: Number.parseFloat(created.usd), expiresAt });
+      pay = { paymentId: a.id, payAddress: a.address, payAmount: a.amount, payCurrency: net.code, payinExtraId: null, confirmations: a.confirmations };
+    } else {
+      const d: DirectCryptoPayment = await p.createPayment({
+        orderId: created.orderId,
+        priceAmount: Number.parseFloat(created.usd),
+        priceCurrency: "USD",
+        payCurrency: net.code,
+        description: `${loadConfig().STORE_NAME} order ${created.orderNumber}`,
+        ipnCallbackUrl: ipnUrl(),
+      });
+      pay = { paymentId: d.paymentId, payAddress: d.payAddress, payAmount: d.payAmount, payCurrency: d.payCurrency, payinExtraId: d.payinExtraId };
+    }
   } catch (e) {
-    // The processor refused (coin off, amount under the network minimum,
-    // outage). Cancel the order, give back wallet money and the coupon.
+    // No address could be issued (coin off, amount under the network minimum,
+    // price feed / RPC outage). Cancel the order, give back wallet money and
+    // the coupon.
     await prisma.$transaction(async (tx) => {
       await cancelStalePendingTx(tx, userId);
       await releaseCouponForOrderTx(tx, created.orderId);
@@ -383,7 +412,7 @@ export async function createCryptoCheckout(userId: string, opts: { network: stri
   await prisma.auditLog.create({
     data: {
       actorType: "SYSTEM", action: "order.crypto.address", entityType: "Order", entityId: created.orderId,
-      after: { paymentId: pay.paymentId, payAddress: pay.payAddress, payAmount: pay.payAmount, payCurrency: pay.payCurrency, memo: pay.payinExtraId },
+      after: { provider: ownTerminal ? "terminal" : "nowpayments", paymentId: pay.paymentId, payAddress: pay.payAddress, payAmount: pay.payAmount, payCurrency: pay.payCurrency, memo: pay.payinExtraId },
     },
   }).catch(() => undefined);
 
@@ -392,6 +421,8 @@ export async function createCryptoCheckout(userId: string, opts: { network: stri
     network: net.code, paymentId: pay.paymentId, payAddress: pay.payAddress, payAmount: pay.payAmount,
     payCurrency: pay.payCurrency, payinExtraId: pay.payinExtraId, usdAmount: created.usd,
     owedMinor: created.totalMinor, currency, expiresAt: expiresAt.toISOString(),
+    provider: ownTerminal ? "terminal" : "nowpayments",
+    ...(pay.confirmations !== undefined ? { confirmations: pay.confirmations } : {}),
   };
   await saveCard(card);
   await enqueueAdminAlert(
@@ -428,29 +459,37 @@ export interface CryptoTopupResult extends CryptoCard {
 export async function createCryptoTopup(userId: string, amountMinor: number, network: string): Promise<CryptoTopupResult> {
   const net = cryptoNetwork(network);
   if (!net) throw new CoreError("VALIDATION_FAILED", "Unknown network");
-  if (!(await getEnabledCryptoNetworks()).includes(net.code)) throw new CoreError("VALIDATION_FAILED", "That network is not enabled");
+  const ownTerminal = await terminalHandles(net.code);
+  if (!ownTerminal && !(await getEnabledCryptoNetworks()).includes(net.code)) throw new CoreError("VALIDATION_FAILED", "That network is not enabled");
   if (!Number.isFinite(amountMinor) || amountMinor < 100) throw new CoreError("VALIDATION_FAILED", "Minimum top-up is 1.");
   amountMinor = Math.round(amountMinor);
   if (amountMinor > 100_000_00) throw new CoreError("VALIDATION_FAILED", "That top-up is too large — please contact support.");
-  const p = await requireProvider();
+  const p = ownTerminal ? null : await requireProvider();
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const currency = user.currency as Currency;
   const usd = toUsdtCharge(amountMinor, currency);
   const expiresAt = new Date(Date.now() + TOPUP_SESSION_MIN * 60_000);
 
+  // binanceAsset tags who watches it: "tm:" our terminal, "np:" the processor.
   const topup = await prisma.walletTopup.create({
-    data: { userId, amountMinor, currency, binanceAsset: `np:${net.code}`, binanceAmount: usd, expiresAt },
+    data: { userId, amountMinor, currency, binanceAsset: `${ownTerminal ? "tm" : "np"}:${net.code}`, binanceAmount: usd, expiresAt },
   });
-  let pay: DirectCryptoPayment;
+  let pay: { paymentId: string; payAddress: string; payAmount: string; payCurrency: string; payinExtraId: string | null; confirmations?: number };
   try {
-    pay = await p.createPayment({
-      orderId: `${TOPUP_PREFIX}${topup.id}`,
-      priceAmount: Number.parseFloat(usd),
-      priceCurrency: "USD",
-      payCurrency: net.code,
-      description: `${loadConfig().STORE_NAME} wallet top-up`,
-      ipnCallbackUrl: ipnUrl(),
-    });
+    if (ownTerminal || !p) {
+      const a = await allocateTerminalPayment({ kind: "TOPUP", refId: topup.id, userId, chain: net.code, usd: Number.parseFloat(usd), expiresAt });
+      pay = { paymentId: a.id, payAddress: a.address, payAmount: a.amount, payCurrency: net.code, payinExtraId: null, confirmations: a.confirmations };
+    } else {
+      const d: DirectCryptoPayment = await p.createPayment({
+        orderId: `${TOPUP_PREFIX}${topup.id}`,
+        priceAmount: Number.parseFloat(usd),
+        priceCurrency: "USD",
+        payCurrency: net.code,
+        description: `${loadConfig().STORE_NAME} wallet top-up`,
+        ipnCallbackUrl: ipnUrl(),
+      });
+      pay = { paymentId: d.paymentId, payAddress: d.payAddress, payAmount: d.payAmount, payCurrency: d.payCurrency, payinExtraId: d.payinExtraId };
+    }
   } catch (e) {
     await prisma.walletTopup.update({ where: { id: topup.id }, data: { status: "CANCELLED" } }).catch(() => undefined);
     const msg = String(e instanceof Error ? e.message : e);
@@ -458,13 +497,15 @@ export async function createCryptoTopup(userId: string, amountMinor: number, net
   }
   await prisma.walletTopup.update({
     where: { id: topup.id },
-    data: { binanceTxnId: `np:${pay.paymentId}`, binanceAmount: pay.payAmount },
+    data: { binanceTxnId: `${ownTerminal ? "tm" : "np"}:${pay.paymentId}`, binanceAmount: pay.payAmount },
   });
   const card: CryptoCard = {
     kind: "topup", refId: topup.id, orderNumber: `TOPUP-${topup.id.slice(-6).toUpperCase()}`, userId,
     network: net.code, paymentId: pay.paymentId, payAddress: pay.payAddress, payAmount: pay.payAmount,
     payCurrency: pay.payCurrency, payinExtraId: pay.payinExtraId, usdAmount: usd,
     owedMinor: amountMinor, currency, expiresAt: expiresAt.toISOString(),
+    provider: ownTerminal ? "terminal" : "nowpayments",
+    ...(pay.confirmations !== undefined ? { confirmations: pay.confirmations } : {}),
   };
   await saveCard(card);
   return { ...card, networkInfo: net, topupId: topup.id };
@@ -613,8 +654,30 @@ export async function pollCryptoPayments(): Promise<number> {
 export async function checkCryptoPayment(kind: "order" | "topup", refId: string, userId: string): Promise<{
   status: string; actuallyPaid: string; payAmount: string; payCurrency: string; settled: boolean; queued: boolean;
 }> {
-  const p = await requireProvider();
   const card = await getCryptoCard(kind, refId);
+  if (card && card.userId !== userId) throw new CoreError("VALIDATION_FAILED", "Not your payment");
+
+  // Our own terminal: look at the chain right now and settle if it is in.
+  const own = card?.provider === "terminal" ? await prisma.terminalPayment.findUnique({ where: { id: card.paymentId } }) : await terminalPaymentFor(kind === "order" ? "ORDER" : "TOPUP", refId);
+  if (own) {
+    if (own.userId !== userId) throw new CoreError("VALIDATION_FAILED", "Not your payment");
+    const chain = terminalChain(own.chain);
+    const row = await checkTerminalPayment(own.id);
+    const map: Record<string, string> = { WAITING: "waiting", CONFIRMING: "confirming", PARTIAL: "partially_paid", PAID: "finished", EXPIRED: "expired" };
+    const settledOwn = kind === "order"
+      ? Boolean(await prisma.order.findFirst({ where: { id: refId, status: { in: ["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK"] } }, select: { id: true } }))
+      : Boolean(await prisma.walletTopup.findFirst({ where: { id: refId, status: "CREDITED" }, select: { id: true } }));
+    return {
+      status: map[row.status] ?? row.status.toLowerCase(),
+      actuallyPaid: row.receivedAmount,
+      payAmount: row.expectedAmount,
+      payCurrency: chain?.asset ?? own.chain,
+      settled: settledOwn || row.status === "PAID",
+      queued: false,
+    };
+  }
+
+  const p = await requireProvider();
   let paymentId = card?.paymentId ?? null;
   if (!paymentId) {
     if (kind === "order") {
@@ -626,8 +689,6 @@ export async function checkCryptoPayment(kind: "order" | "topup", refId: string,
       if (!t || t.userId !== userId) throw new CoreError("VALIDATION_FAILED", "Top-up not found");
       paymentId = t.binanceTxnId?.replace(/^np:/, "") ?? null;
     }
-  } else if (card && card.userId !== userId) {
-    throw new CoreError("VALIDATION_FAILED", "Not your payment");
   }
   if (!paymentId) throw new CoreError("VALIDATION_FAILED", "No payment on record");
   const st = await p.getPayment(paymentId);

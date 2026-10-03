@@ -491,7 +491,9 @@ export function createBot(): Bot<Ctx> {
       "┗━━━━━━━━━━━━━━━━━━",
       "",
       `🔗 Network: <b>${escapeHtml(net.chain)}</b> — send <b>only</b> on this network.`,
-      "✅ Confirms <b>automatically</b> a few minutes after it lands — nothing to paste.",
+      card.provider === "terminal"
+        ? `✅ <b>Auto-verification enabled</b> — credited automatically after <b>${card.confirmations ?? 1} confirmation${(card.confirmations ?? 1) === 1 ? "" : "s"}</b>. Nothing to paste.`
+        : "✅ Confirms <b>automatically</b> a few minutes after it lands — nothing to paste.",
       `⏳ Pay within <b>${mins} minutes</b>.`,
       "💡 From an exchange? Add the withdrawal fee on top so the <b>full amount</b> arrives.",
     ].join("\n");
