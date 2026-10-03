@@ -42,9 +42,11 @@ export interface CryptoNetwork {
 }
 
 export const CRYPTO_NETWORKS: readonly CryptoNetwork[] = [
-  { code: "usdttrc20", label: "USDT · TRC20 (Tron)", asset: "USDT", chain: "Tron (TRC20)", emoji: "🔴", stable: true },
+  // Catalogue order is picker order: the networks customers use most first.
   { code: "usdtbsc", label: "USDT · BEP20 (BSC)", asset: "USDT", chain: "BNB Smart Chain (BEP20)", emoji: "🟡", stable: true },
+  { code: "usdttrc20", label: "USDT · TRC20 (Tron)", asset: "USDT", chain: "Tron (TRC20)", emoji: "🔴", stable: true },
   { code: "usdtsol", label: "USDT · Solana", asset: "USDT", chain: "Solana", emoji: "🟣", stable: true },
+  { code: "ltc", label: "Litecoin (LTC)", asset: "LTC", chain: "Litecoin", emoji: "⚪", stable: false },
   { code: "usdtton", label: "USDT · TON", asset: "USDT", chain: "TON", emoji: "💎", stable: true, memo: true },
   { code: "usdterc20", label: "USDT · ERC20 (Ethereum)", asset: "USDT", chain: "Ethereum (ERC20)", emoji: "🔷", stable: true },
   { code: "usdtmatic", label: "USDT · Polygon", asset: "USDT", chain: "Polygon", emoji: "🟪", stable: true },
@@ -59,12 +61,11 @@ export const CRYPTO_NETWORKS: readonly CryptoNetwork[] = [
   { code: "sol", label: "Solana (SOL)", asset: "SOL", chain: "Solana", emoji: "🟣", stable: false },
   { code: "trx", label: "TRON (TRX)", asset: "TRX", chain: "Tron", emoji: "🔴", stable: false },
   { code: "ton", label: "Toncoin (TON)", asset: "TON", chain: "TON", emoji: "💎", stable: false, memo: true },
-  { code: "ltc", label: "Litecoin (LTC)", asset: "LTC", chain: "Litecoin", emoji: "⚪", stable: false },
   { code: "doge", label: "Dogecoin (DOGE)", asset: "DOGE", chain: "Dogecoin", emoji: "🐕", stable: false },
   { code: "xrp", label: "XRP", asset: "XRP", chain: "XRP Ledger", emoji: "⚫", stable: false, memo: true },
 ];
 
-export const DEFAULT_CRYPTO_NETWORKS = ["usdttrc20", "usdtbsc", "usdtsol", "usdtton", "ltc"];
+export const DEFAULT_CRYPTO_NETWORKS = ["usdtbsc", "usdttrc20", "usdtsol", "ltc", "usdtton"];
 
 export function cryptoNetwork(code: string): CryptoNetwork | null {
   const c = code.toLowerCase();

@@ -2205,7 +2205,7 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery();
           ctx.session.awaiting = "wallet_crypto_amount";
           const ask = await ctx.reply(
-            `🌐 <b>Deposit crypto to your wallet</b>\n\nHow much do you want to add? Send the amount in <b>${user.currency}</b> (e.g. <code>10</code>).\n\n<i>Next you pick the network — USDT on TRC20 / BEP20 / Solana / TON and more. You get a fresh address just for this deposit.</i>`,
+            `🌐 <b>Deposit crypto to your wallet</b>\n\nHow much do you want to add? Send the amount in <b>${user.currency}</b> (e.g. <code>10</code>).\n\n<i>Next you pick the network — USDT on BEP20 / TRC20 / Solana, LTC, TON and more. You get a fresh address just for this deposit.</i>`,
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
           );
           await flowStart(ctx, ask, { card: false });

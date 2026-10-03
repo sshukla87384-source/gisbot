@@ -424,7 +424,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     // Not enough for the whole order — spend what they have and pay the rest.
     const need = Math.max(0, walletPayable - Number(wallet.balanceMinor));
     kb.add(sbtn(`🪙 Use wallet ${fmt(wallet.balanceMinor, walletCur)} + pay ${fmt(need, walletCur)} via Binance`, cb("ord", "paybinance", "w"), "success")).row();
-    if (cryptoReady) kb.add(sbtn(`🌐 Use wallet + pay rest in crypto (TRC20/BEP20/SOL…)`, cb("ord", "crypto", "w"), "success")).row();
+    if (cryptoReady) kb.add(sbtn(`🌐 Use wallet + pay rest in crypto (BEP20/TRC20/SOL/LTC…)`, cb("ord", "crypto", "w"), "success")).row();
     if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
       kb.add(sbtn(`🇮🇳 Use wallet + pay rest via UPI 🕐`, cb("ord", "payupi", "w"), "primary")).row();
     }
@@ -445,7 +445,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       kb.add(sbtn("🪙 Pay via Binance (USDT) ⚡ instant", cb("ord", "paybinance"), "success")).row();
     }
     if (cryptoReady) {
-      kb.add(sbtn("🌐 Pay with Crypto — USDT TRC20 / BEP20 / Solana… ⚡ auto", cb("ord", "crypto"), "success")).row();
+      kb.add(sbtn("🌐 Pay with Crypto — BEP20 / TRC20 / Solana / LTC… ⚡ auto", cb("ord", "crypto"), "success")).row();
     }
     // UPI is INR-only — hide it from USD/USDT customers.
     if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
@@ -530,7 +530,7 @@ export async function walletView(user: BotUser): Promise<View> {
   const [wallet, bnpl] = await Promise.all([getWallet(user.id), getBnplStatus(user.id)]);
   const kb = new InlineKeyboard()
     .text("➕ Top up", cb("wal", "topup")).text("📜 History", cb("wal", "hist", 1)).row();
-  if (await cryptoTerminalReady().catch(() => false)) kb.add(sbtn("🌐 Deposit crypto — USDT TRC20 / BEP20 / SOL…", cb("wal", "crypto"), "success")).row();
+  if (await cryptoTerminalReady().catch(() => false)) kb.add(sbtn("🌐 Deposit crypto — BEP20 / TRC20 / Solana / LTC…", cb("wal", "crypto"), "success")).row();
   if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
   backToMenuRow(kb);
   const spendable = wallet.balanceMinor > 0n;
@@ -1624,37 +1624,40 @@ export async function myKeysSearchView(user: BotUser, query: string): Promise<Vi
  */
 export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; useWallet?: boolean } | { kind: "topup"; amountMinor: number }): Promise<View> {
   const nets = await availableCryptoNetworks();
-  const stable = nets.filter((n) => n.stable);
-  const coins = nets.filter((n) => !n.stable);
   const amountLine = mode.kind === "topup"
     ? `💰 Deposit: <b>${fmt(mode.amountMinor, user.currency)}</b>`
     : "";
   const lines = [
-    header(`🌐 ${bold("Pay with crypto")}`),
+    header(`🌐 ${bold("Choose a payment network")}`),
     "",
     amountLine,
-    "Choose the <b>network</b> you will send from. You get a <b>fresh address just for this payment</b> — send the exact amount shown and it confirms automatically.",
+    "Pick the <b>network</b> you will send from. You get a <b>fresh address just for this payment</b> — send the exact amount shown and it confirms automatically.",
     "",
-    "💡 <b>USDT / USDC</b> = no price swings. Cheapest fees: TRC20, BEP20, Solana, TON.",
+    "💡 <b>USDT</b> = no price swings. Cheapest fees: BEP20, TRC20, Solana, TON.",
     "⚠️ Send on the <b>same network</b> you pick here — a different network loses the funds.",
     nets.length === 0 ? "\n⚠️ No crypto network is available right now — please pay with Binance or UPI." : "",
   ].filter((l) => l !== "");
   const kb = new InlineKeyboard();
-  const data = (code: string) => mode.kind === "topup" ? cb("wal", "cryptonet", code) : cb("ord", "cryptonet", code, ...(mode.useWallet ? ["w"] : []));
+  const w = mode.kind === "order" && mode.useWallet ? ["w"] : [];
+  const data = (code: string) => mode.kind === "topup" ? cb("wal", "cryptonet", code) : cb("ord", "cryptonet", code, ...w);
+  // Catalogue order = popularity order (BEP20, TRC20, Solana, LTC, TON, …).
   let i = 0;
-  for (const n of stable) {
-    kb.add(sbtn(`${n.emoji} ${n.label}`, data(n.code), "success"));
+  for (const n of nets) {
+    kb.add(sbtn(`${n.emoji} ${n.label}`, data(n.code), n.stable ? "success" : "primary"));
     if (++i % 2 === 0) kb.row();
   }
   if (i % 2 === 1) kb.row();
-  i = 0;
-  for (const n of coins) {
-    kb.add(sbtn(`${n.emoji} ${n.label}`, data(n.code), "primary"));
-    if (++i % 2 === 0) kb.row();
-  }
-  if (i % 2 === 1) kb.row();
-  if (mode.kind === "order" && listEnabledProviders(user.currency).some((p) => p.id === "nowpayments")) {
-    kb.text("🪙 Other coins — open invoice page", cb("ord", "paygw", "nowpayments")).row();
+  // The other rails live here too, so a customer never has to go back to
+  // find Binance Pay or UPI.
+  if (mode.kind === "order") {
+    if (loadConfig().BINANCE_PAY_UID) kb.add(sbtn("🪙 Binance Pay (USDT) ⚡", cb("ord", "paybinance", ...w), "success")).row();
+    if (loadConfig().UPI_ID && (user.currency as string) === "INR") kb.add(sbtn("🇮🇳 UPI (INR)", cb("ord", "payupi", ...w), "primary")).row();
+    if (listEnabledProviders(user.currency).some((p) => p.id === "nowpayments")) {
+      kb.text("🪙 Other coins — open invoice page", cb("ord", "paygw", "nowpayments")).row();
+    }
+  } else {
+    if (loadConfig().BINANCE_PAY_UID) kb.add(sbtn("🪙 Deposit via Binance Pay", cb("wal", "topup"), "success")).row();
+    if (loadConfig().UPI_ID && (user.currency as string) === "INR") kb.add(sbtn("🇮🇳 Deposit via UPI", cb("wal", "topupinr"), "primary")).row();
   }
   navRow(kb, mode.kind === "topup" ? cb("wal", "view") : cb("crt", "checkout"));
   return { text: lines.join("\n"), kb };
