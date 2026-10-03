@@ -378,7 +378,8 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   // Manual rails are switched from the admin panel; UPI can also be capped by
   // order value (big tickets go to the self-verifying rails).
   const binanceOn = await binanceOffered().catch(() => false);
-  const upi = (user.currency as string) === "INR" ? await upiOffered(payable).catch(() => ({ ok: false as const })) : { ok: false as const };
+  type UpiGate = Awaited<ReturnType<typeof upiOffered>>;
+  const upi: UpiGate = (user.currency as string) === "INR" ? await upiOffered(payable).catch((): UpiGate => ({ ok: false })) : { ok: false };
   const upiOn = upi.ok;
   // With the in-bot crypto terminal live, the hosted NOWPayments invoice page is
   // offered inside the network picker ("other coins") rather than as a second,
