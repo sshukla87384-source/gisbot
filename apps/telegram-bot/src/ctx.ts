@@ -108,6 +108,7 @@ export interface SessionData {
     | "wallet_crypto_amount"
     | "admin_np_key"
     | "admin_np_ipn"
+    | "admin_upi_max"
     | "admin_bnpl_user"
     | "admin_bnpl_add"
     | "admin_bnpl_deduct"

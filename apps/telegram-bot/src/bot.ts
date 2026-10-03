@@ -20,6 +20,8 @@ import {
   verifyBinanceByTxnId,
   createCryptoCheckout,
   createCryptoTopup,
+  binanceOffered,
+  upiOffered,
   checkCryptoPayment,
   cancelCryptoOrder,
   cryptoNetwork,
@@ -1671,6 +1673,12 @@ export function createBot(): Bot<Ctx> {
           break;
         }
         case "ord:paybinance": {
+          // A stale button must not open a rail the admin has switched off.
+          if (!(await binanceOffered())) {
+            await ctx.answerCallbackQuery({ text: "Binance Pay is not available right now — please use another method.", show_alert: true });
+            await render(ctx, await views.checkoutSummaryView(user), true);
+            break;
+          }
           await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
           if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
           const bz = await createBinanceManualCheckout(user.id, { useWallet: args[0] === "w" });
@@ -1796,6 +1804,21 @@ export function createBot(): Bot<Ctx> {
           break;
         }
         case "ord:payupi": {
+          {
+            // Switched off, or this order is over the admin's UPI cap.
+            const cartNow = await getCartView(user.id, user.currency as Currency).catch(() => null);
+            const gate = await upiOffered(cartNow?.subtotalMinor);
+            if (!gate.ok) {
+              await ctx.answerCallbackQuery({
+                text: gate.reason === "over_limit" && gate.maxMinor
+                  ? `UPI is available for orders up to ${fmt(gate.maxMinor, "INR")}. Please pay with crypto or Binance — instant and automatic.`
+                  : "UPI is not available right now — please use another method.",
+                show_alert: true,
+              });
+              await render(ctx, await views.checkoutSummaryView(user), true);
+              break;
+            }
+          }
           await ctx.answerCallbackQuery({ text: "⏳ Creating UPI order…" });
           // A stale button must not silently flip a USDT customer to INR.
           if (user.currency !== "INR") {
@@ -1919,7 +1942,10 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:crypto": {
           await ctx.answerCallbackQuery();
-          await render(ctx, await views.cryptoNetworkView(user, { kind: "order", useWallet: args[0] === "w" }), true);
+          {
+            const cartNow = await getCartView(user.id, user.currency as Currency).catch(() => null);
+            await render(ctx, await views.cryptoNetworkView(user, { kind: "order", useWallet: args[0] === "w", payableMinor: cartNow?.subtotalMinor }), true);
+          }
           break;
         }
         case "ord:cryptonet": {
@@ -2142,7 +2168,13 @@ export function createBot(): Bot<Ctx> {
         case "wal:topup": {
           await ctx.answerCallbackQuery();
           const uid = config.BINANCE_PAY_UID;
-          if (!uid) { await ctx.reply("Wallet deposits aren't configured yet."); break; }
+          if (!uid || !(await binanceOffered())) {
+            await ctx.reply("Binance deposits are not available right now — use 🌐 Deposit crypto or UPI from your 💳 Wallet.", {
+              reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")),
+            });
+            break;
+          }
+          const upiDep = user.currency === "INR" && (await upiOffered()).ok;
           const depositCard = await ctx.reply(
             [
               "💳 <b>Add funds to your Wallet — Binance (USDT)</b>",
@@ -2164,7 +2196,7 @@ export function createBot(): Bot<Ctx> {
               reply_markup: new InlineKeyboard()
                 .copyText(`📋 Copy Binance Pay ID — ${uid}`, String(uid)).row()
                 .text("✅ I have deposited — enter Order ID", "wal:freetxn").row()
-                .add(...(config.UPI_ID && user.currency === "INR" ? [{ text: "🇮🇳 Add INR via UPI (🕐 manual approval)", callback_data: "wal:topupinr" }] : [])).row()
+                .add(...(upiDep ? [{ text: "🇮🇳 Add INR via UPI (🕐 manual approval)", callback_data: "wal:topupinr" }] : [])).row()
                 .text("🏠 Menu", "mnu:home"),
             },
           );
@@ -2185,7 +2217,7 @@ export function createBot(): Bot<Ctx> {
         }
         case "wal:topupinr": {
           await ctx.answerCallbackQuery();
-          if (!config.UPI_ID) { await ctx.reply("UPI deposits aren't configured yet."); break; }
+          if (!config.UPI_ID || !(await upiOffered()).ok) { await ctx.reply("UPI deposits aren't available right now — use 🌐 Deposit crypto from your 💳 Wallet."); break; }
           if (user.currency !== "INR") {
             await ctx.reply(
               "🪙 Your wallet currency is <b>USD (USDT)</b>, so deposits go through <b>Binance</b> — it is instant and automatic.\n\nSwitch your currency to <b>INR</b> from 💱 Currency if you want to pay by UPI.",

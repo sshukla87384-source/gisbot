@@ -1,6 +1,8 @@
 import {
   availableCryptoNetworks,
+  binanceOffered,
   cryptoTerminalReady,
+  upiOffered,
   listResellerPrices,
   getUpiAutoPolicy,
   getUpiProvider,
@@ -373,6 +375,11 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   const discount = coupon?.discountMinor ?? 0;
   const payable = Math.max(0, view.subtotalMinor - discount);
   const cryptoReady = await cryptoTerminalReady().catch(() => false);
+  // Manual rails are switched from the admin panel; UPI can also be capped by
+  // order value (big tickets go to the self-verifying rails).
+  const binanceOn = await binanceOffered().catch(() => false);
+  const upi = (user.currency as string) === "INR" ? await upiOffered(payable).catch(() => ({ ok: false as const })) : { ok: false as const };
+  const upiOn = upi.ok;
   // With the in-bot crypto terminal live, the hosted NOWPayments invoice page is
   // offered inside the network picker ("other coins") rather than as a second,
   // confusingly similar crypto button here.
@@ -407,8 +414,11 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     view.hasCustomPrice ? `💎 <b>Special price just for you, ${greetName(user)}!</b>` : "",
     `Wallet balance: <b>${fmt(wallet.balanceMinor, wallet.currency)}</b>${walletCur === "USD" ? " USDT" : ""}`,
     crossCur ? `🔁 Wallet charge for this order: <b>${walletChargeLabel}</b>  <i>(${fmt(payable, view.currency)})</i>` : "",
-    (user.currency as string) === "INR" && loadConfig().UPI_ID
+    (user.currency as string) === "INR" && upiOn
       ? "\n💡 <b>Paying in USDT is cheaper</b> — INR prices include a small handling fee.\n⚡ Binance (USDT) also delivers instantly, while UPI is verified by hand."
+      : "",
+    !upi.ok && upi.reason === "over_limit" && upi.maxMinor
+      ? `ℹ️ UPI is available for orders up to <b>${fmt(upi.maxMinor, "INR")}</b> — this order is paid with crypto / Binance (instant, automatic).`
       : "",
     gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
   ].filter((l) => l !== "");
@@ -423,9 +433,9 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   } else if (view.allAvailable && wallet.balanceMinor > 0n) {
     // Not enough for the whole order — spend what they have and pay the rest.
     const need = Math.max(0, walletPayable - Number(wallet.balanceMinor));
-    kb.add(sbtn(`🪙 Use wallet ${fmt(wallet.balanceMinor, walletCur)} + pay ${fmt(need, walletCur)} via Binance`, cb("ord", "paybinance", "w"), "success")).row();
-    if (cryptoReady) kb.add(sbtn(`🌐 Use wallet + pay rest in crypto (BEP20/TRC20/SOL/LTC…)`, cb("ord", "crypto", "w"), "success")).row();
-    if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
+    if (binanceOn) kb.add(sbtn(`🪙 Use wallet ${fmt(wallet.balanceMinor, walletCur)} + pay ${fmt(need, walletCur)} via Binance`, cb("ord", "paybinance", "w"), "success")).row();
+    if (cryptoReady) kb.add(sbtn(`🌐 Use wallet ${fmt(wallet.balanceMinor, walletCur)} + pay rest in crypto (BEP20/TRC20/SOL/LTC…)`, cb("ord", "crypto", "w"), "success")).row();
+    if (upiOn) {
       kb.add(sbtn(`🇮🇳 Use wallet + pay rest via UPI 🕐`, cb("ord", "payupi", "w"), "primary")).row();
     }
     kb.add(sbtn(`➕ Or top up ${fmt(need, walletCur)} first`, cb("wal", "topup"), "primary")).row();
@@ -441,14 +451,15 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     for (const p of gateways) {
       kb.text(PROVIDER_LABELS[p.id], cb("ord", "paygw", p.id)).row();
     }
-    if (loadConfig().BINANCE_PAY_UID) {
+    if (binanceOn) {
       kb.add(sbtn("🪙 Pay via Binance (USDT) ⚡ instant", cb("ord", "paybinance"), "success")).row();
     }
     if (cryptoReady) {
       kb.add(sbtn("🌐 Pay with Crypto — BEP20 / TRC20 / Solana / LTC… ⚡ auto", cb("ord", "crypto"), "success")).row();
     }
-    // UPI is INR-only — hide it from USD/USDT customers.
-    if (loadConfig().UPI_ID && (user.currency as string) === "INR") {
+    // UPI is INR-only — hidden from USD/USDT customers, when switched off, and
+    // above the admin's UPI cap.
+    if (upiOn) {
       // The label used to say "manual approval" unconditionally. Once a provider
       // is configured and auto-delivery is on, payments are verified against the
       // merchant account and delivered without anyone tapping anything, so
@@ -528,9 +539,19 @@ export async function vaultView(user: BotUser, page: number): Promise<View> {
 
 export async function walletView(user: BotUser): Promise<View> {
   const [wallet, bnpl] = await Promise.all([getWallet(user.id), getBnplStatus(user.id)]);
-  const kb = new InlineKeyboard()
-    .text("➕ Top up", cb("wal", "topup")).text("📜 History", cb("wal", "hist", 1)).row();
-  if (await cryptoTerminalReady().catch(() => false)) kb.add(sbtn("🌐 Deposit crypto — BEP20 / TRC20 / Solana / LTC…", cb("wal", "crypto"), "success")).row();
+  const [binanceOn, upiW, cryptoOn] = await Promise.all([
+    binanceOffered().catch(() => false),
+    (user.currency as string) === "INR" ? upiOffered().catch(() => ({ ok: false })) : Promise.resolve({ ok: false }),
+    cryptoTerminalReady().catch(() => false),
+  ]);
+  const kb = new InlineKeyboard();
+  // "Top up" opens the Binance deposit card; when Binance is switched off it
+  // goes to UPI instead, and when both are off the crypto terminal is the way.
+  if (binanceOn) kb.text("➕ Top up", cb("wal", "topup"));
+  else if (upiW.ok) kb.text("➕ Top up (UPI)", cb("wal", "topupinr"));
+  else if (cryptoOn) kb.text("➕ Top up", cb("wal", "crypto"));
+  kb.text("📜 History", cb("wal", "hist", 1)).row();
+  if (cryptoOn) kb.add(sbtn("🌐 Deposit crypto — BEP20 / TRC20 / Solana / LTC…", cb("wal", "crypto"), "success")).row();
   if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
   backToMenuRow(kb);
   const spendable = wallet.balanceMinor > 0n;
@@ -1622,7 +1643,7 @@ export async function myKeysSearchView(user: BotUser, query: string): Promise<Vi
  * merchant account accepts. `mode` decides what the tap does: pay an order
  * (optionally with the wallet first) or fund the wallet.
  */
-export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; useWallet?: boolean } | { kind: "topup"; amountMinor: number }): Promise<View> {
+export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; useWallet?: boolean; payableMinor?: number } | { kind: "topup"; amountMinor: number }): Promise<View> {
   const nets = await availableCryptoNetworks();
   const amountLine = mode.kind === "topup"
     ? `💰 Deposit: <b>${fmt(mode.amountMinor, user.currency)}</b>`
@@ -1649,15 +1670,17 @@ export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; us
   if (i % 2 === 1) kb.row();
   // The other rails live here too, so a customer never has to go back to
   // find Binance Pay or UPI.
+  const binanceOn = await binanceOffered().catch(() => false);
+  const upiOn = (user.currency as string) === "INR" && (await upiOffered(mode.kind === "order" ? mode.payableMinor : undefined).catch(() => ({ ok: false }))).ok;
   if (mode.kind === "order") {
-    if (loadConfig().BINANCE_PAY_UID) kb.add(sbtn("🪙 Binance Pay (USDT) ⚡", cb("ord", "paybinance", ...w), "success")).row();
-    if (loadConfig().UPI_ID && (user.currency as string) === "INR") kb.add(sbtn("🇮🇳 UPI (INR)", cb("ord", "payupi", ...w), "primary")).row();
+    if (binanceOn) kb.add(sbtn("🪙 Binance Pay (USDT) ⚡", cb("ord", "paybinance", ...w), "success")).row();
+    if (upiOn) kb.add(sbtn("🇮🇳 UPI (INR)", cb("ord", "payupi", ...w), "primary")).row();
     if (listEnabledProviders(user.currency).some((p) => p.id === "nowpayments")) {
       kb.text("🪙 Other coins — open invoice page", cb("ord", "paygw", "nowpayments")).row();
     }
   } else {
-    if (loadConfig().BINANCE_PAY_UID) kb.add(sbtn("🪙 Deposit via Binance Pay", cb("wal", "topup"), "success")).row();
-    if (loadConfig().UPI_ID && (user.currency as string) === "INR") kb.add(sbtn("🇮🇳 Deposit via UPI", cb("wal", "topupinr"), "primary")).row();
+    if (binanceOn) kb.add(sbtn("🪙 Deposit via Binance Pay", cb("wal", "topup"), "success")).row();
+    if (upiOn) kb.add(sbtn("🇮🇳 Deposit via UPI", cb("wal", "topupinr"), "primary")).row();
   }
   navRow(kb, mode.kind === "topup" ? cb("wal", "view") : cb("crt", "checkout"));
   return { text: lines.join("\n"), kb };

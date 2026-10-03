@@ -142,6 +142,8 @@ import {
   setNowPaymentsCreds,
   clearNowPaymentsCreds,
   testNowPayments,
+  getPaymentRails,
+  setPaymentRails,
   listSuppliers,
   addSupplier,
   removeSupplier,
@@ -416,7 +418,8 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🏦 BharatPe verification", cb("adm", "bharatpe"), "primary"]],
       [["⚡ UPI auto-delivery", cb("adm", "upiauto"), "success"]],
       [["🔗 Set Binance API", cb("adm", "binapi"), "primary"], ["🧪 Test Binance", cb("adm", "bintest"), "primary"]],
-      [["🌐 Crypto terminal — TRC20 / BEP20 / Solana…", cb("adm", "crypto"), "success"]],
+      [["🌐 Crypto terminal — BEP20 / TRC20 / Solana / LTC…", cb("adm", "crypto"), "success"]],
+      [["🎛 Payment methods on/off · UPI limit", cb("adm", "rails"), "primary"]],
       [["🏭 Vendor APIs (Suppliers)", cb("adm", "sups"), "primary"]],
       [["🔑 Developer API Keys", cb("adm", "apikeys"), "primary"]],
       [["📊 Reseller statements", cb("adm", "rstmt"), "success"]],
@@ -859,6 +862,27 @@ async function cryptoView(ctx: Ctx): Promise<void> {
   if (i % 2 === 1) kb.row();
   kb.text("🔑 Set API key + IPN secret", cb("adm", "npkey")).text("🧪 Test", cb("adm", "nptest")).row();
   if (creds) kb.text("🗑 Remove keys", cb("adm", "npclear")).row();
+  kb.text("◀️ Back", cb("adm", "m_pay"));
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+/** Switch UPI / Binance Pay on or off, and cap UPI by order value. */
+async function railsView(ctx: Ctx): Promise<void> {
+  const r = await getPaymentRails();
+  const cfg = loadConfig();
+  const kb = new InlineKeyboard();
+  const lines = [
+    "🎛 <b>Payment methods</b>",
+    "",
+    `🪙 Binance Pay: ${cfg.BINANCE_PAY_UID ? (r.binanceEnabled ? "<b>ON</b> ✅" : "<b>OFF</b> ⛔") : "<i>not configured (BINANCE_PAY_UID)</i>"}`,
+    `🇮🇳 UPI: ${cfg.UPI_ID ? (r.upiEnabled ? "<b>ON</b> ✅" : "<b>OFF</b> ⛔") : "<i>not configured (UPI_ID)</i>"}`,
+    `🔝 UPI limit: ${r.upiMaxMinor ? `orders up to <b>₹${(r.upiMaxMinor / 100).toFixed(0)}</b> — bigger orders get crypto / Binance only` : "<b>no limit</b>"}`,
+    "",
+    "Changes apply instantly in the bot. Crypto networks are managed under 🌐 Crypto terminal.",
+  ];
+  kb.text(`${r.binanceEnabled ? "⛔ Turn Binance Pay OFF" : "✅ Turn Binance Pay ON"}`, cb("adm", "railbin")).row();
+  kb.text(`${r.upiEnabled ? "⛔ Turn UPI OFF" : "✅ Turn UPI ON"}`, cb("adm", "railupi")).row();
+  kb.text("🔝 Set UPI order limit", cb("adm", "railmax")).text("♾ No UPI limit", cb("adm", "railmax0")).row();
   kb.text("◀️ Back", cb("adm", "m_pay"));
   await show(ctx, lines.join("\n"), kb, true);
 }
@@ -3928,6 +3952,27 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       flash(ctx, n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
+    case "rails": return railsView(ctx);
+    case "railbin": {
+      const cur = await getPaymentRails();
+      const next = await setPaymentRails({ binanceEnabled: !cur.binanceEnabled });
+      flash(ctx, next.binanceEnabled ? "✅ Binance Pay is ON." : "⛔ Binance Pay is OFF — hidden from checkout and wallet.");
+      return railsView(ctx);
+    }
+    case "railupi": {
+      const cur = await getPaymentRails();
+      const next = await setPaymentRails({ upiEnabled: !cur.upiEnabled });
+      flash(ctx, next.upiEnabled ? "✅ UPI is ON." : "⛔ UPI is OFF — hidden from checkout and wallet.");
+      return railsView(ctx);
+    }
+    case "railmax":
+      ctx.session.awaiting = "admin_upi_max";
+      await askStep(ctx, "🔝 <b>UPI order limit</b>\nSend the maximum order value (₹) that may be paid by UPI, e.g. <code>1999</code>. Bigger orders will only see crypto / Binance.\nSend <code>0</code> for no limit.");
+      return;
+    case "railmax0":
+      await setPaymentRails({ upiMaxMinor: null });
+      flash(ctx, "♾ UPI limit removed.");
+      return railsView(ctx);
     case "crypto": return cryptoView(ctx);
     case "cryptotg": {
       const next = await toggleCryptoNetwork(id);
@@ -4281,6 +4326,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const t = await testSupplier(id);
     await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`, { parse_mode: "HTML" });
     await suppliersView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_upi_max") {
+    const rupees = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(rupees) || rupees < 0) { ctx.session.awaiting = "admin_upi_max"; await ctx.reply("Send a number in ₹, e.g. <code>1999</code>, or <code>0</code> for no limit.", { parse_mode: "HTML" }); return true; }
+    const next = await setPaymentRails({ upiMaxMinor: rupees > 0 ? Math.round(rupees * 100) : null });
+    await ctx.reply(next.upiMaxMinor ? `✅ UPI now allowed for orders up to ₹${(next.upiMaxMinor / 100).toFixed(0)}.` : "♾ UPI limit removed.");
+    await railsView(ctx);
     return true;
   }
   if (awaiting === "admin_np_key") {
