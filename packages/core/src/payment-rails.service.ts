@@ -44,7 +44,10 @@ export async function setPaymentRails(patch: Partial<PaymentRails>): Promise<Pay
   const cur = await getPaymentRails();
   const next: PaymentRails = { ...cur, ...patch };
   if (next.upiMaxMinor !== null && !(next.upiMaxMinor > 0)) next.upiMaxMinor = null;
-  await prisma.setting.upsert({ where: { key: KEY }, create: { key: KEY, value: next }, update: { value: next } });
+  // A fresh literal: Prisma's Json input wants an index-signature object, which
+  // an interface-typed value is not.
+  const value = { upiEnabled: next.upiEnabled, binanceEnabled: next.binanceEnabled, upiMaxMinor: next.upiMaxMinor };
+  await prisma.setting.upsert({ where: { key: KEY }, create: { key: KEY, value }, update: { value } });
   cache = { at: Date.now(), value: next };
   return next;
 }
