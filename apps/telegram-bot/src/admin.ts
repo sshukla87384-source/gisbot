@@ -74,6 +74,8 @@ import {
   getReferralConfig,
   setReferralRate,
   milestoneDashboard,
+  campaignTemplates,
+  sendCampaign,
   setMilestoneConfig,
   addMilestoneTier,
   removeMilestoneTier,
@@ -542,6 +544,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🎉 Special Sale (campaign)", cb("adm", "ssale"), "success"]],
       [["🗂 Share Full Stock List", cb("adm", "cataloglist"), "success"]],
       [["📣 Promo Templates", cb("adm", "promot"), "success"], ["🤖 Auto-Promo", cb("adm", "autop"), "primary"]],
+      [["🎯 Campaign posts (1-tap)", cb("adm", "camp"), "success"]],
       [["🔁 Renewal reminders", cb("adm", "renew"), "success"], ["🎁 Combo deal", cb("adm", "combo"), "success"]],
     ] },
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
@@ -1365,6 +1368,26 @@ async function refRatesView(ctx: Ctx): Promise<void> {
     `• Every purchase after: <b>${c.repeatPct}%</b>`,
     "",
     "Tap a rate to change it.",
+  ].join("\n"), kb, true);
+}
+
+async function campaignsView(ctx: Ctx, target: "c" | "g" = "c"): Promise<void> {
+  const list = await campaignTemplates();
+  const kb = new InlineKeyboard()
+    .text(target === "c" ? "📨 Sending to: 👥 all customers" : "📨 Sending to: 📢 groups/channels", cb("adm", "camp", target === "c" ? "g" : "c")).row();
+  for (const t of list) {
+    if (t.unavailable) { kb.text(`🚫 ${t.label}`, cb("adm", "campwhy", t.key)).row(); continue; }
+    kb.text(`👁 ${t.label}`, cb("adm", "campprev", t.key, target)).add(sbtn("📣 Send", cb("adm", "campsend", t.key, target), "success")).row();
+  }
+  kb.text("◀️ Back", cb("adm", "m_mkt"));
+  await show(ctx, [
+    "🎯 <b>Campaign posts</b>",
+    "",
+    "Ready-made announcements for the shop's own features — referral programme, milestone cashback, wallet top-up, gifts, combo deal, deals, spin, VIP tiers, renewals, Mini App, support.",
+    "",
+    "Each one fills itself from your <b>current settings</b> (today's %, today's ladder) and carries a button that opens the right screen in the bot.",
+    "",
+    "👁 = preview first · 📣 = send right now · tap the first row to switch between all customers and your registered groups/channels.",
   ].join("\n"), kb, true);
 }
 
@@ -2956,6 +2979,35 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     case "refrates": return refRatesView(ctx);
     case "refmile": return refMilestoneView(ctx);
+    case "camp": return campaignsView(ctx, id === "g" ? "g" : "c");
+    case "campwhy": {
+      const t = (await campaignTemplates()).find((x) => x.key === id);
+      await ctx.answerCallbackQuery({ text: t?.unavailable ?? "Not available right now.", show_alert: true }).catch(() => undefined);
+      return;
+    }
+    case "campprev": {
+      const target = args[1] === "g" ? "g" : "c";
+      const t = (await campaignTemplates()).find((x) => x.key === id);
+      if (!t) { flash(ctx, "That template is gone."); return campaignsView(ctx, target); }
+      const kb = new InlineKeyboard();
+      if (t.button) kb.url(t.button.text, t.button.url).row();
+      kb.add(sbtn(target === "g" ? "📢 Post to groups now" : "📣 Send to all customers now", cb("adm", "campsend", t.key, target), "success")).row()
+        .text("🗑 Close preview", cb("adm", "campclose"));
+      await ctx.reply(`👁 <i>Preview — this is what customers will see:</i>\n\n${t.html}`, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } });
+      return;
+    }
+    case "campclose": await ctx.deleteMessage().catch(() => undefined); return;
+    case "campsend": {
+      const target = args[1] === "g" ? "groups" : "customers";
+      const r = await sendCampaign(id, target, String(ctx.from?.id ?? "admin"));
+      if (ctx.callbackQuery?.message && "text" in ctx.callbackQuery.message && ctx.callbackQuery.message.text?.startsWith("👁")) {
+        await ctx.deleteMessage().catch(() => undefined);
+        await ctx.reply(r.ok ? `📣 Sent to <b>${r.targets}</b> ${target === "groups" ? "group(s)/channel(s)" : "customers"}. 🎉` : `⚠️ ${escapeHtml(r.reason ?? "Couldn't send.")}`, { parse_mode: "HTML" });
+        return;
+      }
+      flash(ctx, r.ok ? `📣 Sent to <b>${r.targets}</b> ${target === "groups" ? "group(s)/channel(s)" : "customers"}. 🎉` : `⚠️ ${escapeHtml(r.reason ?? "Couldn't send.")}`);
+      return campaignsView(ctx, target === "groups" ? "g" : "c");
+    }
     case "refmileon": await setMilestoneConfig({ enabled: id === "1" }); return refMilestoneView(ctx);
     case "refmilemode": {
       const cur = (await milestoneDashboard()).cfg;

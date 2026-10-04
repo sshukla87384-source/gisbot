@@ -449,14 +449,12 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
     navRow(kb0, cb("crt", "view"));
     return { text: lines.join("\n"), kb: kb0 };
   }
-  // "Customers also bought" — two real co-purchase suggestions with ➕ Add.
+  // "Buy together" — two real co-purchase suggestions. They sit BELOW the pay
+  // buttons: the customer came here to pay, so paying is the first thing on
+  // the card and the upsell is an afterthought near the bottom, not a wall of
+  // ➕ Add buttons between them and the money.
   const suggest = await alsoBought(user.id, user.currency as Currency, 2).catch(() => []);
-  if (suggest.length > 0) {
-    lines.push("", "🛍 <b>Customers also bought:</b>");
-    for (const sgt of suggest) lines.push(`• ${escapeHtml(sgt.name)} — ${fmt(sgt.priceMinor, sgt.currency)}`);
-  }
   const kb = new InlineKeyboard();
-  for (const sgt of suggest) kb.add(sbtn(`➕ Add ${sgt.name.slice(0, 28)} — ${fmt(sgt.priceMinor, sgt.currency)}`, cb("crt", "addco", sgt.variantId), "primary")).row();
   if (coupon) kb.add(sbtn(`🎟 ${coupon.code} applied — ✖️ Remove`, cb("crt", "couponrm"), "primary")).row();
   else kb.add(sbtn("🎟 Apply coupon", cb("crt", "coupon"), "primary")).row();
   if (view.allAvailable && enough) {
@@ -505,6 +503,10 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
         cb("ord", "payupi"), instant ? "success" : "primary",
       )).row();
     }
+  }
+  if (suggest.length > 0) {
+    lines.push("", `🛍 <i>Buy together: ${suggest.map((sgt) => `${escapeHtml(sgt.name)} (${fmt(sgt.priceMinor, sgt.currency)})`).join(" · ")}${!combo.applied && combo.need > 0 && combo.pct > 0 ? ` — unlocks ${combo.pct}% combo off` : ""}</i>`);
+    for (const sgt of suggest) kb.text(`🛍 + ${sgt.name.slice(0, 26)} · ${fmt(sgt.priceMinor, sgt.currency)}`, cb("crt", "addco", sgt.variantId)).row();
   }
   navRow(kb, cb("crt", "view"));
   return { text: lines.join("\n"), kb };

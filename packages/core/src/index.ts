@@ -52,3 +52,4 @@ export * from "./upi-utr.service.js";
 export * from "./orders/binance-window.js";
 export * from "./upi-provider.service.js";
 export * from "./miniapp.service.js";
+export * from "./campaign-templates.service.js";
