@@ -191,6 +191,7 @@ export async function runReferralMilestones(limitReferrers = 200): Promise<numbe
     where: { referredById: { not: null }, ...(cfg.mode === "purchased" ? { firstPurchaseAt: { not: null } } : {}) },
     _count: { _all: true },
     having: { referredById: { _count: { gte: minCount } } },
+    orderBy: { _count: { referredById: "desc" } },
     take: limitReferrers,
   });
   let paid = 0;
