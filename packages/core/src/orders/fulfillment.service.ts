@@ -2,7 +2,7 @@ import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import type { NormalizedPaymentEvent } from "@gis/payments";
 import { effectiveHours, encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
-import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
+import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
 import { accrueCommissionTx } from "./commission.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, deliveryExpiry, buildCombinedDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
@@ -410,11 +410,11 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       );
       if (outcome.deliveries.length === 1) {
         const d = outcome.deliveries[0]!;
-        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }) });
+        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }), followUp: DELIVERY_FOLLOWUP });
       } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-        await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
+        await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, undefined, DELIVERY_FOLLOWUP);
       } else if (outcome.deliveries.length > 1) {
-        await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId) });
+        await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId), followUp: DELIVERY_FOLLOWUP });
       }
       if (outcome.deliveries.length > 0) {
         await enqueueTelegramMessage(
@@ -427,7 +427,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
           if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
         }
         const instr = await deliveryInstructionsMessage();
-        if (instr) await enqueueTelegramMessage(outcome.telegramId, instr, { buttons: DELIVERY_BUTTONS });
+        if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
       }
       if (outcome.pendingManual > 0) {
         await enqueueTelegramMessage(

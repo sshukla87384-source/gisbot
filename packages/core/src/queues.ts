@@ -50,10 +50,19 @@ export interface OutboxJob {
   buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
   pin?: boolean; // pin the sent message in the chat
   document?: { filename: string; content: string }; // optional .txt attachment; text becomes the caption
+  /**
+   * A second, separate message sent right after this one, in order. Used for
+   * a delivery: the credentials message carries only copy buttons, and the
+   * navigation (My orders / Buy more / Menu) rides here — so tapping a button
+   * can never edit the credentials away. Views replace the message they were
+   * tapped on; a delivery must never be that message.
+   */
+  followUp?: { text: string; buttons?: OutboxButton[] };
 }
 export interface OutboxOptions {
   photo?: string;
   buttons?: OutboxButton[];
+  followUp?: { text: string; buttons?: OutboxButton[] };
   pin?: boolean;
   /** Self-delete this message N seconds after sending (see OutboxJob). */
   deleteAfterSec?: number;
@@ -118,6 +127,7 @@ export async function enqueueTelegramMessage(
     text,
     ...(opts.photo ? { photo: opts.photo } : {}),
     ...(opts.buttons && opts.buttons.length > 0 ? { buttons: opts.buttons } : {}),
+    ...(opts.followUp ? { followUp: opts.followUp } : {}),
     ...(opts.pin ? { pin: true } : {}),
     ...(opts.deleteAfterSec ? { deleteAfterSec: opts.deleteAfterSec } : {}),
   } satisfies OutboxJob, opts.delayMs && opts.delayMs > 0 ? { delay: Math.min(opts.delayMs, 7 * 24 * 3600_000) } : undefined);
@@ -183,12 +193,14 @@ export async function enqueueTelegramDocument(
   content: string,
   caption: string,
   buttons?: OutboxButton[],
+  followUp?: { text: string; buttons?: OutboxButton[] },
 ): Promise<void> {
   await getQueue(QUEUE_NAMES.outbox).add("send", {
     telegramId: telegramId.toString(),
     text: caption,
     document: { filename, content },
     ...(buttons && buttons.length > 0 ? { buttons } : {}),
+    ...(followUp ? { followUp } : {}),
   } satisfies OutboxJob);
 }
 
@@ -197,6 +209,16 @@ export const DELIVERY_BUTTONS: OutboxButton[] = [
   { text: "📦 View my orders", callbackData: "ord:list:1", style: "primary" },
   { text: "🛍 Buy more", callbackData: "shp:home:1", style: "success" },
 ];
+
+/**
+ * The navigation that used to sit under a delivery. It now goes in its own
+ * message (OutboxJob.followUp): a button tap replaces the message it is on
+ * with the next screen, which erased the customer's keys from the chat.
+ */
+export const DELIVERY_FOLLOWUP = {
+  text: "✅ <b>Delivered.</b> Your items are in the message above and always in 📦 My Orders.",
+  buttons: DELIVERY_BUTTONS,
+};
 
 /**
  * Telegram's hard limit on a copy_text button payload (Bot API: 1-256 chars).
@@ -235,7 +257,8 @@ export function deliveryButtons(creds?: { id?: string; pw?: string; twofa?: stri
     // tap with the value alone in a tap-to-copy code block.
     out.push({ text: "📋 Copy link", callbackData: `dl:copy:${ref.orderId}:1` });
   }
-  return [...out, ...DELIVERY_BUTTONS];
+  // Copy buttons only — navigation goes in DELIVERY_FOLLOWUP, a separate message.
+  return out;
 }
 
 export async function enqueueEmail(job: EmailJob): Promise<void> {

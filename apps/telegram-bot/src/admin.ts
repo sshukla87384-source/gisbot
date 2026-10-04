@@ -163,6 +163,7 @@ import {
   getMiniAppConfig,
   setMiniAppEnabled,
   miniAppUrl,
+  miniAppReachableUrl,
   listFaq,
   addFaq,
   removeFaq,
@@ -1115,9 +1116,10 @@ async function alwaysAdminView(ctx: Ctx): Promise<void> {
 async function miniAppView(ctx: Ctx): Promise<void> {
   const cfg = await getMiniAppConfig();
   const url = miniAppUrl();
+  const live = url ? await miniAppReachableUrl() : null;
   const kb = new InlineKeyboard()
     .add(sbtn(cfg.enabled ? "⏸ Turn off" : "▶️ Turn on", cb("adm", "miniappset", cfg.enabled ? "0" : "1"), cfg.enabled ? "danger" : "success")).row();
-  if (url && cfg.enabled) kb.webApp("📱 Open Mini App", url).row();
+  if (live && cfg.enabled) kb.webApp("📱 Open Mini App", live).row();
   kb.text("◀️ Back", cb("adm", "m_content"));
   await show(ctx, [
     "📱 <b>Mini App (web shop)</b>",
@@ -1127,7 +1129,7 @@ async function miniAppView(ctx: Ctx): Promise<void> {
       : "⏸ <b>Off</b> — the home menu shows the classic buttons only.",
     "",
     url
-      ? `URL: <code>${escapeHtml(url)}</code>`
+      ? `URL: <code>${escapeHtml(url)}</code>${live ? " — ✅ reachable" : " — ⚠️ <b>not answering right now</b> (is the API service running and reachable at PUBLIC_API_URL? The home-menu button stays hidden until it is; checked every minute)."}`
       : "⚠️ <b>PUBLIC_API_URL</b> on the server must be an <b>https://</b> address for Telegram to open the Mini App. Set it (e.g. your API domain) and restart; the button appears by itself.",
     "",
     "<i>You can also set the Mini App as the bot's menu button: @BotFather → your bot → Bot Settings → Menu Button → paste the URL.</i>",
@@ -3051,6 +3053,9 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const members = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);
       for (const m of members) await redis.del(sessionKey(m));
       await redis.del(BOT_ADMIN_MEMBERS_KEY);
+      // The permanent admin keeps receiving owner alerts — "Logout All never touches it".
+      const always = await getAlwaysAdminId();
+      if (always) await redis.sadd(BOT_ADMIN_MEMBERS_KEY, always).catch(() => undefined);
       await show(ctx, "🚪 Logged out of the admin panel on <b>all</b> devices.", new InlineKeyboard(), true);
       return;
     }

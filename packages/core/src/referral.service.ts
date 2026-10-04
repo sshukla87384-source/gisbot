@@ -182,18 +182,26 @@ export async function milestoneProgress(userId: string): Promise<{ cfg: Mileston
  * every few minutes; the admin dashboard can run it on demand. Returns how
  * many payouts were made. Each payout is announced to the referrer.
  */
-export async function runReferralMilestones(limitReferrers = 200): Promise<number> {
+export async function runReferralMilestones(pageSize = 200, maxPages = 50): Promise<number> {
   const cfg = await getMilestoneConfig();
   if (!cfg.enabled || cfg.tiers.length === 0) return 0;
   const minCount = cfg.tiers[0]?.count ?? 1;
-  const grouped = await prisma.user.groupBy({
-    by: ["referredById"],
-    where: { referredById: { not: null }, ...(cfg.mode === "purchased" ? { firstPurchaseAt: { not: null } } : {}) },
-    _count: { _all: true },
-    having: { referredById: { _count: { gte: minCount } } },
-    orderBy: { _count: { referredById: "desc" } },
-    take: limitReferrers,
-  });
+  // Paged through to the end: the top-N referrers stay at the top once they
+  // are fully paid, so a fixed `take` would never reach referrer N+1.
+  const grouped: Array<{ referredById: string | null; _count: { _all: number } }> = [];
+  for (let page = 0; page < maxPages; page++) {
+    const batch = await prisma.user.groupBy({
+      by: ["referredById"],
+      where: { referredById: { not: null }, ...(cfg.mode === "purchased" ? { firstPurchaseAt: { not: null } } : {}) },
+      _count: { _all: true },
+      having: { referredById: { _count: { gte: minCount } } },
+      orderBy: { referredById: "asc" },
+      skip: page * pageSize,
+      take: pageSize,
+    });
+    grouped.push(...batch);
+    if (batch.length < pageSize) break;
+  }
   let paid = 0;
   for (const g of grouped) {
     const referrerId = g.referredById;

@@ -5,7 +5,7 @@ import { convertPriceMinor } from "./fx.js";
 import { effectivePriceMinor } from "./pricing.js";
 import { getRedis } from "./redis.js";
 import { productRatings } from "./followup.service.js";
-import { listCategories, stockMapFor, UNLIMITED_STOCK } from "./catalog/catalog.service.js";
+import { getHideSoldOut, stockMapFor, UNLIMITED_STOCK } from "./catalog/catalog.service.js";
 import { getWallet } from "./wallet/wallet.service.js";
 
 /**
@@ -54,7 +54,7 @@ export async function buildMiniAppCatalog(currency: Currency): Promise<MiniAppCa
   } catch { /* build */ }
 
   const cfg = loadConfig();
-  const [products, cats, hideRow, botRow] = await Promise.all([
+  const [products, cats, hideSoldOut, botRow] = await Promise.all([
     prisma.product.findMany({
       where: { status: "ACTIVE", deletedAt: null },
       orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { createdAt: "desc" }],
@@ -67,11 +67,12 @@ export async function buildMiniAppCatalog(currency: Currency): Promise<MiniAppCa
       },
       take: 400,
     }),
-    listCategories(null).catch(() => []),
-    prisma.setting.findUnique({ where: { key: "shop.hide_sold_out" } }),
+    // Every active category, not just the roots: products usually live in
+    // sub-categories, and a chip per leaf is what a storefront shows anyway.
+    prisma.category.findMany({ where: { isActive: true, deletedAt: null }, orderBy: { sortOrder: "asc" }, select: { id: true, name: true, emoji: true } }).catch(() => []),
+    getHideSoldOut(),
     prisma.setting.findUnique({ where: { key: "bot.username" } }),
   ]);
-  const hideSoldOut = (hideRow?.value as { enabled?: boolean } | null)?.enabled === true;
   const [ratings, stockMap] = await Promise.all([
     productRatings(products.map((p) => p.id)).catch(() => new Map()),
     stockMapFor(products.map((p) => ({
@@ -160,9 +161,11 @@ export function verifyInitData(initData: string, maxAgeSec = 86_400): MiniAppUse
 }
 
 /** What the Mini App shows in its header for a verified Telegram user. */
-export async function miniAppProfile(telegramId: string): Promise<{ known: boolean; currency: Currency; balanceMinor: number; firstName: string | null; orders: number }> {
+export async function miniAppProfile(telegramId: string): Promise<{ known: boolean; currency: Currency; balanceMinor: number; balanceCurrency: Currency; firstName: string | null; orders: number }> {
   const u = await prisma.user.findFirst({ where: { telegramId: BigInt(telegramId) }, select: { id: true, currency: true, firstName: true } });
-  if (!u) return { known: false, currency: "USD", balanceMinor: 0, firstName: null, orders: 0 };
+  if (!u) return { known: false, currency: "USD", balanceMinor: 0, balanceCurrency: "USD", firstName: null, orders: 0 };
   const [wallet, orders] = await Promise.all([getWallet(u.id).catch(() => null), prisma.order.count({ where: { userId: u.id, status: { in: ["COMPLETED", "PAID", "PENDING_FULFILLMENT"] } } })]);
-  return { known: true, currency: u.currency as Currency, balanceMinor: wallet ? Number(wallet.balanceMinor) : 0, firstName: u.firstName, orders };
+  // The wallet keeps its own currency; after a currency switch it differs from
+  // the price currency, so the balance is labelled with the wallet's.
+  return { known: true, currency: u.currency as Currency, balanceMinor: wallet ? Number(wallet.balanceMinor) : 0, balanceCurrency: (wallet?.currency ?? u.currency) as Currency, firstName: u.firstName, orders };
 }

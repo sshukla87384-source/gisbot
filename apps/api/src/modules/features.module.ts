@@ -96,6 +96,10 @@ const bodies = {
 
 type FeatureName = keyof typeof bodies;
 
+/** Same rule as PermissionsGuard: SUPER_ADMIN has everything, else the JWT's perms claim. */
+const hasPermission = (req: ApiRequest, key: string): boolean =>
+  Boolean(req.user && (req.user.roles.includes("SUPER_ADMIN") || req.user.perms.includes(key)));
+
 async function snapshot() {
   const [rails, risk, renewal, combo, miniapp, hideSoldOut, backup, agents, alwaysId, alwaysHandle, faq, cryptoNets, np, terminal, seed, referral, mile] = await Promise.all([
     getPaymentRails(), getRiskConfig(), getRenewalConfig(), getComboConfig(), getMiniAppConfig(), getHideSoldOut(), getBackupConfig(),
@@ -136,7 +140,7 @@ async function snapshot() {
 @ApiTags("features")
 @Controller("features")
 export class FeaturesController {
-  @RequirePermission("analytics.read")
+  @RequirePermission("settings.write")
   @Get()
   all() {
     return snapshot();
@@ -145,8 +149,14 @@ export class FeaturesController {
   @RequirePermission("settings.write")
   @Patch(":name")
   async patch(@Param("name") name: string, @Body() body: unknown, @Req() req: ApiRequest) {
-    if (!(name in bodies)) throw new ApiError(404, "NOT_FOUND", `Unknown feature "${name}"`);
+    if (!Object.hasOwn(bodies, name)) throw new ApiError(404, "NOT_FOUND", `Unknown feature "${name}"`);
     const feature = name as FeatureName;
+    // Who is an admin is a SUPER_ADMIN decision: the bot passcode, its TOTP and
+    // the env allowlist are all out of a web ADMIN's reach, so the permanent
+    // admin and the agent list must be too.
+    if ((feature === "alwaysAdmin" || feature === "agents") && !hasPermission(req, "roles.manage")) {
+      throw new ApiError(403, "FORBIDDEN", "Only a super admin can change who administers the bot.");
+    }
     const before = await snapshot();
     switch (feature) {
       case "rails": {

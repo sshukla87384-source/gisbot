@@ -254,12 +254,24 @@ export async function setAlwaysAdmin(idOrHandle: string | null): Promise<{ teleg
   let telegramId: string | null = null;
   let handle: string | null = null;
   if (/^\d{5,20}$/.test(raw)) {
-    telegramId = raw;
+    // The id must be a known customer too: a typo must not crown a stranger.
     const u = await prisma.user.findFirst({ where: { telegramId: BigInt(raw) }, select: { telegramHandle: true } });
-    handle = u?.telegramHandle ?? null;
+    if (!u) throw new Error(`No customer with id ${raw} has used this bot yet — ask them to send /start once.`);
+    telegramId = raw;
+    handle = u.telegramHandle;
   } else {
-    const u = await prisma.user.findFirst({ where: { telegramHandle: { equals: raw, mode: "insensitive" } }, select: { telegramId: true, telegramHandle: true } });
+    // Handles are kept when a user drops their username, so two rows can carry
+    // the same one. Ambiguity is refused rather than guessed: this is the one
+    // setting that hands over the whole shop.
+    const matches = await prisma.user.findMany({
+      where: { telegramHandle: { equals: raw, mode: "insensitive" }, telegramId: { not: null } },
+      select: { telegramId: true, telegramHandle: true },
+      orderBy: { updatedAt: "desc" },
+      take: 2,
+    });
+    const u = matches[0];
     if (!u?.telegramId) throw new Error(`No customer @${raw} has used this bot yet — ask them to send /start once, or use the numeric id.`);
+    if (matches.length > 1) throw new Error(`More than one account has used @${raw} — set it by numeric id instead (👤 My Account shows it).`);
     telegramId = u.telegramId.toString();
     handle = u.telegramHandle;
   }
@@ -297,5 +309,37 @@ export function miniAppUrl(): string | null {
   return `${base.replace(/\/+$/, "")}/api/v1/miniapp`;
 }
 
-/** Settings that must never leave the database — the web portal's generic editor hides them too. */
-export const SECRET_SETTING_KEYS = /^(terminal\.seed|bot\.admin_passcode|admin\.totp.*|translate\.api|binance\.api|nowpayments\.api|upi\.provider.*|bharatpe.*|web\.admin.*)$/;
+/**
+ * The Mini App URL only when the API actually answers there. The bot and the
+ * API are separate services (the API is optional in the production compose),
+ * so an https PUBLIC_API_URL alone would put a button on the home menu that
+ * opens a 502. Checked at most every 5 minutes, result cached in Redis.
+ */
+export async function miniAppReachableUrl(): Promise<string | null> {
+  const url = miniAppUrl();
+  if (!url) return null;
+  const redis = getRedis();
+  const key = "miniapp:reachable";
+  try {
+    const cached = await redis.get(key);
+    if (cached === "1") return url;
+    if (cached === "0") return null;
+  } catch { /* probe */ }
+  let ok = false;
+  try {
+    const res = await fetch(`${url}/catalog?currency=USD`, { method: "GET", signal: AbortSignal.timeout(4000), headers: { accept: "application/json" } });
+    ok = res.ok;
+  } catch {
+    ok = false;
+  }
+  await redis.set(key, ok ? "1" : "0", "EX", ok ? 300 : 60).catch(() => undefined);
+  return ok ? url : null;
+}
+
+/**
+ * Settings the generic web editor must neither show nor write: secrets (seed,
+ * passcode hash, API keys) and the rows that decide WHO is an admin or how
+ * much the shop pays out — those go through their typed setters only, which
+ * validate, and through the stricter permission the features API demands.
+ */
+export const SECRET_SETTING_KEYS = /^(terminal\.seed|bot\.admin_passcode|admin\.totp.*|admin\.always|admin\.agents|referral\.milestones|translate\.api|binance\.api|nowpayments\.api|upi\.provider.*|bharatpe.*|web\.admin.*)$/;

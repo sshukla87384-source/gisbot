@@ -17,7 +17,7 @@ import {
   getWallet,
   getButtonConfig,
   getMiniAppConfig,
-  miniAppUrl,
+  miniAppReachableUrl,
   milestoneProgress,
   getCartCoupon,
   convertMinor,
@@ -98,7 +98,7 @@ export async function menuView(user: BotUser): Promise<View> {
     getButtonConfig(),
     getMiniAppConfig(),
   ]);
-  const miniApp = miniCfg.enabled ? miniAppUrl() : null;
+  const miniApp = miniCfg.enabled ? await miniAppReachableUrl() : null;
   return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg, miniApp) };
 }
 

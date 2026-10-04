@@ -412,7 +412,7 @@ async function terminalSweep(): Promise<void> {
   }
 }
 
-/** "Expires in N days — renew" reminders (hourly; one per item, ever). */
+/** Pay reached-but-unpaid referral milestone cashbacks (every 5 min). */
 async function referralMilestones(): Promise<void> {
   const n = await runReferralMilestones();
   if (n > 0) {
@@ -422,6 +422,7 @@ async function referralMilestones(): Promise<void> {
   }
 }
 
+/** "Expires in N days — renew" reminders (hourly; one per item, ever). */
 async function renewalReminders(): Promise<void> {
   const n = await runRenewalReminders();
   if (n > 0) {

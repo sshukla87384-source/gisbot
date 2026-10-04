@@ -216,7 +216,7 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}
       .then(function(r){ return r.json(); })
       .then(function(j){
         var d = j.data || j;
-        if (d && d.known) { currency = d.currency || "USD"; $("me").innerHTML = "Hi, <b>" + esc(d.firstName || (d.user && d.user.firstName) || "there") + "</b><br>💰 " + money(d.balanceMinor, currency) + " · 📦 " + d.orders; }
+        if (d && d.known) { currency = d.currency || "USD"; $("me").innerHTML = "Hi, <b>" + esc(d.firstName || (d.user && d.user.firstName) || "there") + "</b><br>💰 " + money(d.balanceMinor, d.balanceCurrency || currency) + " · 📦 " + d.orders; }
         else $("me").innerHTML = "Tap /start in the bot<br>to create your wallet";
       })
       .catch(function(){})

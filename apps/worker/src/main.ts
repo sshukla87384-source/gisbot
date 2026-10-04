@@ -6,6 +6,7 @@ import {
   type EmailJob,
   type FulfillmentJob,
   type OutboxJob,
+  type OutboxButton,
   primeFxRate,
   getPromoFlags,
   enqueueTelegramDelete,
@@ -56,42 +57,58 @@ async function main(): Promise<void> {
         return;
       }
       let replyMarkup: any;
+      let sendFollowUp: () => Promise<void> = async () => undefined;
       try {
         const styled = config.BUTTON_STYLES_ENABLED;
         // Hoisted so the 400 fallback in the catch block can reuse the buttons.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const btns = job.data.buttons && job.data.buttons.length > 0
-          ? job.data.buttons
-              // Last line of defence: Telegram rejects the WHOLE message when a
-              // copy_text payload is over 256 chars (a long delivered link is
-              // easily 380). Drop the button, keep the message — the value is
-              // in the body anyway. deliveryButtons() already guards this; any
-              // other caller is covered here.
-              .filter((b) => !b.copyText || b.copyText.length <= 256)
-              .map((b) => {
-                const base: Record<string, unknown> = b.copyText
-                  ? { text: b.text, copy_text: { text: b.copyText } }
-                  : b.callbackData
-                    ? { text: b.text, callback_data: b.callbackData }
-                    : { text: b.text, url: b.url };
-                if (styled && b.style && !b.copyText) base.style = b.style;
-                // Bot API 9.4 icon_custom_emoji_id: the ONLY way a premium emoji
-                // reaches a button, since button labels are plain text.
-                if (styled && b.iconCustomEmojiId && !b.copyText) base.icon_custom_emoji_id = b.iconCustomEmojiId;
-                return base;
-              })
-          : undefined;
-        // Copy buttons — native copy_text AND the callback kind the bot answers
-        // with a tap-to-copy block (dl:copy…) — sit apart from navigation: two
-        // per row, so an order with several items stays compact; the
-        // remaining buttons share one row at the bottom.
-        const isCopy = (b: Record<string, unknown>) => "copy_text" in b || String(b.callback_data ?? "").startsWith("dl:copy");
-        const copies = btns ? btns.filter(isCopy) : [];
-        const others = btns ? btns.filter((b) => !isCopy(b)) : [];
-        const copyRows: Array<Array<Record<string, unknown>>> = [];
-        for (let i = 0; i < copies.length; i += 2) copyRows.push(copies.slice(i, i + 2));
-        const rows = btns ? [...copyRows, ...(others.length > 0 ? [others] : [])] : undefined;
-        replyMarkup = rows ? ({ inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never) : undefined;
+        // Buttons → Telegram inline keyboard. Copy buttons — native copy_text
+        // AND the callback kind the bot answers with a tap-to-copy block
+        // (dl:copy…) — sit apart from navigation: two per row, so an order
+        // with several items stays compact; the remaining buttons share one
+        // row at the bottom. Also used for the follow-up message below.
+        const toMarkup = (list: OutboxButton[] | undefined) => {
+          if (!list || list.length === 0) return undefined;
+          const mapped = list
+            // Last line of defence: Telegram rejects the WHOLE message when a
+            // copy_text payload is over 256 chars (a long delivered link is
+            // easily 380). Drop the button, keep the message — the value is
+            // in the body anyway. deliveryButtons() already guards this; any
+            // other caller is covered here.
+            .filter((b) => !b.copyText || b.copyText.length <= 256)
+            .map((b) => {
+              const base: Record<string, unknown> = b.copyText
+                ? { text: b.text, copy_text: { text: b.copyText } }
+                : b.callbackData
+                  ? { text: b.text, callback_data: b.callbackData }
+                  : { text: b.text, url: b.url };
+              if (styled && b.style && !b.copyText) base.style = b.style;
+              // Bot API 9.4 icon_custom_emoji_id: the ONLY way a premium emoji
+              // reaches a button, since button labels are plain text.
+              if (styled && b.iconCustomEmojiId && !b.copyText) base.icon_custom_emoji_id = b.iconCustomEmojiId;
+              return base;
+            });
+          const isCopy = (b: Record<string, unknown>) => "copy_text" in b || String(b.callback_data ?? "").startsWith("dl:copy");
+          const copies = mapped.filter(isCopy);
+          const others = mapped.filter((b) => !isCopy(b));
+          const copyRows: Array<Array<Record<string, unknown>>> = [];
+          for (let i = 0; i < copies.length; i += 2) copyRows.push(copies.slice(i, i + 2));
+          const rows = [...copyRows, ...(others.length > 0 ? [others] : [])];
+          return { inline_keyboard: rows } as unknown as Parameters<typeof telegram.sendMessage>[2] extends { reply_markup?: infer R } ? R : never;
+        };
+        replyMarkup = toMarkup(job.data.buttons);
+        // The detached follow-up (delivery navigation): its own message, after
+        // the content, so a button tap can only ever replace THIS message. Sent
+        // from every path that managed to deliver the main message — the
+        // plain-text fallbacks included, or a delivery that hit one would
+        // arrive with no My Orders / Buy more buttons at all.
+        sendFollowUp = async (): Promise<void> => {
+          if (!job.data.followUp) return;
+          const fu = job.data.followUp;
+          await telegram.sendMessage(job.data.telegramId, fu.text, { parse_mode: "HTML", reply_markup: toMarkup(fu.buttons) }).catch(async () => {
+            await telegram.sendMessage(job.data.telegramId, stripTelegramHtml(fu.text), { reply_markup: toMarkup(fu.buttons) }).catch(() => undefined);
+          });
+        };
         const reply_markup = replyMarkup;
         let msg;
         // Every message id the job produced. A split send makes several, and a
@@ -129,6 +146,7 @@ async function main(): Promise<void> {
             await enqueueTelegramDelete(job.data.telegramId, id, job.data.deleteAfterSec * 1000).catch(() => undefined);
           }
         }
+        await sendFollowUp();
         if (job.data.pin && msg?.message_id) {
           // Pinning can fail (e.g. bot lacks rights in groups); never fail the job for it.
           await telegram.pinChatMessage(job.data.telegramId, msg.message_id, { disable_notification: true }).catch(() => undefined);
@@ -177,6 +195,7 @@ async function main(): Promise<void> {
               await telegram.sendMessage(job.data.telegramId, unwrapped, { parse_mode: "HTML", reply_markup: noIconMarkup as never });
               // eslint-disable-next-line no-console
               console.error("outbox: custom emoji rejected, sent with plain glyphs", { telegramId: job.data.telegramId, error: e.description });
+              await sendFollowUp();
               return;
             } catch {
               // Not the emoji (or the keyboard is at fault too) — carry on below.
@@ -204,6 +223,7 @@ async function main(): Promise<void> {
               }
               // eslint-disable-next-line no-console
               console.error("outbox: HTML rejected, delivered as plain text", { telegramId: job.data.telegramId, chunks: chunks.length, buttons: markup ? "kept" : "dropped", error: e.description });
+              await sendFollowUp();
               return;
             } catch {
               // Try the next, more conservative shape; if none works, fall

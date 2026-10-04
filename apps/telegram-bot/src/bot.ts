@@ -3061,7 +3061,10 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
   if (deliveries.length === 0) return;
   if (deliveries.length === 1) { await sendDelivery(ctx, deliveries[0]!); return; }
   const lines = deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
-  const menu = new InlineKeyboard().text("🏠 Menu", "mnu:home");
+  // Navigation goes on its own message after the content (see sendRevealed):
+  // a tap must never replace the message that holds the keys.
+  const menu = new InlineKeyboard().text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row().text("🏠 Menu", "mnu:home");
+  const sendNav = () => ctx.reply("👆 Your items are in the message above — always saved in 📦 My Orders.", { parse_mode: "HTML", reply_markup: menu }).catch(() => undefined);
   // A combined message for 2..threshold items can still blow Telegram's 4096-char
   // cap (long credential blocks, activation guides). Both sends below would then
   // be rejected and the .catch() would swallow it — a customer who has PAID gets
@@ -3074,8 +3077,8 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
       const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
       await ctx.replyWithDocument(file, {
         caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
-        reply_markup: menu,
       });
+      await sendNav();
       return;
     } catch {
       // Fallback: if the file send fails, deliver the keys as text messages (chunked under Telegram's 4096 limit).
@@ -3087,13 +3090,15 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
         buf += row;
       }
       if (buf.trim()) chunks.push(buf);
-      for (let i = 0; i < chunks.length; i++) await ctx.reply(chunks[i]!, i === chunks.length - 1 ? { reply_markup: menu } : {}).catch(() => undefined);
+      for (const chunk of chunks) await ctx.reply(chunk).catch(() => undefined);
+      await sendNav();
       return;
     }
   }
-  await ctx.reply(combined, { parse_mode: "HTML", reply_markup: menu }).catch(async () => {
-    await ctx.reply(combined.replace(/<[^>]+>/g, ""), { reply_markup: menu }).catch(() => undefined);
+  await ctx.reply(combined, { parse_mode: "HTML" }).catch(async () => {
+    await ctx.reply(combined.replace(/<[^>]+>/g, "")).catch(() => undefined);
   });
+  await sendNav();
 }
 
 async function sendRevealed(
@@ -3169,9 +3174,14 @@ async function sendRevealed(
     const all = `${rName}|${rPass}${rTwo ? `|${rTwo}` : ""}`;
     if (isCopyable(all)) kb.copyText("📋 Copy ALL credentials", all).row();
   }
-  // Generate the OTP in the bot instead of sending them to 2fa.live.
-  if (rTwo && looksLikeTotpSecret(rTwo)) kb.add(sbtn("🔢 Get my login code (OTP)", cb("otp", "get", orderItemId), "success")).row();
-  kb.text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
+  // Navigation is NOT on the delivery message. Views replace the message they
+  // were tapped on, so "📦 My orders" under the credentials used to wipe the
+  // credentials off the screen. They ride on a separate follow-up message;
+  // the delivery itself only carries copy buttons (which never navigate).
+  const nav = new InlineKeyboard();
+  // Generate the OTP in the bot instead of sending them to 2fa.live (replies, never edits — stays here).
+  if (rTwo && looksLikeTotpSecret(rTwo)) nav.add(sbtn("🔢 Get my login code (OTP)", cb("otp", "get", orderItemId), "success")).row();
+  nav.text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row()
     .text("🏠 Menu", "mnu:home");
   const body = lines.join("\n");
   // Telegram hard-caps a message at 4096 chars, and one item can carry dozens of
@@ -3190,11 +3200,12 @@ async function sendRevealed(
   for (let i = 0; i < parts.length; i++) {
     const text = parts[i]!;
     const last = i === parts.length - 1;
-    const markup = last ? { reply_markup: kb } : {};
+    const markup = last && kb.inline_keyboard.length > 0 ? { reply_markup: kb } : {};
     await ctx.reply(text, { parse_mode: "HTML", ...markup }).catch(async () => {
       await ctx.reply(text.replace(/<[^>]+>/g, ""), markup).catch(async () => {
         await ctx.reply(text.replace(/<[^>]+>/g, "")).catch(() => undefined);
       });
     });
   }
+  await ctx.reply("👆 Your items are in the message above — always saved in 📦 My Orders.", { parse_mode: "HTML", reply_markup: nav }).catch(() => undefined);
 }

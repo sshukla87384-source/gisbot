@@ -2,7 +2,7 @@ import type { Currency, Prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { convertMinor, convertPriceMinor } from "../fx.js";
 import { CoreError, decryptSecret, effectiveHours, encryptSecret } from "@gis/shared";
-import { DELIVERY_BUTTONS, isCopyable, type OutboxButton } from "../queues.js";
+import { isCopyable, type OutboxButton } from "../queues.js";
 import { effectivePriceMinor } from "../pricing.js";
 
 /**
@@ -425,7 +425,8 @@ export function combinedDeliveryButtons(items: DeliveryLine[], orderId: string):
     const all = values.join("\n");
     out.push(isCopyable(all) ? { text: "📋 Copy ALL", copyText: all } : { text: "📋 Copy ALL", callbackData: `dl:copyall:${orderId}` });
   }
-  return [...out, ...DELIVERY_BUTTONS];
+  // Copy buttons only — navigation goes in DELIVERY_FOLLOWUP, a separate message.
+  return out;
 }
 
 /** The 2FA helper site customers paste the secret into. */

@@ -2,7 +2,7 @@ import { loadConfig } from "@gis/config";
 import { BINANCE_SESSION_MIN, UPI_SESSION_MIN } from "./binance-window.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, effectiveHours, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
-import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument , DELIVERY_BUTTONS, deliveryButtons} from "../queues.js";
+import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_BUTTONS, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
 import { repairAccountPair } from "./assign.js";
@@ -469,11 +469,11 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }) });
+      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }), followUp: DELIVERY_FOLLOWUP });
     } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, DELIVERY_BUTTONS);
+      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, undefined, DELIVERY_FOLLOWUP);
     } else if (outcome.deliveries.length > 1) {
-      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId) });
+      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId), followUp: DELIVERY_FOLLOWUP });
     }
     if (outcome.deliveries.length > 0) {
       await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));
@@ -483,7 +483,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
       }
       const instr = await deliveryInstructionsMessage();
-      if (instr) await enqueueTelegramMessage(outcome.telegramId, instr, { buttons: DELIVERY_BUTTONS });
+      if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
     }
     if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `⏳ <b>${outcome.pendingManual} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`);
     if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
@@ -579,7 +579,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
 
   const tgId = item.order.user.telegramId;
   if (tgId !== null) {
-    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange), { buttons: deliveryButtons(credsOf(payload)) });
+    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange), { buttons: deliveryButtons(credsOf(payload)), followUp: DELIVERY_FOLLOWUP });
     // Deliver the item and nothing else. The thank-you, referral nudge and
     // delivery instructions are ORDER-level and were already sent at payment —
     // re-sending them here is what produced the duplicated messages.
@@ -843,10 +843,8 @@ async function notifyReplacementToBuyer(
       item.order.user.telegramId,
       `${header}\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
       {
-        buttons: [
-          ...deliveryButtons(credsOf(payload)),
-          { text: "📦 View updated order", callbackData: `ord:view:${item.orderId}`, style: "primary" as const },
-        ],
+        buttons: deliveryButtons(credsOf(payload)),
+        followUp: { text: "✅ <b>Replacement delivered.</b> It is in the message above and in your order.", buttons: [{ text: "📦 View updated order", callbackData: `ord:view:${item.orderId}`, style: "primary" as const }, ...DELIVERY_BUTTONS] },
       },
     );
   } catch (e) {
