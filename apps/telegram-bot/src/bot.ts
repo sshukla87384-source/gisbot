@@ -618,6 +618,7 @@ export function createBot(): Bot<Ctx> {
       case "tier": return render(ctx, await views.tierView(ctx.user), false);
       case "account": return render(ctx, await views.profileView(ctx.user), false);
       case "topup": return render(ctx, await views.walletView(ctx.user), false);
+      case "support": return render(ctx, await views.supportHomeView(ctx.user), false);
       case "orders": return render(ctx, await views.ordersView(ctx.user, 1), false);
       default: break;
     }

@@ -159,10 +159,11 @@ services:
   # ── Applications ───────────────────────────────────────────────────────────
   # Ensures the media volume is writable by the non-root "node" user (uid 1000)
   # on every deploy. Fixes uploads failing with EACCES on a fresh root-owned volume.
+  # Not profile-gated: the bot stores admin-sent product photos here too (the
+  # Mini App needs a real URL, a Telegram file_id cannot be shown on a web page).
   media-init:
     <<: *defaults
     image: alpine:3.20
-    profiles: ["full"]
     volumes:
       - media_data:/data/media
     command: sh -c "mkdir -p /data/media && chown -R 1000:1000 /data/media"
@@ -228,12 +229,17 @@ services:
       NODE_ENV: production
       BOT_MODE: webhook
       PORT: 8081
+      MEDIA_DIR: /data/media
+    volumes:
+      - media_data:/data/media
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      media-init:
         condition: service_completed_successfully
     deploy:
       resources:

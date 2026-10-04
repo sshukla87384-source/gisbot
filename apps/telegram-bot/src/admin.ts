@@ -135,6 +135,7 @@ import {
   scheduleBroadcast,
   setFlashSale,
   setProductImage,
+  hostImageFromUrl,
   setProductName,
   setProductDescription,
   setProductActivationGuide,
@@ -5928,8 +5929,17 @@ export async function setProductImageFromFileId(ctx: Ctx, fileId: string): Promi
   ctx.session.admProductId = undefined;
   ctx.session.awaiting = null;
   if (!productId) { await ctx.reply("No product selected. Open the product and tap 🖼 Set image again."); return; }
-  await setProductImage(productId, fileId);
-  await ctx.reply("🖼 Image updated from your photo. ✅");
+  // Host the photo on our own /media so the Mini App (a web page) can show it
+  // too; the Telegram file_id is the fallback the bot alone can still send.
+  let stored: string | null = null;
+  try {
+    const f = await ctx.api.getFile(fileId);
+    if (f.file_path) stored = await hostImageFromUrl(`https://api.telegram.org/file/bot${loadConfig().BOT_TOKEN}/${f.file_path}`, `product-${productId.slice(-6)}`);
+  } catch { stored = null; }
+  await setProductImage(productId, stored ?? fileId);
+  await ctx.reply(stored
+    ? "🖼 Image updated from your photo — shows in the bot and the Mini App. ✅"
+    : "🖼 Image updated from your photo (bot only). To show it in the Mini App too, set PUBLIC_API_URL on the server, or paste an https image URL instead.");
 }
 
 /** DM every logged-in admin an approve/reject card for a manual payment. Returns count notified. */

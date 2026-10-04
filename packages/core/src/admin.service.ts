@@ -405,6 +405,44 @@ export async function setButton(key: ButtonLabelKey, label: string, icon: string
   await invalidate("btncfg:*").catch(() => undefined);
 }
 
+/**
+ * Download an image (e.g. a photo the admin sent to the bot, via Telegram's
+ * file URL) into MEDIA_DIR and return the public /media URL the API/nginx
+ * serves — so the same picture shows in the bot AND the Mini App. Returns
+ * null when it cannot (no PUBLIC_API_URL, volume not mounted, bad type); the
+ * caller then falls back to the Telegram file_id, which the bot can still send.
+ */
+export async function hostImageFromUrl(sourceUrl: string, fileName = "photo"): Promise<string | null> {
+  const cfg = loadConfig();
+  const base = (cfg.PUBLIC_API_URL ?? "").replace(/\/+$/, "");
+  if (!base) return null;
+  try {
+    const res = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) return null;
+    const type = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    const extByType: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+    const buf = Buffer.from(await res.arrayBuffer());
+    // Telegram's file server answers application/octet-stream; sniff the magic bytes then.
+    const sniffed = buf.subarray(0, 4).toString("hex").startsWith("89504e47") ? "image/png"
+      : buf.subarray(0, 3).toString("hex") === "ffd8ff" ? "image/jpeg"
+        : buf.subarray(0, 4).toString("ascii") === "RIFF" ? "image/webp"
+          : buf.subarray(0, 3).toString("ascii") === "GIF" ? "image/gif" : null;
+    const mime = extByType[type] ? type : sniffed;
+    const ext = mime ? extByType[mime] : undefined;
+    if (!mime || !ext || buf.length === 0 || buf.length > 8 * 1024 * 1024) return null;
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { randomUUID } = await import("node:crypto");
+    const name = `${randomUUID()}.${ext}`;
+    await mkdir(cfg.MEDIA_DIR, { recursive: true });
+    await writeFile(join(cfg.MEDIA_DIR, name), buf);
+    await prisma.media.create({ data: { kind: "IMAGE", s3Key: name, fileName: `${fileName}.${ext}`, contentType: mime, sizeBytes: BigInt(buf.length) } }).catch(() => undefined);
+    return `${base}/media/${name}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { imageUrl } });
   await invalidate("cat:*");
