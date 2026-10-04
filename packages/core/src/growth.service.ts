@@ -1,4 +1,4 @@
-import { prisma, type Currency } from "@gis/database";
+import { prisma, type Currency, type Prisma } from "@gis/database";
 import { CoreError, formatMinor, type CurrencyCode } from "@gis/shared";
 import { randomBytes } from "node:crypto";
 import { addToCart, clearCart } from "./cart/cart.service.js";
@@ -31,7 +31,7 @@ async function readSetting<T>(key: string, fallback: T, pick: (v: Record<string,
   return fallback;
 }
 
-async function writeSetting(key: string, value: Record<string, unknown>): Promise<void> {
+async function writeSetting(key: string, value: Prisma.InputJsonObject): Promise<void> {
   await prisma.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
 }
 
@@ -285,7 +285,7 @@ export interface GiftResult {
 }
 
 /** Move wallet balance into a gift code (debited now; refunded if never claimed). */
-export async function createGift(userId: string, amountMinor: number, botUsername: string, note?: string): Promise<GiftResult> {
+export async function createWalletGift(userId: string, amountMinor: number, botUsername: string, note?: string): Promise<GiftResult> {
   amountMinor = Math.round(amountMinor);
   if (!Number.isFinite(amountMinor) || amountMinor < 100) throw new CoreError("VALIDATION_FAILED", "Minimum gift is 1.");
   const wallet = await prisma.wallet.findUnique({ where: { userId }, select: { currency: true } });

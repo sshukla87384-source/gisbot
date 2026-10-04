@@ -88,7 +88,7 @@ import {
   deliveredValue,
   enqueueTelegramMessage,
   startRenewal,
-  createGift,
+  createWalletGift,
   claimGift,
   listMyGifts,
   firstOrderAllowed,
@@ -1374,7 +1374,7 @@ export function createBot(): Bot<Ctx> {
         return flowStep(ctx, () => ctx.reply(`Please send a valid amount in ${ctx.user.currency}, e.g. <code>5</code>`, { parse_mode: "HTML" }));
       }
       try {
-        const g = await createGift(ctx.user.id, Math.round(val * 100), ctx.me.username);
+        const g = await createWalletGift(ctx.user.id, Math.round(val * 100), ctx.me.username);
         const share = `https://t.me/share/url?url=${encodeURIComponent(g.deepLink)}&text=${encodeURIComponent(`🎁 I sent you ${fmt(g.amountMinor, g.currency)} on ${config.STORE_NAME}! Tap to claim.`)}`;
         return flowEnd(ctx, () => ctx.reply(
           [
