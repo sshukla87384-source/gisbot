@@ -19,6 +19,7 @@ import {
   getMiniAppConfig,
   miniAppReachableUrl,
   milestoneProgress,
+  referralEarnings,
   getCartCoupon,
   convertMinor,
   getBnplStatus,
@@ -639,53 +640,71 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
   // Referral rewards are credited to the WALLET, so they are wallet-currency
   // amounts. Printing them with user.currency mislabelled the figure after a
   // currency switch — and disagreed with 👤 My Account, which gets it right.
-  const [stats, cfg, wallet, mile] = await Promise.all([getReferralStats(user.id), getReferralConfig(), getWallet(user.id), milestoneProgress(user.id).catch(() => null)]);
+  const [stats, cfg, wallet, mile, earn] = await Promise.all([
+    getReferralStats(user.id), getReferralConfig(), getWallet(user.id),
+    milestoneProgress(user.id).catch(() => null), referralEarnings(user.id).catch(() => null),
+  ]);
+  const link = `https://t.me/${botUsername}?start=ref_${user.referralCode}`;
+  const store = loadConfig().STORE_NAME;
+  const shareText = `🎁 Join ${store} — instant digital products at the best prices! Use my link:`;
+  const pct = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, ""));
+  const months = cfg.commissionMonths;
+  const forHowLong = months > 0 ? `for the next <b>${months} month${months === 1 ? "" : "s"}</b>` : "<b>for life</b>";
+  const firstTier = mile?.cfg.tiers[0] ?? null;
+  const what = mile?.cfg.mode === "purchased" ? "friends who buy" : "friends";
+
+  // The pitch, in one breath: the bonus (if any), the commission, how long.
+  const pitch: string[] = [];
+  if (firstTier) pitch.push(`🎯 <b>Refer ${firstTier.count} ${what} → get $${firstTier.rewardUsd.toFixed(2)} bonus!</b>`);
+  pitch.push(`💸 Earn <b>${pct(cfg.firstPct)}%</b> on every friend's first order${cfg.repeatPct > 0 ? ` + <b>${pct(cfg.repeatPct)}%</b> on everything they buy ${forHowLong}` : ""}.`);
+  pitch.push("💰 Paid straight into your wallet — spend it on any product.");
+
+  // Earnings: credited vs held, and the hold's countdown.
+  const money: string[] = [`👥 Invited: <b>${num(stats.invited)}</b>   ·   🛍 Bought: <b>${num(stats.purchased)}</b>`, `💰 Earned: <b>${fmt(stats.earnedMinor, wallet.currency)}</b>`];
+  if (earn && earn.heldCount > 0) {
+    const hrs = earn.nextReleaseAt ? Math.max(1, Math.ceil((earn.nextReleaseAt.getTime() - Date.now()) / 3_600_000)) : 0;
+    money.push(earn.readyCount > 0
+      ? `⏳ Ready to transfer: <b>${fmt(earn.heldMinor, earn.heldCurrency)}</b> — tap 💰 Transfer to wallet below.`
+      : `⏳ On hold: <b>${fmt(earn.heldMinor, earn.heldCurrency)}</b> — unlocks in ~${hrs}h (${cfg.holdHours}h anti-fraud hold), then moves to your wallet by itself.`);
+  }
+
+  // Milestone ladder + progress bar.
   const ladder: string[] = [];
   if (mile) {
-    const what = mile.cfg.mode === "purchased" ? "friends who buy" : "friends invited";
-    ladder.push(HR, `🏆 <b>Milestone bonuses</b> (${what})`);
-    for (const t of mile.cfg.tiers.slice(0, 6)) ladder.push(`${mile.count >= t.count ? "✅" : "▫️"} <b>${t.count}</b> → <b>$${t.rewardUsd.toFixed(2)}</b> cashback`);
+    ladder.push(HR, `🏆 <b>Bonus ladder</b> (${what})`);
+    for (const t of mile.cfg.tiers.slice(0, 6)) ladder.push(`${mile.count >= t.count ? "✅" : "▫️"} <b>${t.count}</b> → <b>$${t.rewardUsd.toFixed(2)}</b>`);
     if (mile.cfg.repeatLast && mile.cfg.tiers.length) {
       const last = mile.cfg.tiers[mile.cfg.tiers.length - 1]!;
       ladder.push(`🔁 …and <b>$${last.rewardUsd.toFixed(2)}</b> again for every further <b>${last.count}</b>`);
     }
     if (mile.next) {
       const filled = Math.max(0, Math.min(10, Math.round((mile.count / mile.next.count) * 10)));
-      ladder.push(`${"🟩".repeat(filled)}${"⬜".repeat(10 - filled)} <b>${mile.count}/${mile.next.count}</b> — ${mile.next.count - mile.count} more to unlock $${mile.next.rewardUsd.toFixed(2)}`);
+      ladder.push(`${"🟩".repeat(filled)}${"⬜".repeat(10 - filled)} <b>${mile.count}/${mile.next.count}</b> — ${mile.next.count - mile.count} more → $${mile.next.rewardUsd.toFixed(2)}`);
     } else {
-      ladder.push(`🎉 You have unlocked every milestone (${mile.count} so far).`);
+      ladder.push(`🎉 Every milestone unlocked (${mile.count} so far).`);
     }
-    if (mile.paidUsd > 0) ladder.push(`💵 Milestone cashback received so far: <b>$${mile.paidUsd.toFixed(2)}</b>`);
+    if (mile.paidUsd > 0) ladder.push(`💵 Bonuses received: <b>$${mile.paidUsd.toFixed(2)}</b>`);
   }
-  const link = `https://t.me/${botUsername}?start=ref_${user.referralCode}`;
-  const store = loadConfig().STORE_NAME;
-  const shareText = `🎁 Join ${store} — instant digital products at the best prices! Use my link:`;
+
   const kb = new InlineKeyboard()
     .url("📤 Share my link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`)
     .row();
+  if (earn && earn.heldCount > 0) {
+    kb.add(sbtn(earn.readyCount > 0 ? `💰 Transfer ${fmt(earn.heldMinor, earn.heldCurrency)} to wallet` : "💰 Transfer to wallet", cb("ref", "claim"), earn.readyCount > 0 ? "success" : "primary")).row();
+  }
+  kb.add(sbtn("💳 My wallet", cb("wal", "view"), "primary")).row();
   backToMenuRow(kb);
   return {
     text: [
       header(`🎁 ${bold("Refer & Earn")}`),
       "",
-      `👥 <b>Invited:</b>  <code>${num(stats.invited)}</code>`,
-      `🛍 <b>Purchased:</b>  <code>${num(stats.purchased)}</code>`,
-      `💰 <b>Earned:</b>  <code>${fmt(stats.earnedMinor, wallet.currency)}</code>`,
-      `📊 <b>Status:</b>  ${stats.invited > 0 ? "ACTIVE" : "NOT STARTED"}`,
+      ...pitch,
       HR,
-      "Invite friends and earn <b>real wallet rewards</b> on everything they buy! 💸",
-      HR,
-      `🎯 <b>How it works</b>`,
-      "1️⃣ Share your personal link below.",
-      "2️⃣ Your friend taps it and starts the bot.",
-      "3️⃣ Every time they buy, you earn a % of their order — paid straight to your wallet.",
-      "",
-      `💰 <b>Reward scheme</b>`,
-      `• Friend's <b>first purchase</b>: you earn <b>${cfg.firstPct}%</b>`,
-      `• <b>Every purchase after that</b>: you earn <b>${cfg.repeatPct}%</b>`,
-      `• Rewards are held for <b>${cfg.holdHours}h</b> (anti-fraud), then auto-credited to your 💰 Wallet.`,
-      `• No limit — the more friends buy, the more you earn. Spend rewards on any product.`,
+      ...money,
       ...ladder,
+      HR,
+      "⚡ <b>3 steps</b>",
+      "1️⃣ Share your link  →  2️⃣ Friend joins &amp; buys  →  3️⃣ Money lands in your wallet",
       HR,
       `🔗 <b>Your link</b> (tap to copy)`,
       `<code>${link}</code>`,

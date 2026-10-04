@@ -15,6 +15,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   sweepTerminalPayments,
   runRenewalReminders,
   runReferralMilestones,
+  releaseMaturedReferralRewards,
   refundExpiredGifts,
   dailyReportExtras,
   getBackupConfig,
@@ -220,48 +221,8 @@ async function releaseHolds(): Promise<void> {
     await prisma.commissionEntry.update({ where: { id: entry.id }, data: { releasedAt: now } });
   }
 
-  const rewards = await prisma.referralReward.findMany({
-    where: { status: "PENDING_HOLD", holdUntil: { lt: now } },
-    include: { referred: { select: { id: true } } },
-    take: 200,
-  });
-  for (const reward of rewards) {
-    const order = await prisma.order.findUnique({ where: { id: reward.orderId } });
-    // Anti-fraud (PRD §6.5): withhold if the qualifying order was refunded.
-    if (!order || ["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED"].includes(order.status)) {
-      await prisma.referralReward.update({
-        where: { id: reward.id },
-        data: { status: "WITHHELD", withheldReason: "qualifying order refunded/cancelled" },
-      });
-      continue;
-    }
-    const wallet = await prisma.wallet.findUnique({ where: { userId: reward.referrerId } });
-    if (!wallet) {
-      await prisma.referralReward.update({
-        where: { id: reward.id },
-        data: { status: "WITHHELD", withheldReason: "no wallet" },
-      });
-      continue;
-    }
-    // Rewards are created in the ORDER's currency; wallets are USD. Treating a
-    // mismatch as fraud meant the referral programme silently never paid out on
-    // a single INR order. Convert exactly instead.
-    const rewardMinor = wallet.currency === reward.currency
-      ? reward.amountMinor
-      : convertMinor(reward.amountMinor, reward.currency, wallet.currency);
-    const paid = await credited(adjustWallet({
-      userId: reward.referrerId,
-      amountMinor: BigInt(rewardMinor),
-      type: "REFERRAL_REWARD",
-      note: `referral reward (${reward.orderId})`,
-      idempotencyKey: `refr:${reward.id}`,
-    }));
-    if (!paid) continue; // still PENDING_HOLD — retried on the next tick
-    await prisma.referralReward.update({
-      where: { id: reward.id },
-      data: { status: "CREDITED", creditedAt: now },
-    });
-  }
+  // Referral rewards: shared with the customer's "Transfer to wallet" button.
+  await releaseMaturedReferralRewards({ limit: 200 });
 }
 
 /** Low-stock alerts to the admin channel, at most once per variant per day (hourly). */

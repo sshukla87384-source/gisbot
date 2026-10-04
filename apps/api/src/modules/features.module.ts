@@ -14,6 +14,7 @@ import {
   runReferralMilestones,
   getReferralConfig,
   setReferralRate,
+  setReferralCommissionMonths,
   getNowPaymentsCreds,
   getPaymentRails,
   getRenewalConfig,
@@ -76,7 +77,7 @@ const bodies = {
     remove: z.string().max(64).optional(),
   }),
   crypto: z.object({ networks: z.array(z.string().max(24)).max(40) }),
-  referral: z.object({ firstPct: z.number().min(0).max(100).optional(), repeatPct: z.number().min(0).max(100).optional() }),
+  referral: z.object({ firstPct: z.number().min(0).max(100).optional(), repeatPct: z.number().min(0).max(100).optional(), commissionMonths: z.number().int().min(0).max(120).optional() }),
   milestones: z.object({
     enabled: z.boolean().optional(),
     mode: z.enum(["purchased", "invited"]).optional(),
@@ -117,7 +118,7 @@ async function snapshot() {
     agents: { ids: agents },
     alwaysAdmin: { telegramId: alwaysId, handle: alwaysHandle },
     faq,
-    referral: { firstPct: referral.firstPct, repeatPct: referral.repeatPct, holdHours: referral.holdHours },
+    referral: { firstPct: referral.firstPct, repeatPct: referral.repeatPct, holdHours: referral.holdHours, commissionMonths: referral.commissionMonths },
     milestones: { ...mile.cfg, payouts: mile.payouts, paidUsd: mile.paidUsd, eligibleReferrers: mile.eligibleReferrers, top: mile.top },
     crypto: {
       configured: np !== null,
@@ -194,6 +195,7 @@ export class FeaturesController {
         const b = validate(bodies.referral, body);
         if (b.firstPct !== undefined) await setReferralRate("first", b.firstPct);
         if (b.repeatPct !== undefined) await setReferralRate("repeat", b.repeatPct);
+        if (b.commissionMonths !== undefined) await setReferralCommissionMonths(b.commissionMonths);
         break;
       }
       case "milestones": {

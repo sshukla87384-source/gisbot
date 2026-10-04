@@ -1,5 +1,5 @@
 import { promoFlagsCached } from "./promos.service.js";
-import { prisma, type Prisma } from "@gis/database";
+import { prisma, type Currency, type Prisma } from "@gis/database";
 import { convertMinor } from "./fx.js";
 import { enqueueTelegramMessage } from "./queues.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
@@ -14,6 +14,8 @@ async function settingInt(tx: Tx, key: string, fallback: number): Promise<number
 export const REF_FIRST_KEY = "referral.reward_pct_bp";
 export const REF_REPEAT_KEY = "referral.reward_pct_bp_repeat";
 export const REF_HOLD_KEY = "referral.hold_hours";
+/** Months after a friend's FIRST purchase during which repeat commission is paid (0 = lifetime). */
+export const REF_MONTHS_KEY = "referral.commission_months";
 
 /**
  * Create a held referral reward for the referrer, if the buyer was referred.
@@ -30,6 +32,16 @@ export async function grantReferralRewardTx(
   // Never pay someone for referring themselves. Attribution refuses it at /start,
   // but the payout is where the money leaves, so it is checked here too.
   if (opts.referrerId === opts.referredId) return;
+  if (!opts.isFirst) {
+    // Repeat commission runs for a window after the friend's first purchase
+    // when the admin set one ("earn for the next 6 months"); 0 = lifetime.
+    const months = await settingInt(tx, REF_MONTHS_KEY, 0);
+    if (months > 0) {
+      const friend = await tx.user.findUnique({ where: { id: opts.referredId }, select: { firstPurchaseAt: true } });
+      const since = friend?.firstPurchaseAt ? Date.now() - friend.firstPurchaseAt.getTime() : 0;
+      if (since > months * 30.44 * 86_400_000) return;
+    }
+  }
   const bp = opts.isFirst ? await settingInt(tx, REF_FIRST_KEY, 500) : await settingInt(tx, REF_REPEAT_KEY, 200);
   if (bp <= 0) return;
   const amount = Math.floor((opts.netMinor * bp) / 10_000);
@@ -50,15 +62,80 @@ export async function grantReferralRewardTx(
   });
 }
 
-export interface ReferralConfig { firstPct: number; repeatPct: number; holdHours: number }
+export interface ReferralConfig { firstPct: number; repeatPct: number; holdHours: number; commissionMonths: number }
 
 export async function getReferralConfig(): Promise<ReferralConfig> {
-  const rows = await prisma.setting.findMany({ where: { key: { in: [REF_FIRST_KEY, REF_REPEAT_KEY, REF_HOLD_KEY] } } });
+  const rows = await prisma.setting.findMany({ where: { key: { in: [REF_FIRST_KEY, REF_REPEAT_KEY, REF_HOLD_KEY, REF_MONTHS_KEY] } } });
   const val = (k: string, fb: number) => {
     const v = rows.find((r) => r.key === k)?.value;
     return typeof v === "number" ? v : fb;
   };
-  return { firstPct: val(REF_FIRST_KEY, 500) / 100, repeatPct: val(REF_REPEAT_KEY, 200) / 100, holdHours: val(REF_HOLD_KEY, 48) };
+  return { firstPct: val(REF_FIRST_KEY, 500) / 100, repeatPct: val(REF_REPEAT_KEY, 200) / 100, holdHours: val(REF_HOLD_KEY, 48), commissionMonths: Math.max(0, Math.round(val(REF_MONTHS_KEY, 0))) };
+}
+
+/** How long repeat commission keeps flowing after a friend's first purchase (0 = lifetime, max 120 months). */
+export async function setReferralCommissionMonths(months: number): Promise<void> {
+  const m = Math.max(0, Math.min(120, Math.round(months)));
+  await prisma.setting.upsert({ where: { key: REF_MONTHS_KEY }, create: { key: REF_MONTHS_KEY, value: m }, update: { value: m } });
+}
+
+/**
+ * Credit matured referral rewards (hold passed) to the referrer's wallet.
+ * The cron runs it for everyone every 10 minutes; the customer's "Transfer to
+ * wallet" button runs it for one referrer right now. Replay-safe through the
+ * ledger's unique idempotency key.
+ */
+export async function releaseMaturedReferralRewards(opts: { referrerId?: string; limit?: number } = {}): Promise<{ credited: number; creditedMinor: number; currency: Currency | null }> {
+  const now = new Date();
+  const rewards = await prisma.referralReward.findMany({
+    where: { status: "PENDING_HOLD", holdUntil: { lt: now }, ...(opts.referrerId ? { referrerId: opts.referrerId } : {}) },
+    take: opts.limit ?? 200,
+  });
+  let credited = 0;
+  let creditedMinor = 0;
+  let currency: Currency | null = null;
+  for (const reward of rewards) {
+    const order = await prisma.order.findUnique({ where: { id: reward.orderId }, select: { status: true } });
+    // Anti-fraud: withhold if the qualifying order was refunded.
+    if (!order || ["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED"].includes(order.status)) {
+      await prisma.referralReward.update({ where: { id: reward.id }, data: { status: "WITHHELD", withheldReason: "qualifying order refunded/cancelled" } });
+      continue;
+    }
+    const wallet = await prisma.wallet.findUnique({ where: { userId: reward.referrerId }, select: { currency: true } });
+    if (!wallet) {
+      await prisma.referralReward.update({ where: { id: reward.id }, data: { status: "WITHHELD", withheldReason: "no wallet" } });
+      continue;
+    }
+    // Rewards are created in the ORDER's currency; convert to the wallet's.
+    const rewardMinor = wallet.currency === reward.currency ? reward.amountMinor : convertMinor(reward.amountMinor, reward.currency, wallet.currency);
+    let paid = false;
+    try {
+      await adjustWallet({ userId: reward.referrerId, amountMinor: BigInt(rewardMinor), type: "REFERRAL_REWARD", note: `referral reward (${reward.orderId})`, idempotencyKey: `refr:${reward.id}` });
+      paid = true;
+    } catch (e) {
+      paid = (e as { code?: string } | null)?.code === "P2002"; // already in the ledger → mark it
+    }
+    if (!paid) continue; // stays PENDING_HOLD — retried next tick
+    await prisma.referralReward.update({ where: { id: reward.id }, data: { status: "CREDITED", creditedAt: now } });
+    credited++;
+    creditedMinor += rewardMinor;
+    currency = wallet.currency;
+  }
+  return { credited, creditedMinor, currency };
+}
+
+/** What the customer sees on Refer & Earn: held vs credited, and when the next hold lifts. */
+export async function referralEarnings(userId: string): Promise<{ heldMinor: number; heldCurrency: Currency; heldCount: number; nextReleaseAt: Date | null; readyCount: number }> {
+  const now = new Date();
+  const [wallet, held, ready, next] = await Promise.all([
+    prisma.wallet.findUnique({ where: { userId }, select: { currency: true } }),
+    prisma.referralReward.findMany({ where: { referrerId: userId, status: "PENDING_HOLD" }, select: { amountMinor: true, currency: true } }),
+    prisma.referralReward.count({ where: { referrerId: userId, status: "PENDING_HOLD", holdUntil: { lt: now } } }),
+    prisma.referralReward.findFirst({ where: { referrerId: userId, status: "PENDING_HOLD", holdUntil: { gte: now } }, orderBy: { holdUntil: "asc" }, select: { holdUntil: true } }),
+  ]);
+  const cur = (wallet?.currency ?? "USD") as Currency;
+  const heldMinor = held.reduce((s, r) => s + (r.currency === cur ? r.amountMinor : convertMinor(r.amountMinor, r.currency, cur)), 0);
+  return { heldMinor, heldCurrency: cur, heldCount: held.length, nextReleaseAt: next?.holdUntil ?? null, readyCount: ready };
 }
 
 /** Set a referral reward rate (percent, e.g. 5 or 2). */

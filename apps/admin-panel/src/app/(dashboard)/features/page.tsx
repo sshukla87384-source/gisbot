@@ -22,7 +22,7 @@ interface Features {
   agents: { ids: string[] };
   alwaysAdmin: { telegramId: string | null; handle: string | null };
   faq: Array<{ id: string; q: string; a: string }>;
-  referral: { firstPct: number; repeatPct: number; holdHours: number };
+  referral: { firstPct: number; repeatPct: number; holdHours: number; commissionMonths: number };
   milestones: {
     enabled: boolean; mode: "purchased" | "invited"; repeatLast: boolean; tiers: Array<{ count: number; rewardUsd: number }>;
     payouts: number; paidUsd: number; eligibleReferrers: number;
@@ -314,9 +314,9 @@ function Terminal({ f }: { f: Features }) {
 function Referral({ f }: { f: Features }) {
   const rates = useFeature("referral");
   const m = useFeature("milestones");
-  const [r, setR] = useState({ first: f.referral.firstPct, repeat: f.referral.repeatPct });
+  const [r, setR] = useState({ first: f.referral.firstPct, repeat: f.referral.repeatPct, months: f.referral.commissionMonths });
   const [tier, setTier] = useState({ count: "", usd: "" });
-  useEffect(() => setR({ first: f.referral.firstPct, repeat: f.referral.repeatPct }), [f.referral]);
+  useEffect(() => setR({ first: f.referral.firstPct, repeat: f.referral.repeatPct, months: f.referral.commissionMonths }), [f.referral]);
   const ms = f.milestones;
   return (
     <Section
@@ -329,8 +329,9 @@ function Referral({ f }: { f: Features }) {
           <h3 className="text-sm font-semibold">Percentage rewards</h3>
           <NumberField label="Friend's first purchase (%)" value={r.first} step={0.5} onChange={(n) => setR({ ...r, first: n })} suffix="%" />
           <NumberField label="Every purchase after (%)" value={r.repeat} step={0.5} onChange={(n) => setR({ ...r, repeat: n })} suffix="%" />
+          <NumberField label="Repeat commission runs for (months after friend's first purchase, 0 = lifetime)" value={r.months} onChange={(n) => setR({ ...r, months: n })} suffix="months" />
           <p className="text-xs text-slate-500">Held {f.referral.holdHours} h against refunds, then credited to the referrer's wallet.</p>
-          <Button variant="secondary" onClick={() => rates.mutate({ firstPct: r.first, repeatPct: r.repeat })} disabled={rates.isPending}>Save rates</Button>
+          <Button variant="secondary" onClick={() => rates.mutate({ firstPct: r.first, repeatPct: r.repeat, commissionMonths: Math.round(r.months) })} disabled={rates.isPending}>Save rates</Button>
         </div>
         <div className="space-y-3">
           <h3 className="text-sm font-semibold">Milestone cashback ladder</h3>

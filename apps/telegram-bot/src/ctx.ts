@@ -120,6 +120,7 @@ export interface SessionData {
     | "admin_risk_orders"
     | "admin_always_set"
     | "admin_refmile_add"
+    | "admin_ref_months"
     | "admin_agent_add"
     | "admin_faq_q"
     | "admin_faq_a"

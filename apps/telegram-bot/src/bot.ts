@@ -2,6 +2,8 @@ import { isDev, loadConfig } from "@gis/config";
 import {
   addToCart,
   adjustWallet,
+  releaseMaturedReferralRewards,
+  referralEarnings,
   changeQty,
   checkoutWithWallet,
   checkoutWithBnpl,
@@ -2841,6 +2843,22 @@ export function createBot(): Bot<Ctx> {
         case "ref:view":
           await render(ctx, await views.referralView(user, ctx.me.username), true);
           break;
+        case "ref:claim": {
+          // Matured rewards move now instead of on the next 10-minute tick;
+          // ones still in the anti-fraud hold stay where they are.
+          const r = await releaseMaturedReferralRewards({ referrerId: user.id, limit: 100 }).catch(() => ({ credited: 0, creditedMinor: 0, currency: null }));
+          const earnNow = await referralEarnings(user.id).catch(() => null);
+          await ctx.answerCallbackQuery({
+            text: r.credited > 0
+              ? `✅ ${fmt(r.creditedMinor, r.currency ?? user.currency)} moved to your wallet!`
+              : earnNow && earnNow.heldCount > 0
+                ? `⏳ Still on hold — unlocks in ~${Math.max(1, Math.ceil(((earnNow.nextReleaseAt?.getTime() ?? Date.now()) - Date.now()) / 3_600_000))}h, then it moves to your wallet automatically.`
+                : "Nothing waiting — everything is already in your wallet.",
+            show_alert: r.credited === 0,
+          }).catch(() => undefined);
+          await render(ctx, await views.referralView(user, ctx.me.username), true);
+          break;
+        }
 
         case "sup:home":
           await render(ctx, await views.supportHomeView(user), true);

@@ -73,6 +73,7 @@ import {
   adminReplaceOrderItem,
   getReferralConfig,
   setReferralRate,
+  setReferralCommissionMonths,
   milestoneDashboard,
   campaignTemplates,
   sendCampaign,
@@ -1360,16 +1361,17 @@ async function refRatesView(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard()
     .text(`✏️ First purchase: ${c.firstPct}%`, cb("adm", "refset", "first")).row()
     .text(`✏️ Repeat purchase: ${c.repeatPct}%`, cb("adm", "refset", "repeat")).row()
+    .text(`⏳ Repeat commission for: ${c.commissionMonths > 0 ? `${c.commissionMonths} month${c.commissionMonths === 1 ? "" : "s"}` : "lifetime"}`, cb("adm", "refmonths")).row()
     .text("🏆 Milestone cashback dashboard", cb("adm", "refmile")).row()
     .text("◀️ Back", cb("adm", "home"));
   await show(ctx, [
     "🎁 <b>Referral rewards</b>",
     "",
-    `Referrers earn a % of each referred order (credited to their wallet after a ${c.holdHours}h hold).`,
+    `Referrers earn a % of each referred order (credited to their wallet after a ${c.holdHours}h hold; customers can also tap 💰 Transfer to wallet once the hold has passed).`,
     `• First purchase: <b>${c.firstPct}%</b>`,
-    `• Every purchase after: <b>${c.repeatPct}%</b>`,
+    `• Every purchase after: <b>${c.repeatPct}%</b> — ${c.commissionMonths > 0 ? `for <b>${c.commissionMonths} months</b> after the friend's first purchase` : "<b>for life</b>"}`,
     "",
-    "Tap a rate to change it.",
+    "Tap a rate to change it. The customer screen and the 🎯 Campaign post read these live.",
   ].join("\n"), kb, true);
 }
 
@@ -2981,6 +2983,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     case "refrates": return refRatesView(ctx);
     case "refmile": return refMilestoneView(ctx);
+    case "refmonths":
+      ctx.session.awaiting = "admin_ref_months";
+      await askStep(ctx, "⏳ For how many <b>months</b> after a friend's first purchase should the referrer keep earning repeat commission? Send a number (e.g. <code>6</code>), or <code>0</code> for lifetime.");
+      return;
     case "camp": return campaignsView(ctx, id === "g" ? "g" : "c");
     case "campwhy": {
       const t = (await campaignTemplates()).find((x) => x.key === id);
@@ -5144,6 +5150,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     for (const g of good) await addMilestoneTier(g.count, g.rewardUsd);
     flash(ctx, `✅ Added ${good.map((g) => `${g.count} → $${g.rewardUsd.toFixed(2)}`).join(", ")}.`);
     await refMilestoneView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_ref_months") {
+    const m = Number.parseInt(text.replace(/\D/g, ""), 10);
+    if (!Number.isFinite(m) || m < 0 || m > 120) { ctx.session.awaiting = "admin_ref_months"; await ctx.reply("Send a number of months between 0 and 120 (0 = lifetime)."); return true; }
+    await setReferralCommissionMonths(m);
+    flash(ctx, m > 0 ? `✅ Repeat commission now runs for <b>${m} month${m === 1 ? "" : "s"}</b> after a friend's first purchase.` : "✅ Repeat commission now runs for <b>life</b>.");
+    await refRatesView(ctx);
     return true;
   }
   if (awaiting === "admin_ref_first" || awaiting === "admin_ref_repeat") {

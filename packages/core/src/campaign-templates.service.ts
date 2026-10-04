@@ -61,20 +61,26 @@ export async function campaignTemplates(): Promise<CampaignTemplate[]> {
 
   // 🎁 Refer & Earn
   {
-    const ladder = mile.enabled && mile.tiers.length
-      ? ["", "🏆 <b>Milestone bonuses</b>", ...mile.tiers.slice(0, 4).map((t) => `• ${t.count} ${mile.mode === "purchased" ? "friends who buy" : "friends"} → <b>$${t.rewardUsd.toFixed(2)}</b> cashback`)]
+    const what = mile.mode === "purchased" ? "friends who buy" : "friends";
+    const first = mile.enabled ? mile.tiers[0] : undefined;
+    const months = ref.commissionMonths;
+    const forHowLong = months > 0 ? `for the next <b>${months} month${months === 1 ? "" : "s"}</b>` : "<b>for life</b>";
+    const ladder = mile.enabled && mile.tiers.length > 1
+      ? ["", "🏆 <b>Bonus ladder</b>", ...mile.tiers.slice(0, 4).map((t) => `• ${t.count} ${what} → <b>$${t.rewardUsd.toFixed(2)}</b>`)]
       : [];
     out.push({
       key: "refer",
       label: "🎁 Refer & Earn",
       unavailable: !flags.referral ? "Referral promotion is switched off (Marketing → Promotions)." : noBot,
       html: [
-        `🎁 <b>Earn money by inviting friends to ${store}!</b>`,
+        first
+          ? `🎁 <b>Refer ${first.count} ${what} → get $${first.rewardUsd.toFixed(2)} bonus!</b>`
+          : `🎁 <b>Earn money by inviting friends to ${store}!</b>`,
         "",
-        `<blockquote>💸 <b>${pct(ref.firstPct)}%</b> of your friend's first order${ref.repeatPct > 0 ? `\n🔁 <b>${pct(ref.repeatPct)}%</b> of every order after that` : ""}\n💰 Paid straight into your wallet — spend it on any product</blockquote>`,
+        `<blockquote>💸 <b>${pct(ref.firstPct)}%</b> commission on every friend's first order${ref.repeatPct > 0 ? `\n🔁 <b>${pct(ref.repeatPct)}%</b> on everything they buy ${forHowLong}` : ""}${first ? `\n🏆 <b>$${first.rewardUsd.toFixed(2)}</b> bonus the moment ${first.count} ${what} are in` : ""}\n💰 Paid straight into your wallet — spend it on any product</blockquote>`,
         ...ladder,
         "",
-        "1️⃣ Tap the button below  2️⃣ Share your personal link  3️⃣ Watch your wallet grow 🚀",
+        "1️⃣ Tap the button  2️⃣ Share your link  3️⃣ Watch your wallet grow 🚀",
       ].join("\n"),
       button: btn("🎁 Get my referral link", "refer"),
     });
