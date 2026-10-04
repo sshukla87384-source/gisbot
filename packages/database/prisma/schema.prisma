@@ -800,6 +800,8 @@ model OrderItem {
   /// this week?", so expiry reminders and renewals had nothing to stand on.
   /// null = never expires, or delivered before this column existed.
   expiresAt       DateTime?
+  /// When the "expires soon — renew" reminder went out; null = not yet.
+  renewalRemindedAt DateTime?
   /// Cost of the unit actually delivered, snapshotted at delivery in USD minor
   /// units. Snapshotted because supplier costs change and history must not.
   costMinor       Int?
@@ -1564,4 +1566,24 @@ model TerminalPayment {
   @@index([sweepStatus, nextSweepAt])
   @@index([kind, refId])
   @@index([userId, createdAt])
+}
+
+/// A wallet gift: the sender's balance moves into a code that anyone can
+/// redeem in the bot (deep link t.me/<bot>?start=gift_<code>). Unclaimed codes
+/// are refunded to the sender after `expiresAt`.
+model GiftVoucher {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  senderId    String
+  amountMinor Int
+  currency    Currency
+  note        String?
+  status      String    @default("PENDING") // PENDING | CLAIMED | REFUNDED
+  claimedById String?
+  claimedAt   DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  @@index([senderId, createdAt])
+  @@index([status, expiresAt])
 }

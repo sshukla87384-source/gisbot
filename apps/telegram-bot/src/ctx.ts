@@ -111,6 +111,18 @@ export interface SessionData {
     | "admin_upi_max"
     | "admin_tm_seed"
     | "admin_tm_payout"
+    | "admin_renew_days"
+    | "admin_renew_pct"
+    | "admin_combo_pct"
+    | "admin_combo_min"
+    | "admin_risk_cap"
+    | "admin_risk_hours"
+    | "admin_agent_add"
+    | "admin_faq_q"
+    | "admin_faq_a"
+    | "wallet_gift_amount"
+    | "gift_code"
+    | "track_order"
     | "admin_bnpl_user"
     | "admin_bnpl_add"
     | "admin_bnpl_deduct"
@@ -185,6 +197,11 @@ export interface SessionData {
   tmChain?: string;
   /** The current home card, replaced (not stacked) on the next /start or /menu. */
   menuMsgId?: number;
+  /** FAQ question held between the two admin prompts. */
+  faqQTmp?: string;
+  /** Ticket text held while the FAQ hint is shown; set once the hint was offered. */
+  ticketDraft?: string;
+  ticketFaqShown?: boolean;
   /** Pending price-change announcement offered to the admin. */
   priceAlert?: { productId: string; oldMinor: number; newMinor: number; currency: string };
   /** Auto-translate provider being configured. */

@@ -87,6 +87,13 @@ import {
   revealOrderDeliveries,
   deliveredValue,
   enqueueTelegramMessage,
+  startRenewal,
+  createGift,
+  claimGift,
+  listMyGifts,
+  firstOrderAllowed,
+  matchFaq,
+  getOrderTracking,
   getOrderSummary,
   setUserCurrency,
   setUserLocale,
@@ -452,6 +459,36 @@ export function createBot(): Bot<Ctx> {
     return sentId;
   };
 
+  const trackText = async (userId: string, orderNumber: string): Promise<string> => {
+    const o = await getOrderTracking(userId, orderNumber);
+    if (!o) return "❌ No order with that number on your account. Check 📦 My orders for the exact number.";
+    const st: Record<string, string> = { PENDING_PAYMENT: "⌛ Awaiting payment", PAID: "💳 Paid — delivering", PENDING_FULFILLMENT: "🕐 Paid — being prepared by our team", AWAITING_STOCK: "📦 Paid — waiting for stock", COMPLETED: "✅ Delivered", CANCELLED: "🚫 Cancelled", EXPIRED: "⌛ Expired (unpaid)", REFUNDED: "↩️ Refunded", MANUAL_REVIEW: "🔍 Under review" };
+    const pay = o.payments[0];
+    const lines = [
+      `🔎 <b>Order ${escapeHtml(o.orderNumber)}</b>`,
+      `Status: <b>${st[o.status] ?? o.status}</b>`,
+      `Placed: ${o.createdAt.toISOString().slice(0, 16).replace("T", " ")} UTC${o.paidAt ? ` · Paid: ${o.paidAt.toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}`,
+      `Total: <b>${fmt(Math.max(0, o.subtotalMinor - o.discountMinor), o.currency)}</b>${pay ? ` via ${pay.provider.toLowerCase()}` : ""}`,
+      "",
+      "<b>Items</b>",
+      ...o.items.map((i) => `• ${escapeHtml(i.productNameSnap)}${i.variantNameSnap.toLowerCase() === "standard" ? "" : ` · ${escapeHtml(i.variantNameSnap)}`} ×${i.quantity} — ${i.fulfilledAt ? "✅ delivered" : "⏳ pending"}${i.expiresAt ? ` · valid till ${i.expiresAt.toISOString().slice(0, 10)}` : ""}`),
+      "",
+      "<i>Delivered values are in 📦 My orders (never shown here, so this message is safe to forward).</i>",
+    ];
+    return lines.join("\n");
+  };
+
+  const giftClaimText = (r: Awaited<ReturnType<typeof claimGift>>): string => {
+    if (r.ok) {
+      return r.fromSelf
+        ? `↩️ That was your own gift code — <b>${fmt(r.amountMinor, r.currency)}</b> is back in your wallet. New balance: <b>${fmt(Number(r.newBalanceMinor), r.currency)}</b>.`
+        : `🎁 <b>Gift redeemed!</b>\n\n<b>${fmt(r.amountMinor, r.currency)}</b> has been added to your wallet. New balance: <b>${fmt(Number(r.newBalanceMinor), r.currency)}</b>. Enjoy! 💖`;
+    }
+    return r.reason === "ALREADY_CLAIMED" ? "⚠️ That gift code has already been redeemed."
+      : r.reason === "EXPIRED" ? "⌛ That gift code has expired — the sender got the balance back."
+      : "❌ That doesn't look like a valid gift code. Check it and try again.";
+  };
+
   /**
    * The home card, exactly once: /start and /menu replace the previous home
    * card instead of stacking a new one under it. The command message itself
@@ -560,6 +597,13 @@ export function createBot(): Bot<Ctx> {
       const productId = await getProductIdBySlug(payload.slice(PRODUCT_DEEPLINK_PREFIX.length));
       if (productId) { ctx.session.buyProductId = productId; return render(ctx, await views.productView(ctx.user, productId), false); }
     }
+    // A gift code shared as a link: t.me/<bot>?start=gift_XXXXX-XXXXX
+    if (payload.startsWith("gift_")) {
+      const r = await claimGift(ctx.user.id, payload.slice(5));
+      await ctx.deleteMessage().catch(() => undefined);
+      await ctx.reply(giftClaimText(r), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🛍 Shop", cb("shp", "home", 1)) });
+      return showHome(ctx);
+    }
     // Deep links so an announcement button can open ANY section of the bot.
     switch (payload) {
       case "shop": return render(ctx, await views.shopHomeView(ctx.user, 1), false);
@@ -606,12 +650,21 @@ export function createBot(): Bot<Ctx> {
     return showHome(ctx);
   });
   bot.command("menu", async (ctx) => showHome(ctx));
+  // /track GIS-2026-000123 — status of one order, no secrets, shareable.
+  bot.command("track", async (ctx) => {
+    const num = ctx.match.trim().toUpperCase();
+    if (!num) {
+      ctx.session.awaiting = "track_order";
+      return ctx.reply("🔎 Send the order number you want to track (e.g. <code>GIS-2026-000123</code>):", { parse_mode: "HTML" });
+    }
+    return ctx.reply(await trackText(ctx.user.id, num), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") });
+  });
   bot.command("shop", async (ctx) => render(ctx, await views.shopHomeView(ctx.user, 1), false));
   bot.command("cart", async (ctx) => render(ctx, await views.cartViewKb(ctx.user), false));
   bot.command("orders", async (ctx) => render(ctx, await views.ordersView(ctx.user, 1), false));
   bot.command("wallet", async (ctx) => render(ctx, await views.walletView(ctx.user), false));
   bot.command("support", async (ctx) => render(ctx, await views.supportHomeView(ctx.user), false));
-  bot.command("help", async (ctx) => render(ctx, views.helpView(), false));
+  bot.command("help", async (ctx) => render(ctx, await views.helpView(), false));
   bot.command("api", async (ctx) => render(ctx, await views.apiKeysView(ctx.user), false));
   bot.command("replace", async (ctx) => render(ctx, await views.replaceListView(ctx.user), false));
   bot.command(["language", "lang"], async (ctx) => render(ctx, views.languageView(ctx.user), false));
@@ -1310,8 +1363,54 @@ export function createBot(): Bot<Ctx> {
       else await ctx.reply(`❌ ${couponReason(res.reason ?? "INVALID")}`);
       return render(ctx, await views.checkoutSummaryView(ctx.user), false);
     }
+    if (awaiting === "track_order") {
+      return ctx.reply(await trackText(ctx.user.id, ctx.message.text.trim().toUpperCase()), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") });
+    }
+    if (awaiting === "wallet_gift_amount") {
+      flowRemember(ctx, ctx.message);
+      const val = Number.parseFloat(ctx.message.text.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(val) || val <= 0) {
+        ctx.session.awaiting = "wallet_gift_amount";
+        return flowStep(ctx, () => ctx.reply(`Please send a valid amount in ${ctx.user.currency}, e.g. <code>5</code>`, { parse_mode: "HTML" }));
+      }
+      try {
+        const g = await createGift(ctx.user.id, Math.round(val * 100), ctx.me.username);
+        const share = `https://t.me/share/url?url=${encodeURIComponent(g.deepLink)}&text=${encodeURIComponent(`🎁 I sent you ${fmt(g.amountMinor, g.currency)} on ${config.STORE_NAME}! Tap to claim.`)}`;
+        return flowEnd(ctx, () => ctx.reply(
+          [
+            "🎁 <b>Gift created!</b>",
+            "",
+            `Amount: <b>${fmt(g.amountMinor, g.currency)}</b> (taken from your wallet)`,
+            `Code: <code>${g.code}</code>`,
+            `Link: ${g.deepLink}`,
+            "",
+            `Send the link or the code to your friend — they tap it and the balance lands in their wallet. Unclaimed after 30 days → refunded to you.`,
+          ].join("\n"),
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().url("📤 Share with a friend", share).row().copyText("📋 Copy code", g.code).row().text("💳 Wallet", cb("wal", "view")) },
+        ));
+      } catch (e) {
+        return flowEnd(ctx, () => ctx.reply(isCoreError(e) && e.code === "INSUFFICIENT_BALANCE" ? "💳 Not enough balance for that gift — top up first or choose a smaller amount." : `⚠️ ${isCoreError(e) ? e.message : "Could not create the gift."}`, { reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")) }));
+      }
+    }
+    if (awaiting === "gift_code") {
+      flowRemember(ctx, ctx.message);
+      const r = await claimGift(ctx.user.id, ctx.message.text);
+      return flowEnd(ctx, () => ctx.reply(giftClaimText(r), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🛍 Shop", cb("shp", "home", 1)) }));
+    }
     if (awaiting === "ticket") {
-      const ticket = await createTicket(ctx.user.id, "OTHER", ctx.message.text.trim().slice(0, 2000));
+      const body = ctx.message.text.trim().slice(0, 2000);
+      // Quick answers first: if the FAQ covers it, offer that before a ticket.
+      const hits = await matchFaq(body, 3).catch(() => []);
+      if (hits.length > 0 && !ctx.session.ticketFaqShown) {
+        ctx.session.ticketFaqShown = true;
+        ctx.session.ticketDraft = body;
+        const kb = new InlineKeyboard();
+        for (const h of hits) kb.text(`💡 ${h.q.slice(0, 48)}`, cb("faq", "q", h.id)).row();
+        kb.text("🎫 No, open the ticket", cb("sup", "newgo")).row();
+        return ctx.reply("These might answer it right away — or open the ticket anyway:", { reply_markup: kb });
+      }
+      ctx.session.ticketFaqShown = undefined;
+      const ticket = await createTicket(ctx.user.id, "OTHER", body);
       return ctx.reply(`🎫 Ticket <b>#${ticket.ticketNumber}</b> created. Support will reply here.`, {
         parse_mode: "HTML",
       });
@@ -1352,6 +1451,19 @@ export function createBot(): Bot<Ctx> {
       await ctx.editMessageReplyMarkup().catch(() => undefined); // remove buttons so it can't be tapped again
     }
 
+    // New-account first-order cap, enforced on every rail (the checkout screen
+    // already hides the buttons; this covers stale buttons and deep links).
+    if (isPay || route === "ord:crypto" || route === "ord:cryptonet") {
+      const cartNow = await getCartView(user.id, user.currency as Currency).catch(() => null);
+      const cap = cartNow ? await firstOrderAllowed(user.id, cartNow.subtotalMinor, user.currency as Currency).catch(() => ({ ok: true as const })) : { ok: true as const };
+      if (!cap.ok) {
+        if (isPay) await getRedis().del(`paylock:${user.id}`).catch(() => undefined);
+        await ctx.answerCallbackQuery({ text: `New accounts can order up to ${cap.maxUsd} for the first ${cap.hoursLeft}h. Please start with a smaller order.`, show_alert: true }).catch(() => undefined);
+        await render(ctx, await views.checkoutSummaryView(user), false).catch(() => undefined);
+        return;
+      }
+    }
+
     try {
       if (ns === "adm") {
         await handleAdminCallback(ctx, action, args);
@@ -1362,7 +1474,7 @@ export function createBot(): Bot<Ctx> {
           await render(ctx, await views.menuView(user), true);
           break;
         case "mnu:help":
-          await render(ctx, views.helpView(), true);
+          await render(ctx, await views.helpView(), true);
           break;
         case "mnu:noop":
           break;
@@ -2516,14 +2628,17 @@ export function createBot(): Bot<Ctx> {
                 "We're sorry it wasn't perfect — and we want to make it right.",
                 "",
                 "Tell us what went wrong below and our team will fix it personally. 💬",
+                "",
+                "If the item itself is faulty, tap <b>🔄 Request replacement</b> — it goes straight to our team.",
               ];
           ctx.session.awaiting = "review_comment";
-          await ctx.reply(warm.join("\n"), {
-            parse_mode: "HTML",
-            reply_markup: new InlineKeyboard()
-              .text("✍️ Add a comment", "rev:comment").row()
-              .text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
-          });
+          const revKb = new InlineKeyboard().text("✍️ Add a comment", "rev:comment").row();
+          if (rating <= 2) revKb.text("🔄 Request replacement", "rep:home").row();
+          revKb.text("🛍 Shop again", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home");
+          await ctx.reply(warm.join("\n"), { parse_mode: "HTML", reply_markup: revKb });
+          if (rating <= 2) {
+            await enqueueAdminAlert(`🚨 <b>Low rating ${rating}/5</b> from ${escapeHtml(greetName(user))} (id <code>${user.telegramId ?? "—"}</code>)${oid ? ` on order <code>${escapeHtml(oid.slice(-8))}</code>` : ""}. Consider reaching out or offering a replacement.`).catch(() => undefined);
+          }
           // Admins moderate before anything is published.
           await enqueueAdminAlert(
             [
@@ -2723,8 +2838,65 @@ export function createBot(): Bot<Ctx> {
           break;
         case "sup:new":
           ctx.session.awaiting = "ticket";
+          ctx.session.ticketFaqShown = undefined;
           await ctx.reply("🎫 Describe your issue in one message:");
           break;
+        case "sup:newgo": {
+          // The FAQ hint did not help — open the ticket with the text they typed.
+          await ctx.answerCallbackQuery();
+          const draft = ctx.session.ticketDraft ?? "";
+          ctx.session.ticketDraft = undefined;
+          ctx.session.ticketFaqShown = undefined;
+          ctx.session.awaiting = undefined;
+          if (!draft) { ctx.session.awaiting = "ticket"; await ctx.reply("🎫 Describe your issue in one message:"); break; }
+          const ticket = await createTicket(user.id, "OTHER", draft);
+          await ctx.editMessageText(`🎫 Ticket <b>#${ticket.ticketNumber}</b> created. Support will reply here.`, { parse_mode: "HTML" }).catch(() => ctx.reply(`🎫 Ticket #${ticket.ticketNumber} created.`));
+          break;
+        }
+        case "faq:q": {
+          await ctx.answerCallbackQuery();
+          const v = await views.faqAnswerView(args[0] ?? "");
+          if (!v) { await ctx.reply("That answer is no longer available."); break; }
+          await render(ctx, v, true);
+          break;
+        }
+        case "hlp:home":
+          await render(ctx, await views.helpView(), true);
+          break;
+        case "rnw:go": {
+          // Renewal reminder tap: same product in a fresh cart, discount applied.
+          try {
+            const r = await startRenewal(user.id, args[0] ?? "");
+            await ctx.answerCallbackQuery({ text: r.discountPct > 0 ? `🔁 ${r.discountPct}% renewal discount applied` : "🔁 Added to cart" });
+            await render(ctx, await views.checkoutSummaryView(user), false);
+          } catch (e) {
+            await ctx.answerCallbackQuery({ text: isCoreError(e) && e.code === "PRODUCT_NOT_FOUND" ? "That product is no longer available." : "Could not start the renewal.", show_alert: true });
+          }
+          break;
+        }
+        case "crt:addco": {
+          // "Customers also bought" ➕ — add and come straight back to checkout.
+          await addToCart(user.id, args[0] ?? "").catch(() => undefined);
+          await ctx.answerCallbackQuery({ text: "✅ Added" });
+          await render(ctx, await views.checkoutSummaryView(user), true);
+          break;
+        }
+        case "wal:gift": {
+          await ctx.answerCallbackQuery();
+          const mine = await listMyGifts(user.id, 3).catch(() => []);
+          const recent = mine.length ? `\n\n<i>Recent: ${mine.map((g) => `${g.code} (${g.status.toLowerCase()})`).join(", ")}</i>` : "";
+          ctx.session.awaiting = "wallet_gift_amount";
+          const ask = await ctx.reply(`🎁 <b>Gift wallet balance</b>\n\nHow much do you want to gift? Send the amount in <b>${user.currency}</b> (e.g. <code>5</code>). It is taken from your wallet now and refunded if not claimed within 30 days.${recent}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", cb("wal", "view")) });
+          await flowStart(ctx, ask, { card: false });
+          break;
+        }
+        case "wal:giftredeem": {
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "gift_code";
+          const ask = await ctx.reply("🎟 Send the <b>gift code</b> (e.g. <code>AB3DE-F7GH2</code>):", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", cb("wal", "view")) });
+          await flowStart(ctx, ask, { card: false });
+          break;
+        }
         case "sup:chat":
           ctx.session.awaiting = "support_chat";
           await ctx.reply(

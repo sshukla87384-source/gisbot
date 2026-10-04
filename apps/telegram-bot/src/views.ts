@@ -1,6 +1,10 @@
 import {
+  alsoBought,
   availableCryptoNetworks,
   binanceOffered,
+  firstOrderAllowed,
+  listFaq,
+  syncComboDiscount,
   cryptoTerminalReady,
   upiOffered,
   listResellerPrices,
@@ -367,6 +371,9 @@ export async function cartViewKb(user: BotUser): Promise<View> {
 }
 
 export async function checkoutSummaryView(user: BotUser): Promise<View> {
+  // The combo discount is applied (or lifted) before the coupon is read, so
+  // the summary describes what will actually be charged.
+  const combo = await syncComboDiscount(user.id, user.currency as Currency).catch(() => ({ applied: false, pct: 0, need: 0, distinct: 0 }));
   const [view, wallet, coupon, bnpl] = await Promise.all([
     getCartView(user.id, user.currency as Currency),
     getWallet(user.id),
@@ -423,8 +430,26 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
       ? `ℹ️ UPI is available for orders up to <b>${fmt(upi.maxMinor, "INR")}</b> — this order is paid with crypto / Binance (instant, automatic).`
       : "",
     gateways.length === 0 && !enough ? "⚠️ Balance too low — top up your wallet first." : "",
+    combo.applied ? `🎁 <b>Combo deal applied — ${combo.pct}% off</b> for buying ${combo.distinct} different products!` : "",
+    !combo.applied && combo.need > 0 && combo.pct > 0 ? `🎁 Add <b>${combo.need} more product${combo.need === 1 ? "" : "s"}</b> and get <b>${combo.pct}% off</b> the whole cart.` : "",
   ].filter((l) => l !== "");
+  // New-account cap: a brand-new account cannot place a large first order.
+  const cap = await firstOrderAllowed(user.id, payable, user.currency as Currency).catch(() => ({ ok: true as const }));
+  if (!cap.ok) {
+    lines.push("", `🛡 <b>First order limit:</b> new accounts can order up to <b>${cap.maxUsd}</b> for the first ${cap.hoursLeft} h. Please start with a smaller order — the limit lifts after your first purchase.`);
+    const kb0 = new InlineKeyboard();
+    kb0.add(sbtn("🛒 Edit cart", cb("crt", "view"), "primary")).row();
+    navRow(kb0, cb("crt", "view"));
+    return { text: lines.join("\n"), kb: kb0 };
+  }
+  // "Customers also bought" — two real co-purchase suggestions with ➕ Add.
+  const suggest = await alsoBought(user.id, user.currency as Currency, 2).catch(() => []);
+  if (suggest.length > 0) {
+    lines.push("", "🛍 <b>Customers also bought:</b>");
+    for (const sgt of suggest) lines.push(`• ${escapeHtml(sgt.name)} — ${fmt(sgt.priceMinor, sgt.currency)}`);
+  }
   const kb = new InlineKeyboard();
+  for (const sgt of suggest) kb.add(sbtn(`➕ Add ${sgt.name.slice(0, 28)} — ${fmt(sgt.priceMinor, sgt.currency)}`, cb("crt", "addco", sgt.variantId), "primary")).row();
   if (coupon) kb.add(sbtn(`🎟 ${coupon.code} applied — ✖️ Remove`, cb("crt", "couponrm"), "primary")).row();
   else kb.add(sbtn("🎟 Apply coupon", cb("crt", "coupon"), "primary")).row();
   if (view.allAvailable && enough) {
@@ -555,6 +580,7 @@ export async function walletView(user: BotUser): Promise<View> {
   if (cryptoOn || binanceOn || upiW.ok) kb.text("➕ Top up", cb("wal", "crypto"));
   kb.text("📜 History", cb("wal", "hist", 1)).row();
   if (cryptoOn) kb.add(sbtn(`${iconId("deposit") ?? iconId("crypto") ? "" : "🌐 "}Deposit crypto — BEP20 / TRC20 / Solana / LTC…`, cb("wal", "crypto"), "success", iconId("deposit") ?? iconId("crypto"))).row();
+  kb.add(sbtn("🎁 Gift balance to a friend", cb("wal", "gift"), "primary"), sbtn("🎟 Redeem gift code", cb("wal", "giftredeem"), "primary")).row();
   if (bnpl.outstandingMinor > 0) kb.add(sbtn(`🕒 Repay BNPL — ${fmt(bnpl.outstandingMinor, bnpl.currency)}`, cb("wal", "bnplrepay"), "success")).row();
   backToMenuRow(kb);
   const spendable = wallet.balanceMinor > 0n;
@@ -642,8 +668,11 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
 }
 
 export async function supportHomeView(user: BotUser): Promise<View> {
-  const tickets = await listTickets(user.id, 1);
-  const kb = new InlineKeyboard().add(sbtn("💬 Chat with Support", cb("sup", "chat"), "success")).row().text("🆕 New Ticket", cb("sup", "new")).row();
+  const [tickets, faq] = await Promise.all([listTickets(user.id, 1), listFaq().catch(() => [])]);
+  const kb = new InlineKeyboard();
+  // Quick answers first: most "tickets" are the same three questions.
+  for (const f of faq.slice(0, 4)) kb.text(`💡 ${f.q.slice(0, 48)}`, cb("faq", "q", f.id)).row();
+  kb.add(sbtn("💬 Chat with Support", cb("sup", "chat"), "success")).row().text("🆕 New Ticket", cb("sup", "new")).row();
   for (const t of tickets.items.slice(0, 5)) {
     const dot = t.status === "WAITING_CUSTOMER" ? "💬" : t.status === "RESOLVED" ? "✅" : t.status === "CLOSED" ? "🔒" : "⌛";
     kb.text(`${dot} ${t.ticketNumber} · ${t.subject.slice(0, 22)}`, cb("tkt", "open", t.id)).row();
@@ -809,8 +838,11 @@ export function settingsView(user: BotUser): View {
   return { text: "⚙ <b>Settings</b>\n\nCurrency affects catalog prices for new wallet-ups.", kb };
 }
 
-export function helpView(): View {
-  const kb = new InlineKeyboard()
+export async function helpView(): Promise<View> {
+  const faq = await listFaq().catch(() => []);
+  const kb = new InlineKeyboard();
+  for (const f of faq.slice(0, 8)) kb.text(`❓ ${f.q.slice(0, 48)}`, cb("faq", "q", f.id)).row();
+  kb
     .add(sbtn("🛍 Shop", cb("shp", "home", 1), "success")).row()
     .text("💰 Wallet", cb("wal", "view")).text("📦 My Orders", cb("ord", "list", 1)).row()
     .add(sbtn("💬 Chat with Support", cb("sup", "chat"), "primary")).row()
@@ -830,6 +862,7 @@ export function helpView(): View {
       "/referral — 🎁 refer &amp; earn",
       "/api — 🧑‍💻 developer API",
       "/replace — 🔄 request a replacement (faulty item)",
+      "/track GIS-… — 🔎 status of one order",
       "/language — 🌐 change language",
       "/help — ❓ this guide",
       "",
@@ -1691,4 +1724,15 @@ export async function cryptoNetworkView(user: BotUser, mode: { kind: "order"; us
   }
   navRow(kb, mode.kind === "topup" ? cb("wal", "view") : cb("crt", "checkout"));
   return { text: lines.join("\n"), kb };
+}
+
+
+/** One FAQ answer, with the way back to Help / Support. */
+export async function faqAnswerView(id: string): Promise<View | null> {
+  const f = (await listFaq()).find((x) => x.id === id);
+  if (!f) return null;
+  const kb = new InlineKeyboard()
+    .text("❓ More answers", cb("hlp", "home")).text("💬 Still need help", cb("sup", "chat")).row();
+  backToMenuRow(kb);
+  return { text: [`❓ <b>${escapeHtml(f.q)}</b>`, "", f.a].join("\n"), kb };
 }

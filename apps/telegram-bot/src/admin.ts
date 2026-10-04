@@ -144,6 +144,21 @@ import {
   testNowPayments,
   getPaymentRails,
   setPaymentRails,
+  getRenewalConfig,
+  setRenewalConfig,
+  getComboConfig,
+  setComboConfig,
+  getRiskConfig,
+  setRiskConfig,
+  listFaq,
+  addFaq,
+  removeFaq,
+  listAgents,
+  setAgents,
+  isAgentId,
+  getBackupConfig,
+  setBackupDaily,
+  sendBackup,
   TERMINAL_CHAINS,
   hasTerminalSeed,
   terminalFingerprint,
@@ -311,6 +326,38 @@ function idAllowed(tgId: number): boolean {
   return raw.split(",").map((s) => s.trim()).filter(Boolean).includes(String(tgId));
 }
 
+/** Allowed to log in: the env allowlist, or a support agent added from the panel. */
+async function loginAllowed(tgId: number): Promise<boolean> {
+  return idAllowed(tgId) || (await isAgentId(tgId));
+}
+
+/**
+ * A support agent is an admin who may only work orders, tickets and
+ * replacements — never money, products or settings. Someone on the env
+ * allowlist is a full admin even if also listed as an agent.
+ */
+async function isAgentOnly(tgId: number | undefined): Promise<boolean> {
+  if (tgId === undefined) return false;
+  const raw = loadConfig().BOT_ADMIN_IDS;
+  const envAdmins = (raw ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  if (envAdmins.includes(String(tgId))) return false;
+  return isAgentId(tgId);
+}
+
+const AGENT_ACTIONS = new Set([
+  "home", "logout", "m_orders", "orders", "recent", "ord", "odel", "osearch", "deliver", "dlv", "confirm", "approve", "reject", "cancel", "txn",
+  "replace", "repl", "tks", "tk", "tkpic", "tkre", "tkres", "tkcls", "tkrepl", "tkrep", "reps", "rrview", "rrpic", "rrall", "rrok", "rrno",
+  "uinfo", "uord", "dm", "stats",
+]);
+const AGENT_AWAITING = new Set(["admin_ticket_reply", "admin_reject_note", "admin_order_search", "admin_manual_key", "admin_txnid", "admin_dm_reply", "admin_passcode", "admin_totp_code"]);
+
+function agentPanelKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .add(sbtn("🧾 Pending orders", cb("adm", "orders"), "primary"), sbtn("🗂 Recent", cb("adm", "recent"), "primary")).row()
+    .add(sbtn("🎫 Support Tickets", cb("adm", "tks"), "success"), sbtn("🔄 Replacements", cb("adm", "reps"), "success")).row()
+    .add(sbtn("↻ Refresh", cb("adm", "home"), "primary"), sbtn("🚪 Logout", cb("adm", "logout"), "danger")).row();
+}
+
 /** /admin — start login or show the panel. */
 export async function adminCommand(ctx: Ctx): Promise<void> {
   const tgId = ctx.from?.id;
@@ -320,7 +367,7 @@ export async function adminCommand(ctx: Ctx): Promise<void> {
     await ctx.reply("🔒 Admin panel is not enabled. Set BOT_ADMIN_PASSCODE on the server to use it.");
     return;
   }
-  if (!idAllowed(tgId)) {
+  if (!(await loginAllowed(tgId))) {
     await ctx.reply("⛔ Your Telegram account is not on the admin allowlist.");
     return;
   }
@@ -352,7 +399,7 @@ export async function handleAdminPasscode(ctx: Ctx): Promise<void> {
   // Delete the message that contained the passcode (best-effort).
   await ctx.deleteMessage().catch(() => undefined);
 
-  if (idAllowed(tgId) && (await verifyAdminPasscode(text, cfg.BOT_ADMIN_PASSCODE))) {
+  if ((await loginAllowed(tgId)) && (await verifyAdminPasscode(text, cfg.BOT_ADMIN_PASSCODE))) {
     // Second factor, if the operator turned it on. The session is NOT created
     // until the code checks out, so a leaked passcode alone opens nothing.
     if (await adminTotpRequired()) {
@@ -447,6 +494,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🎉 Special Sale (campaign)", cb("adm", "ssale"), "success"]],
       [["🗂 Share Full Stock List", cb("adm", "cataloglist"), "success"]],
       [["📣 Promo Templates", cb("adm", "promot"), "success"], ["🤖 Auto-Promo", cb("adm", "autop"), "primary"]],
+      [["🔁 Renewal reminders", cb("adm", "renew"), "success"], ["🎁 Combo deal", cb("adm", "combo"), "success"]],
     ] },
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
@@ -456,6 +504,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
       [["💬 Testimonials", cb("adm", "tst"), "primary"]],
+      [["❓ FAQ / Quick answers", cb("adm", "faq"), "success"]],
     ] },
     m_money: { title: "💰 <b>Money</b>", subtitle: "Profit, costs and where the cash is", rows: [
       [["💰 Profit & Margin", cb("adm", "fin"), "success"], ["📒 Reconciliation", cb("adm", "recon"), "primary"]],
@@ -468,11 +517,13 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔍 Find order by key", cb("adm", "tlkey"), "primary"]],
       [["📊 Stock health", cb("adm", "tlstock"), "primary"], ["🛡 Customer risk", cb("adm", "tlrisk"), "primary"]],
       [["📄 Export orders (CSV)", cb("adm", "tlcsv"), "primary"]],
+      [["💾 Backup (JSON)", cb("adm", "backup"), "success"]],
     ] },
     m_sec: { title: "🔐 <b>Security</b>", subtitle: "Access & sign-out", rows: [
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
       [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
+      [["🛡 First-order cap", cb("adm", "risk"), "primary"], ["👥 Support agents", cb("adm", "agents"), "primary"]],
       [["🛠 Maintenance Mode", cb("adm", "maint"), "danger"]],
       [["🚪 Logout", cb("adm", "logout"), "danger"], ["🚪 Logout All", cb("adm", "logoutall"), "danger"]],
     ] },
@@ -521,6 +572,10 @@ async function show(ctx: Ctx, text: string, kb: InlineKeyboard, edit: boolean): 
 }
 
 async function sendPanel(ctx: Ctx, edit: boolean): Promise<void> {
+  if (await isAgentOnly(ctx.from?.id)) {
+    await show(ctx, [header(`🎧 ${bold(`${loadConfig().STORE_NAME} · Support`)}`), "Orders, tickets and replacements. Money and settings are for the owner."].join("\n"), agentPanelKeyboard(), edit);
+    return;
+  }
   const s = await getAdminStats().catch(() => null);
   const lines = [
     header(`🛠 ${bold(`${loadConfig().STORE_NAME} · Admin`)}`),
@@ -933,6 +988,97 @@ async function terminalView(ctx: Ctx): Promise<void> {
   }
   kb.text("◀️ Back", cb("adm", "m_pay"));
   await show(ctx, lines.join("\n"), kb, true);
+}
+
+async function renewalView(ctx: Ctx): Promise<void> {
+  const c = await getRenewalConfig();
+  const kb = new InlineKeyboard()
+    .text(c.enabled ? "⛔ Turn OFF" : "✅ Turn ON", cb("adm", "renewtog")).row()
+    .text(`📅 Days before: ${c.daysBefore}`, cb("adm", "renewdays")).text(`💸 Discount: ${c.pct}%`, cb("adm", "renewpct")).row()
+    .text("◀️ Back", cb("adm", "m_mkt"));
+  await show(ctx, [
+    "🔁 <b>Renewal reminders</b>",
+    "",
+    `Status: <b>${c.enabled ? "ON ✅" : "OFF ⛔"}</b> · ${c.daysBefore} day(s) before expiry · renewal discount <b>${c.pct}%</b>`,
+    "",
+    "Every time-limited item (30-day accounts, monthly plans…) gets ONE reminder before it expires, with a 🔁 Renew button that puts the same product in the cart with the discount applied. Runs hourly.",
+  ].join("\n"), kb, true);
+}
+
+async function comboView(ctx: Ctx): Promise<void> {
+  const c = await getComboConfig();
+  const kb = new InlineKeyboard()
+    .text(c.enabled ? "⛔ Turn OFF" : "✅ Turn ON", cb("adm", "combotog")).row()
+    .text(`💸 Discount: ${c.pct}%`, cb("adm", "combopct")).text(`🛒 From ${c.minProducts} products`, cb("adm", "combomin")).row()
+    .text("◀️ Back", cb("adm", "m_mkt"));
+  await show(ctx, [
+    "🎁 <b>Combo deal</b>",
+    "",
+    `Status: <b>${c.enabled ? "ON ✅" : "OFF ⛔"}</b> · <b>${c.pct}%</b> off the whole cart from <b>${c.minProducts}</b> different products`,
+    "",
+    "Applied automatically at checkout (never stacks with a coupon the customer typed). The checkout also shows <b>\"Customers also bought\"</b> suggestions from real co-purchases, with one-tap ➕ Add — that part is always on.",
+  ].join("\n"), kb, true);
+}
+
+async function riskView(ctx: Ctx): Promise<void> {
+  const c = await getRiskConfig();
+  const kb = new InlineKeyboard()
+    .text(`💵 Cap: ${c.newUserMaxUsd > 0 ? `${c.newUserMaxUsd}` : "off"}`, cb("adm", "riskcap")).text(`⏱ New for ${c.newUserHours}h`, cb("adm", "riskhrs")).row()
+    .text("◀️ Back", cb("adm", "m_sec"));
+  await show(ctx, [
+    "🛡 <b>First-order cap</b>",
+    "",
+    c.newUserMaxUsd > 0
+      ? `Accounts younger than <b>${c.newUserHours} h</b> with no completed order cannot place an order above <b>${c.newUserMaxUsd}</b>. They are told to start smaller; you get an alert.`
+      : "Off — new accounts can order any amount.",
+    "",
+    "Stops a fresh account from draining a big chunk of stock with a payment that is later disputed. Set the cap to 0 to turn it off.",
+  ].join("\n"), kb, true);
+}
+
+async function agentsView(ctx: Ctx): Promise<void> {
+  const ids = await listAgents();
+  const kb = new InlineKeyboard().text("➕ Add agent (Telegram id)", cb("adm", "agentadd")).row();
+  for (const id of ids.slice(0, 20)) kb.text(`✖️ Remove ${id}`, cb("adm", "agentrm", id)).row();
+  kb.text("◀️ Back", cb("adm", "m_sec"));
+  await show(ctx, [
+    "👥 <b>Support agents</b>",
+    "",
+    "Agents log in with the same passcode (/admin) but see only <b>Orders · Tickets · Replacements</b>. No wallets, no products, no payment settings.",
+    "",
+    ids.length ? `Current agents:\n${ids.map((i) => `• <code>${i}</code>`).join("\n")}` : "No agents yet.",
+    "",
+    "<i>Someone on BOT_ADMIN_IDS stays a full admin even if listed here.</i>",
+  ].join("\n"), kb, true);
+}
+
+async function backupView(ctx: Ctx): Promise<void> {
+  const c = await getBackupConfig();
+  const kb = new InlineKeyboard()
+    .text("💾 Send backup now", cb("adm", "backupnow")).row()
+    .text(c.daily ? "⛔ Daily backup OFF" : "✅ Daily backup ON", cb("adm", "backuptog")).row()
+    .text("◀️ Back", cb("adm", "m_tools"));
+  await show(ctx, [
+    "💾 <b>Backup</b>",
+    "",
+    `Daily automatic backup: <b>${c.daily ? "ON ✅" : "OFF"}</b> (sent to the admin alert chat / admin ids).`,
+    "",
+    "One JSON file with products, stock, users, wallets, orders, payments, coupons and settings. Secrets inside stay <b>encrypted</b> with ENCRYPTION_MASTER_KEY — back that key up separately, in a different place.",
+  ].join("\n"), kb, true);
+}
+
+async function faqAdminView(ctx: Ctx): Promise<void> {
+  const items = await listFaq();
+  const kb = new InlineKeyboard().text("➕ Add question", cb("adm", "faqadd")).row();
+  for (const i of items.slice(0, 20)) kb.text(`✖️ ${i.q.slice(0, 40)}`, cb("adm", "faqrm", i.id)).row();
+  kb.text("◀️ Back", cb("adm", "m_content"));
+  await show(ctx, [
+    "❓ <b>FAQ / Quick answers</b>",
+    "",
+    "Shown under ❓ Help and offered before a customer opens a ticket — the matching answers come up from the words they type.",
+    "",
+    items.length ? items.map((i) => `• <b>${escapeHtml(i.q)}</b>`).join("\n") : "No questions yet.",
+  ].join("\n"), kb, true);
 }
 
 /** Central callback dispatcher for the admin panel (ns === "adm"). */
@@ -1994,6 +2140,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     return;
   }
   if (!(await guard(ctx))) return;
+  if (!AGENT_ACTIONS.has(action) && (await isAgentOnly(ctx.from?.id))) {
+    await ctx.answerCallbackQuery({ text: "Support agents can't open that section.", show_alert: true }).catch(() => undefined);
+    return;
+  }
   await ctx.answerCallbackQuery().catch(() => undefined);
   const id = args[0] ?? "";
 
@@ -4000,6 +4150,35 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       flash(ctx, n > 0 ? `📣 Posted to ${n} group(s)/channel(s).` : "No groups registered yet. Open 📣 Groups to add one.");
       return productView(ctx, id);
     }
+    case "renew": return renewalView(ctx);
+    case "renewtog": { const c = await getRenewalConfig(); await setRenewalConfig({ enabled: !c.enabled }); return renewalView(ctx); }
+    case "renewdays": ctx.session.awaiting = "admin_renew_days"; await askStep(ctx, "📅 How many <b>days before expiry</b> should the reminder go out? (1–30)"); return;
+    case "renewpct": ctx.session.awaiting = "admin_renew_pct"; await askStep(ctx, "💸 Renewal <b>discount %</b> (0 = no discount, button still offered):"); return;
+    case "combo": return comboView(ctx);
+    case "combotog": { const c = await getComboConfig(); await setComboConfig({ enabled: !c.enabled }); return comboView(ctx); }
+    case "combopct": ctx.session.awaiting = "admin_combo_pct"; await askStep(ctx, "💸 Combo <b>discount %</b> on the whole cart (1–50):"); return;
+    case "combomin": ctx.session.awaiting = "admin_combo_min"; await askStep(ctx, "🛒 From how many <b>different products</b> does the combo apply? (2–10)"); return;
+    case "risk": return riskView(ctx);
+    case "riskcap": ctx.session.awaiting = "admin_risk_cap"; await askStep(ctx, "💵 Maximum <b>first order in USD</b> for a new account (0 = off):"); return;
+    case "riskhrs": ctx.session.awaiting = "admin_risk_hours"; await askStep(ctx, "⏱ For how many <b>hours</b> does an account count as new? (1–720)"); return;
+    case "agents": return agentsView(ctx);
+    case "agentadd": ctx.session.awaiting = "admin_agent_add"; await askStep(ctx, "👥 Send the agent's <b>Telegram numeric id</b> (they can see it under 👤 My Account → Your ID):"); return;
+    case "agentrm": { await setAgents((await listAgents()).filter((x) => x !== id)); flash(ctx, "✖️ Agent removed."); return agentsView(ctx); }
+    case "backup": return backupView(ctx);
+    case "backuptog": { const c = await getBackupConfig(); await setBackupDaily(!c.daily); return backupView(ctx); }
+    case "backupnow": {
+      await ctx.reply("💾 Building the backup…");
+      try {
+        const r = await sendBackup("manual");
+        await ctx.reply(`✅ Backup sent (${(r.bytes / 1024).toFixed(0)} KB). Check the admin alert chat.`);
+      } catch (e) {
+        await ctx.reply(`❌ Backup failed: ${escapeHtml(e instanceof Error ? e.message : String(e))}`, { parse_mode: "HTML" });
+      }
+      return;
+    }
+    case "faq": return faqAdminView(ctx);
+    case "faqadd": ctx.session.awaiting = "admin_faq_q"; await askStep(ctx, "❓ Send the <b>question</b> as customers would ask it (e.g. <code>How do I log in?</code>):"); return;
+    case "faqrm": await removeFaq(id); flash(ctx, "✖️ Removed."); return faqAdminView(ctx);
     case "tm": return terminalView(ctx);
     case "tmtg": {
       const next = await toggleTerminalChain(id);
@@ -4237,6 +4416,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
   if (!(await isBotAdmin(ctx.from?.id))) { await ctx.reply("Session expired — send /admin"); return true; }
+  if (!AGENT_AWAITING.has(awaiting) && (await isAgentOnly(ctx.from?.id))) { await ctx.reply("Support agents can't do that."); return true; }
 
   if (awaiting === "admin_txnid") {
     const orderId = ctx.session.admOrderId ?? "";
@@ -4451,6 +4631,41 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const t = await testSupplier(id);
     await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`, { parse_mode: "HTML" });
     await suppliersView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_renew_days" || awaiting === "admin_renew_pct" || awaiting === "admin_combo_pct" || awaiting === "admin_combo_min" || awaiting === "admin_risk_cap" || awaiting === "admin_risk_hours") {
+    const n = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(n) || n < 0) { ctx.session.awaiting = awaiting; await ctx.reply("Send a number."); return true; }
+    if (awaiting === "admin_renew_days") { await setRenewalConfig({ daysBefore: Math.round(n) }); await renewalView(ctx); }
+    else if (awaiting === "admin_renew_pct") { await setRenewalConfig({ pct: Math.round(n) }); await renewalView(ctx); }
+    else if (awaiting === "admin_combo_pct") { await setComboConfig({ pct: Math.round(n) }); await comboView(ctx); }
+    else if (awaiting === "admin_combo_min") { await setComboConfig({ minProducts: Math.round(n) }); await comboView(ctx); }
+    else if (awaiting === "admin_risk_cap") { await setRiskConfig({ newUserMaxUsd: Math.round(n * 100) / 100 }); await riskView(ctx); }
+    else { await setRiskConfig({ newUserHours: Math.round(n) }); await riskView(ctx); }
+    return true;
+  }
+  if (awaiting === "admin_agent_add") {
+    const idNum = text.replace(/\D/g, "");
+    if (!idNum) { ctx.session.awaiting = "admin_agent_add"; await ctx.reply("Send the numeric Telegram id."); return true; }
+    await setAgents([...(await listAgents()), idNum]);
+    await ctx.reply(`✅ Agent <code>${idNum}</code> added — they can now send /admin and log in with the passcode.`, { parse_mode: "HTML" });
+    await agentsView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_faq_q") {
+    if (text.length < 3) { ctx.session.awaiting = "admin_faq_q"; await ctx.reply("Send the question text."); return true; }
+    ctx.session.faqQTmp = text;
+    ctx.session.awaiting = "admin_faq_a";
+    await askStep(ctx, "💬 Now send the <b>answer</b> (premium emoji OK):");
+    return true;
+  }
+  if (awaiting === "admin_faq_a") {
+    const q = ctx.session.faqQTmp ?? "";
+    ctx.session.faqQTmp = undefined;
+    if (!q) { await ctx.reply("Lost the question — tap ➕ Add question again."); return true; }
+    await addFaq(q, composeBroadcastHtml(ctx));
+    await ctx.reply("✅ Saved. It now appears under ❓ Help.");
+    await faqAdminView(ctx);
     return true;
   }
   if (awaiting === "admin_tm_seed") {

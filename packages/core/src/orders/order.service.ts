@@ -235,3 +235,16 @@ export async function revealDelivery(userId: string, orderItemId: string): Promi
 
   return { productName: item.productNameSnap, variantName: item.variantNameSnap, payload };
 }
+
+
+/** Everything /track shows for one order — statuses and names only, never a delivered value. */
+export async function getOrderTracking(userId: string, orderNumber: string) {
+  return prisma.order.findFirst({
+    where: { orderNumber, userId },
+    select: {
+      orderNumber: true, status: true, createdAt: true, paidAt: true, currency: true, subtotalMinor: true, discountMinor: true,
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, fulfilledAt: true, expiresAt: true } },
+      payments: { select: { provider: true, status: true }, orderBy: { createdAt: "desc" }, take: 1 },
+    },
+  });
+}

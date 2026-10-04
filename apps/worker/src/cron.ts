@@ -13,6 +13,11 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   pollCryptoPayments,
   pollTerminalPayments,
   sweepTerminalPayments,
+  runRenewalReminders,
+  refundExpiredGifts,
+  dailyReportExtras,
+  getBackupConfig,
+  sendBackup,
   convertMinor,
   clearPaymentPrompts,
   sweepResolvedOrderPrompts,
@@ -331,7 +336,7 @@ async function qualitySweep(): Promise<void> {
 
 /** Money summary once a day, so problems surface without being looked for. */
 async function dailyMoneySummary(): Promise<void> {
-  const [r, p] = await Promise.all([reconcile(24), profitReport(1)]);
+  const [r, p, extras] = await Promise.all([reconcile(24), profitReport(1), dailyReportExtras().catch(() => [] as string[])]);
   const usd = (m: number): string => `$${(m / 100).toFixed(2)}`;
   await enqueueAdminAlert(
     [
@@ -346,6 +351,7 @@ async function dailyMoneySummary(): Promise<void> {
       ...(r.unfulfilledPaidOrders > 0 ? [`🚨 <b>${r.unfulfilledPaidOrders} paid order(s) not yet delivered</b> (${usd(r.unfulfilledPaidValueMinor)})`] : []),
       ...(r.driftWallets > 0 ? [`🚨 <b>${r.driftWallets} wallet(s) disagree with their ledger</b> (${usd(r.driftMinor)}) — check this.`] : []),
       ...(p.lossMakers.length > 0 ? ["", `📉 <b>Sold below cost:</b> ${p.lossMakers.slice(0, 3).map((l) => l.name).join(", ")}`] : []),
+      ...(extras.length > 0 ? ["", ...extras] : []),
     ].join("\n"),
     [{ text: "💰 Profit & margin", callbackData: "adm:fin", style: "primary" }, { text: "📒 Reconciliation", callbackData: "adm:recon", style: "primary" }],
   ).catch(() => undefined);
@@ -403,6 +409,30 @@ async function terminalSweep(): Promise<void> {
       data: { actorType: "SYSTEM", action: "cron.terminalSweep", entityType: "TerminalPayment", after: { swept: n } },
     }).catch(() => undefined);
   }
+}
+
+/** "Expires in N days — renew" reminders (hourly; one per item, ever). */
+async function renewalReminders(): Promise<void> {
+  const n = await runRenewalReminders();
+  if (n > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.renewalReminders", entityType: "OrderItem", after: { sent: n } },
+    }).catch(() => undefined);
+  }
+}
+
+/** Unclaimed gift codes go back to their senders (hourly). */
+async function giftRefunds(): Promise<void> {
+  await refundExpiredGifts();
+}
+
+/** Daily JSON backup to the admin chat, when switched on in the panel. */
+async function dailyBackup(): Promise<void> {
+  const cfg = await getBackupConfig();
+  if (!cfg.daily) return;
+  await sendBackup("daily").catch(async (e) => {
+    await enqueueAdminAlert(`⚠️ Daily backup failed: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`).catch(() => undefined);
+  });
 }
 
 /** Daily statement to every API user / reseller (once a day). */
@@ -473,5 +503,8 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(3600, "quality", 21_590, qualitySweep),
     every(3600, "moneysummary", 86_390, dailyMoneySummary),
     every(3600, "resellerstmt", 86_390, resellerStatements),
+    every(3600, "renewals", 3590, renewalReminders),
+    every(3600, "giftrefunds", 3590, giftRefunds),
+    every(3600, "dailybackup", 86_390, dailyBackup),
   ];
 }
