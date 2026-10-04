@@ -1,8 +1,10 @@
+import { SECRET_SETTING_KEYS } from "@gis/core";
 import { prisma } from "@gis/database";
 import { Body, Controller, Get, Module, Patch, Query, Req } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { z } from "zod";
 import { writeAudit } from "../common/audit.js";
+import { ApiError } from "../common/errors.js";
 import { filterValue, filterDateRange, paginated, parseList } from "../common/pagination.js";
 import { Public, RequirePermission } from "../common/permissions.decorator.js";
 import { validate } from "../common/zod-body.pipe.js";
@@ -30,13 +32,16 @@ export class PlatformController {
   @RequirePermission("analytics.read")
   @Get("settings")
   async settings() {
-    return prisma.setting.findMany({ orderBy: { key: "asc" } });
+    // Seeds, passcodes and API keys never leave the database — not even to an admin browser.
+    const rows = await prisma.setting.findMany({ orderBy: { key: "asc" } });
+    return rows.filter((r) => !SECRET_SETTING_KEYS.test(r.key));
   }
 
   @RequirePermission("settings.write")
   @Patch("settings")
   async setSetting(@Body() body: unknown, @Req() req: ApiRequest) {
     const { key, value } = validate(settingBody, body);
+    if (SECRET_SETTING_KEYS.test(key)) throw new ApiError(403, "FORBIDDEN", "This setting can only be changed from the bot admin.");
     const before = await prisma.setting.findUnique({ where: { key } });
     const s = await prisma.setting.upsert({
       where: { key },

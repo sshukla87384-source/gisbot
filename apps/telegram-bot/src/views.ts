@@ -16,6 +16,8 @@ import {
   getReferralStats,
   getWallet,
   getButtonConfig,
+  getMiniAppConfig,
+  miniAppUrl,
   getCartCoupon,
   convertMinor,
   getBnplStatus,
@@ -89,12 +91,14 @@ export interface View {
 export async function menuView(user: BotUser): Promise<View> {
   // getButtonConfig was a separate sequential round trip on the most-rendered
   // screen in the bot.
-  const [wallet, orderCount, btnCfg] = await Promise.all([
+  const [wallet, orderCount, btnCfg, miniCfg] = await Promise.all([
     getWallet(user.id),
     prisma.order.count({ where: { userId: user.id } }),
     getButtonConfig(),
+    getMiniAppConfig(),
   ]);
-  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg) };
+  const miniApp = miniCfg.enabled ? miniAppUrl() : null;
+  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg, miniApp) };
 }
 
 
@@ -436,7 +440,9 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   // New-account cap: a brand-new account cannot place a large first order.
   const cap = await firstOrderAllowed(user.id, payable, user.currency as Currency).catch(() => ({ ok: true as const }));
   if (!cap.ok) {
-    lines.push("", `🛡 <b>First order limit:</b> new accounts can order up to <b>${cap.maxUsd}</b> for the first ${cap.hoursLeft} h. Please start with a smaller order — the limit lifts after your first purchase.`);
+    lines.push("", cap.reason === "daily_limit"
+      ? `🛡 <b>Daily limit reached:</b> up to <b>${cap.maxPerDay}</b> orders per 24 hours per account. Please try again later.`
+      : `🛡 <b>First order limit:</b> new accounts can order up to <b>${cap.maxUsd}</b> for the first ${cap.hoursLeft} h. Please start with a smaller order — the limit lifts after your first purchase.`);
     const kb0 = new InlineKeyboard();
     kb0.add(sbtn("🛒 Edit cart", cb("crt", "view"), "primary")).row();
     navRow(kb0, cb("crt", "view"));

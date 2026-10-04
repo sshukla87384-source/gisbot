@@ -1,7 +1,8 @@
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { randomBytes } from "node:crypto";
-import { enqueueAdminAlert, enqueueTelegramDocument } from "./queues.js";
+import { BOT_ADMIN_MEMBERS_KEY, enqueueAdminAlert, enqueueTelegramDocument } from "./queues.js";
+import { getRedis } from "./redis.js";
 
 /**
  * Operations helpers the admin panel drives:
@@ -139,8 +140,7 @@ export async function buildBackupJson(): Promise<{ json: string; counts: Record<
   // Credentials never leave the database, encrypted or not: the hot-wallet
   // seed, the panel passcode hash, API keys of providers and the 2FA secret
   // are useless to a restore and dangerous in a chat.
-  const SECRET_SETTINGS = /^(terminal\.seed|bot\.admin_passcode|admin\.totp.*|translate\.api|binance\.api|nowpayments\.api|upi\.provider.*|bharatpe.*|web\.admin.*)$/;
-  const settings = settingsAll.filter((s) => !SECRET_SETTINGS.test(s.key));
+  const settings = settingsAll.filter((s) => !SECRET_SETTING_KEYS.test(s.key));
   const data = {
     meta: { store: loadConfig().STORE_NAME, exportedAt: new Date().toISOString(), note: "Secrets are encrypted with ENCRYPTION_MASTER_KEY — keep that key safe and separate." },
     categories, products, variants, prices, licenseKeys: keys, digitalAccounts: accounts, users, wallets, walletTransactions: walletTx,
@@ -205,3 +205,97 @@ export async function dailyReportExtras(): Promise<string[]> {
   } catch { /* skip */ }
   return lines;
 }
+
+// ── Permanent admin ──────────────────────────────────────────────────────────
+
+const ALWAYS_ADMIN_KEY = "admin.always";
+
+/** Checked on every admin-gated update, so the row is cached for a few seconds. */
+let alwaysCache: { id: string | null; at: number } | null = null;
+
+/** The one Telegram id that is treated as a logged-in owner at all times (no passcode, never expires). */
+export async function getAlwaysAdminId(): Promise<string | null> {
+  if (alwaysCache && Date.now() - alwaysCache.at < 10_000) return alwaysCache.id;
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: ALWAYS_ADMIN_KEY } });
+    const v = row?.value as { telegramId?: string; handle?: string } | null | undefined;
+    const id = v?.telegramId && /^\d+$/.test(v.telegramId) ? v.telegramId : null;
+    alwaysCache = { id, at: Date.now() };
+    return id;
+  } catch {
+    return alwaysCache?.id ?? null;
+  }
+}
+
+export async function getAlwaysAdminHandle(): Promise<string | null> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: ALWAYS_ADMIN_KEY } });
+    const v = row?.value as { handle?: string } | null | undefined;
+    return v?.handle ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Set by numeric id or @username. A username is resolved through our own user
+ * table (the person must have started the bot once), so a typo cannot hand
+ * the shop to a stranger: an unknown handle is refused.
+ */
+export async function setAlwaysAdmin(idOrHandle: string | null): Promise<{ telegramId: string; handle: string | null } | null> {
+  if (idOrHandle === null || idOrHandle.trim() === "" || idOrHandle.trim() === "-") {
+    const prev = await getAlwaysAdminId();
+    await prisma.setting.deleteMany({ where: { key: ALWAYS_ADMIN_KEY } });
+    alwaysCache = { id: null, at: Date.now() };
+    if (prev) await getRedis().srem(BOT_ADMIN_MEMBERS_KEY, prev).catch(() => undefined);
+    return null;
+  }
+  const raw = idOrHandle.trim().replace(/^@/, "");
+  let telegramId: string | null = null;
+  let handle: string | null = null;
+  if (/^\d{5,20}$/.test(raw)) {
+    telegramId = raw;
+    const u = await prisma.user.findFirst({ where: { telegramId: BigInt(raw) }, select: { telegramHandle: true } });
+    handle = u?.telegramHandle ?? null;
+  } else {
+    const u = await prisma.user.findFirst({ where: { telegramHandle: { equals: raw, mode: "insensitive" } }, select: { telegramId: true, telegramHandle: true } });
+    if (!u?.telegramId) throw new Error(`No customer @${raw} has used this bot yet — ask them to send /start once, or use the numeric id.`);
+    telegramId = u.telegramId.toString();
+    handle = u.telegramHandle;
+  }
+  const value = { telegramId, handle };
+  await prisma.setting.upsert({ where: { key: ALWAYS_ADMIN_KEY }, create: { key: ALWAYS_ADMIN_KEY, value }, update: { value } });
+  alwaysCache = { id: telegramId, at: Date.now() };
+  // Owner alerts (sales, low gas, disputes) go to every panel member — the permanent admin is always one.
+  await getRedis().sadd(BOT_ADMIN_MEMBERS_KEY, telegramId).catch(() => undefined);
+  return { telegramId, handle };
+}
+
+// ── Mini App switch ──────────────────────────────────────────────────────────
+
+const MINIAPP_KEY = "miniapp.cfg";
+
+export async function getMiniAppConfig(): Promise<{ enabled: boolean }> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: MINIAPP_KEY } });
+    const v = row?.value as { enabled?: boolean } | null | undefined;
+    return { enabled: v?.enabled !== false };
+  } catch {
+    return { enabled: true };
+  }
+}
+
+export async function setMiniAppEnabled(enabled: boolean): Promise<void> {
+  const value = { enabled };
+  await prisma.setting.upsert({ where: { key: MINIAPP_KEY }, create: { key: MINIAPP_KEY, value }, update: { value } });
+}
+
+/** Public HTTPS base the Mini App is served from, or null when it cannot be. */
+export function miniAppUrl(): string | null {
+  const base = loadConfig().PUBLIC_API_URL;
+  if (!base || !base.startsWith("https://")) return null;
+  return `${base.replace(/\/+$/, "")}/api/v1/miniapp`;
+}
+
+/** Settings that must never leave the database — the web portal's generic editor hides them too. */
+export const SECRET_SETTING_KEYS = /^(terminal\.seed|bot\.admin_passcode|admin\.totp.*|translate\.api|binance\.api|nowpayments\.api|upi\.provider.*|bharatpe.*|web\.admin.*)$/;

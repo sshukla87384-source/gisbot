@@ -117,6 +117,8 @@ export interface SessionData {
     | "admin_combo_min"
     | "admin_risk_cap"
     | "admin_risk_hours"
+    | "admin_risk_orders"
+    | "admin_always_set"
     | "admin_agent_add"
     | "admin_faq_q"
     | "admin_faq_a"

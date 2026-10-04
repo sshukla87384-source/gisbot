@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { loadConfig } from "@gis/config";
 import { ensureDbObjects, prisma } from "@gis/database";
-import { getRedis, getCustomEmojiRegistry, primeFxRate, getPromoFlags } from "@gis/core";
+import { getRedis, getCustomEmojiRegistry, primeFxRate, getPromoFlags, rememberBotUsername } from "@gis/core";
 import { webhookCallback } from "grammy";
 import { createBot } from "./bot.js";
 import { setDynamicEmojis } from "./emoji.js";
@@ -62,6 +62,7 @@ async function main(): Promise<void> {
 
     server.listen(config.PORT, async () => {
       await bot.init();
+      await rememberBotUsername(bot.botInfo.username);
       await bot.api.setWebhook(`${config.WEBHOOK_DOMAIN}${path}`, {
         secret_token: config.TELEGRAM_SECRET_TOKEN,
         drop_pending_updates: false,
@@ -76,7 +77,10 @@ async function main(): Promise<void> {
   } else {
     // eslint-disable-next-line no-console
     console.log("bot: long-polling mode (development)");
-    await bot.start({ allowed_updates: ["message", "channel_post", "callback_query", "pre_checkout_query"] });
+    await bot.start({
+      allowed_updates: ["message", "channel_post", "callback_query", "pre_checkout_query"],
+      onStart: (me) => { void rememberBotUsername(me.username); },
+    });
   }
 }
 

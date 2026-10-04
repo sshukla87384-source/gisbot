@@ -150,6 +150,12 @@ import {
   setComboConfig,
   getRiskConfig,
   setRiskConfig,
+  getAlwaysAdminId,
+  getAlwaysAdminHandle,
+  setAlwaysAdmin,
+  getMiniAppConfig,
+  setMiniAppEnabled,
+  miniAppUrl,
   listFaq,
   addFaq,
   removeFaq,
@@ -317,13 +323,22 @@ const sessionKey = (tgId: number | bigint | string): string => `botadmin:${tgId}
 /** Full admin session. Support agents are NOT admins here — slash commands and alerts key off this. */
 export async function isBotAdmin(tgId: number | bigint | undefined): Promise<boolean> {
   if (tgId === undefined) return false;
+  if (await isAlwaysAdmin(tgId)) return true;
   const v = await getRedis().get(sessionKey(tgId));
   return v === "1";
+}
+
+/** The owner account pinned from Security → 👑 Permanent admin: always logged in, no passcode, never expires. */
+export async function isAlwaysAdmin(tgId: number | bigint | undefined): Promise<boolean> {
+  if (tgId === undefined) return false;
+  const id = await getAlwaysAdminId();
+  return id !== null && id === String(tgId);
 }
 
 /** Any panel session — full admin or support agent. Panel navigation keys off this. */
 export async function hasPanelSession(tgId: number | bigint | undefined): Promise<boolean> {
   if (tgId === undefined) return false;
+  if (await isAlwaysAdmin(tgId)) return true;
   const v = await getRedis().get(sessionKey(tgId));
   if (v === "1") return true;
   // An agent session stays valid only while the id is still on the agent list.
@@ -338,7 +353,7 @@ function idAllowed(tgId: number): boolean {
 
 /** Allowed to log in: the env allowlist, or a support agent added from the panel. */
 async function loginAllowed(tgId: number): Promise<boolean> {
-  return idAllowed(tgId) || (await isAgentId(tgId));
+  return idAllowed(tgId) || (await isAlwaysAdmin(tgId)) || (await isAgentId(tgId));
 }
 
 /**
@@ -348,6 +363,7 @@ async function loginAllowed(tgId: number): Promise<boolean> {
  */
 async function isAgentOnly(tgId: number | undefined): Promise<boolean> {
   if (tgId === undefined) return false;
+  if (await isAlwaysAdmin(tgId)) return false;
   const raw = loadConfig().BOT_ADMIN_IDS;
   const envAdmins = (raw ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   if (envAdmins.includes(String(tgId))) return false;
@@ -375,6 +391,11 @@ export async function adminCommand(ctx: Ctx): Promise<void> {
   const tgId = ctx.from?.id;
   if (tgId === undefined) return;
   const cfg = loadConfig();
+  if (await isAlwaysAdmin(tgId)) {
+    await getRedis().sadd(BOT_ADMIN_MEMBERS_KEY, String(tgId)).catch(() => undefined);
+    await sendPanel(ctx, false);
+    return;
+  }
   if (!(await isAdminPasscodeConfigured(cfg.BOT_ADMIN_PASSCODE))) {
     await ctx.reply("🔒 Admin panel is not enabled. Set BOT_ADMIN_PASSCODE on the server to use it.");
     return;
@@ -526,6 +547,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["⭐ Customer Reviews", cb("adm", "revs"), "primary"]],
       [["💬 Testimonials", cb("adm", "tst"), "primary"]],
       [["❓ FAQ / Quick answers", cb("adm", "faq"), "success"]],
+      [["📱 Mini App (web shop)", cb("adm", "miniapp"), "success"]],
     ] },
     m_money: { title: "💰 <b>Money</b>", subtitle: "Profit, costs and where the cash is", rows: [
       [["💰 Profit & Margin", cb("adm", "fin"), "success"], ["📒 Reconciliation", cb("adm", "recon"), "primary"]],
@@ -544,7 +566,8 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔑 Bot Passcode", cb("adm", "chpass"), "primary"], ["🔐 Web Login", cb("adm", "webpass"), "primary"]],
       [["🔒 Two-factor (2FA)", cb("adm", "twofa"), "success"]],
       [["🩺 Logs & Errors", cb("adm", "logs"), "primary"]],
-      [["🛡 First-order cap", cb("adm", "risk"), "primary"], ["👥 Support agents", cb("adm", "agents"), "primary"]],
+      [["🛡 Order limits", cb("adm", "risk"), "primary"], ["👥 Support agents", cb("adm", "agents"), "primary"]],
+      [["👑 Permanent admin", cb("adm", "alwaysadm"), "success"]],
       [["🛠 Maintenance Mode", cb("adm", "maint"), "danger"]],
       [["🚪 Logout", cb("adm", "logout"), "danger"], ["🚪 Logout All", cb("adm", "logoutall"), "danger"]],
     ] },
@@ -1044,16 +1067,61 @@ async function comboView(ctx: Ctx): Promise<void> {
 async function riskView(ctx: Ctx): Promise<void> {
   const c = await getRiskConfig();
   const kb = new InlineKeyboard()
-    .text(`💵 Cap: ${c.newUserMaxUsd > 0 ? `${c.newUserMaxUsd}` : "off"}`, cb("adm", "riskcap")).text(`⏱ New for ${c.newUserHours}h`, cb("adm", "riskhrs")).row()
+    .text(`💵 First-order cap: ${c.newUserMaxUsd > 0 ? `$${c.newUserMaxUsd}` : "off"}`, cb("adm", "riskcap")).text(`⏱ New for ${c.newUserHours}h`, cb("adm", "riskhrs")).row()
+    .text(`📦 Orders per day: ${c.maxOrdersPerDay > 0 ? c.maxOrdersPerDay : "unlimited"}`, cb("adm", "riskorders")).row()
     .text("◀️ Back", cb("adm", "m_sec"));
   await show(ctx, [
-    "🛡 <b>First-order cap</b>",
+    "🛡 <b>Order limits</b>",
     "",
-    c.newUserMaxUsd > 0
-      ? `Accounts younger than <b>${c.newUserHours} h</b> with no completed order cannot place an order above <b>${c.newUserMaxUsd}</b>. They are told to start smaller; you get an alert.`
-      : "Off — new accounts can order any amount.",
+    "<b>First-order cap</b> — " + (c.newUserMaxUsd > 0
+      ? `accounts younger than <b>${c.newUserHours} h</b> with no completed order cannot place an order above <b>$${c.newUserMaxUsd}</b>. They are told to start smaller; you get an alert.`
+      : "off. New accounts can order any amount."),
     "",
-    "Stops a fresh account from draining a big chunk of stock with a payment that is later disputed. Set the cap to 0 to turn it off.",
+    "<b>Orders per day</b> — " + (c.maxOrdersPerDay > 0
+      ? `each customer can place at most <b>${c.maxOrdersPerDay}</b> orders in any 24 hours (cancelled/expired ones don't count).`
+      : "unlimited. Anyone can place as many orders as they like."),
+    "",
+    "<i>These are the only two limits in the shop; everything else (quantity per order, wallet size) is unrestricted. Both can also be changed from the web portal → Store Features.</i>",
+  ].join("\n"), kb, true);
+}
+
+async function alwaysAdminView(ctx: Ctx): Promise<void> {
+  const [id, handle] = await Promise.all([getAlwaysAdminId(), getAlwaysAdminHandle()]);
+  const kb = new InlineKeyboard().text(id ? "✏️ Change" : "➕ Set @username or id", cb("adm", "alwaysset"));
+  if (id) kb.text("🗑 Remove", cb("adm", "alwaysclr"));
+  kb.row().text("◀️ Back", cb("adm", "m_sec"));
+  await show(ctx, [
+    "👑 <b>Permanent admin</b>",
+    "",
+    id
+      ? `<b>${handle ? `@${escapeHtml(handle)}` : "id"} <code>${id}</code></b> is always logged in: /admin opens the panel straight away, no passcode, and 🚪 Logout / Logout All never touch it.`
+      : "Not set. Every admin — including you — logs in with the passcode and can be logged out.",
+    "",
+    "Set it to your own Telegram @username (that account must have sent /start to the bot once) or your numeric id. Only one account can be permanent.",
+    "",
+    "⚠️ Whoever holds this account owns the shop. Keep 2FA on your Telegram account itself.",
+  ].join("\n"), kb, true);
+}
+
+async function miniAppView(ctx: Ctx): Promise<void> {
+  const cfg = await getMiniAppConfig();
+  const url = miniAppUrl();
+  const kb = new InlineKeyboard()
+    .add(sbtn(cfg.enabled ? "⏸ Turn off" : "▶️ Turn on", cb("adm", "miniappset", cfg.enabled ? "0" : "1"), cfg.enabled ? "danger" : "success")).row();
+  if (url && cfg.enabled) kb.webApp("📱 Open Mini App", url).row();
+  kb.text("◀️ Back", cb("adm", "m_content"));
+  await show(ctx, [
+    "📱 <b>Mini App (web shop)</b>",
+    "",
+    cfg.enabled
+      ? "▶️ <b>On</b> — the home menu shows a 🛍 <b>Open Shop</b> button that opens the catalogue as a Telegram Mini App (grid, search, categories, stock badges). Buying hands back to the bot, so every payment method, coupon and wallet rule still applies."
+      : "⏸ <b>Off</b> — the home menu shows the classic buttons only.",
+    "",
+    url
+      ? `URL: <code>${escapeHtml(url)}</code>`
+      : "⚠️ <b>PUBLIC_API_URL</b> on the server must be an <b>https://</b> address for Telegram to open the Mini App. Set it (e.g. your API domain) and restart; the button appears by itself.",
+    "",
+    "<i>You can also set the Mini App as the bot's menu button: @BotFather → your bot → Bot Settings → Menu Button → paste the URL.</i>",
   ].join("\n"), kb, true);
 }
 
@@ -2152,6 +2220,11 @@ async function maintenanceView(ctx: Ctx): Promise<void> {
 export async function handleAdminCallback(ctx: Ctx, action: string, args: string[]): Promise<void> {
   if (action === "logout") {
     const tgId = ctx.from?.id;
+    if (await isAlwaysAdmin(tgId)) {
+      await ctx.answerCallbackQuery({ text: "You are the permanent admin — this panel never logs out.", show_alert: true }).catch(() => undefined);
+      await show(ctx, "👑 You are the <b>permanent admin</b>, so there is nothing to log out of. To turn that off: 🔐 Security → 👑 Permanent admin → Remove.", new InlineKeyboard().text("◀️ Back", cb("adm", "home")), true);
+      return;
+    }
     if (tgId !== undefined) {
       await getRedis().del(sessionKey(tgId));
       await getRedis().srem(BOT_ADMIN_MEMBERS_KEY, String(tgId));
@@ -4180,6 +4253,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "combopct": ctx.session.awaiting = "admin_combo_pct"; await askStep(ctx, "💸 Combo <b>discount %</b> on the whole cart (1–50):"); return;
     case "combomin": ctx.session.awaiting = "admin_combo_min"; await askStep(ctx, "🛒 From how many <b>different products</b> does the combo apply? (2–10)"); return;
     case "risk": return riskView(ctx);
+    case "riskorders": ctx.session.awaiting = "admin_risk_orders"; await askStep(ctx, "📦 Maximum <b>orders per customer per 24 hours</b> (0 = unlimited):"); return;
+    case "alwaysadm": return alwaysAdminView(ctx);
+    case "alwaysset": ctx.session.awaiting = "admin_always_set"; await askStep(ctx, "👑 Send the Telegram <b>@username</b> or numeric <b>id</b> of the account that should always be admin:"); return;
+    case "alwaysclr": {
+      await setAlwaysAdmin(null);
+      await ctx.answerCallbackQuery({ text: "Permanent admin removed" }).catch(() => undefined);
+      return alwaysAdminView(ctx);
+    }
+    case "miniapp": return miniAppView(ctx);
+    case "miniappset": {
+      await setMiniAppEnabled(id === "1");
+      await ctx.answerCallbackQuery({ text: id === "1" ? "Mini App on" : "Mini App off" }).catch(() => undefined);
+      return miniAppView(ctx);
+    }
     case "riskcap": ctx.session.awaiting = "admin_risk_cap"; await askStep(ctx, "💵 Maximum <b>first order in USD</b> for a new account (0 = off):"); return;
     case "riskhrs": ctx.session.awaiting = "admin_risk_hours"; await askStep(ctx, "⏱ For how many <b>hours</b> does an account count as new? (1–720)"); return;
     case "agents": return agentsView(ctx);
@@ -4662,7 +4749,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await suppliersView(ctx);
     return true;
   }
-  if (awaiting === "admin_renew_days" || awaiting === "admin_renew_pct" || awaiting === "admin_combo_pct" || awaiting === "admin_combo_min" || awaiting === "admin_risk_cap" || awaiting === "admin_risk_hours") {
+  if (awaiting === "admin_renew_days" || awaiting === "admin_renew_pct" || awaiting === "admin_combo_pct" || awaiting === "admin_combo_min" || awaiting === "admin_risk_cap" || awaiting === "admin_risk_hours" || awaiting === "admin_risk_orders") {
     const n = Number.parseFloat(text.replace(/[^0-9.]/g, ""));
     if (!Number.isFinite(n) || n < 0) { ctx.session.awaiting = awaiting; await ctx.reply("Send a number."); return true; }
     if (awaiting === "admin_renew_days") { await setRenewalConfig({ daysBefore: Math.round(n) }); await renewalView(ctx); }
@@ -4670,7 +4757,20 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     else if (awaiting === "admin_combo_pct") { await setComboConfig({ pct: Math.round(n) }); await comboView(ctx); }
     else if (awaiting === "admin_combo_min") { await setComboConfig({ minProducts: Math.round(n) }); await comboView(ctx); }
     else if (awaiting === "admin_risk_cap") { await setRiskConfig({ newUserMaxUsd: Math.round(n * 100) / 100 }); await riskView(ctx); }
+    else if (awaiting === "admin_risk_orders") { await setRiskConfig({ maxOrdersPerDay: Math.round(n) }); await riskView(ctx); }
     else { await setRiskConfig({ newUserHours: Math.round(n) }); await riskView(ctx); }
+    return true;
+  }
+  if (awaiting === "admin_always_set") {
+    try {
+      const r = await setAlwaysAdmin(text);
+      await ctx.reply(r ? `✅ <b>${r.handle ? `@${escapeHtml(r.handle)}` : r.telegramId}</b> is now the permanent admin.` : "Cleared.", { parse_mode: "HTML" });
+    } catch (e) {
+      ctx.session.awaiting = "admin_always_set";
+      await ctx.reply(`❌ ${escapeHtml(e instanceof Error ? e.message : String(e))}`);
+      return true;
+    }
+    await alwaysAdminView(ctx);
     return true;
   }
   if (awaiting === "admin_agent_add") {

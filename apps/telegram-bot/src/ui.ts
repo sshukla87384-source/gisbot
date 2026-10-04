@@ -27,11 +27,15 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
   ].join("\n");
 }
 
-export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: string; icon?: string } | undefined> = {}): InlineKeyboard {
+export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: string; icon?: string } | undefined> = {}, miniApp: string | null = null): InlineKeyboard {
   const loc = user.locale;
   const L = (key: string, fallback: string) => cfg[key]?.label || fallback;
   const I = (key: string) => cfg[key]?.icon;
-  const kb = new InlineKeyboard()
+  const kb = new InlineKeyboard();
+  // The Mini App storefront opens inside Telegram (web_app button); the classic
+  // button-driven shop stays beside it for people who prefer tapping.
+  if (miniApp) kb.webApp(L("miniapp", "🛍 Open Shop (Mini App)"), miniApp).row();
+  kb
     .add(sbtn(L("shop", t(loc, "b_shopnow")), cb("shp", "home", 1), "success", I("shop")))
     .row()
     .add(sbtn(L("categories", "🗂 Shop by Category"), cb("cat", "home"), "success", I("categories")))

@@ -1462,7 +1462,12 @@ export function createBot(): Bot<Ctx> {
       const cap = cartNow ? await firstOrderAllowed(user.id, Math.max(0, cartNow.subtotalMinor - disc), user.currency as Currency).catch(() => ({ ok: true as const })) : { ok: true as const };
       if (!cap.ok) {
         if (isPay) await getRedis().del(`paylock:${user.id}`).catch(() => undefined);
-        await ctx.answerCallbackQuery({ text: `New accounts can order up to ${cap.maxUsd} for the first ${cap.hoursLeft}h. Please start with a smaller order.`, show_alert: true }).catch(() => undefined);
+        await ctx.answerCallbackQuery({
+          text: cap.reason === "daily_limit"
+            ? `Daily limit: up to ${cap.maxPerDay} orders per 24 hours. Please try again later.`
+            : `New accounts can order up to $${cap.maxUsd} for the first ${cap.hoursLeft}h. Please start with a smaller order.`,
+          show_alert: true,
+        }).catch(() => undefined);
         await render(ctx, await views.checkoutSummaryView(user), false).catch(() => undefined);
         return;
       }

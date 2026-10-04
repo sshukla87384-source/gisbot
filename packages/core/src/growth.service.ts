@@ -390,19 +390,22 @@ export interface RiskConfig {
   newUserMaxUsd: number;
   /** How long an account counts as new. */
   newUserHours: number;
+  /** 0 = unlimited. Paid orders one account may place in a rolling 24 h. */
+  maxOrdersPerDay: number;
 }
 
 const RISK_KEY = "risk.cfg";
 
 export async function getRiskConfig(): Promise<RiskConfig> {
-  return readSetting(RISK_KEY, { newUserMaxUsd: 0, newUserHours: 24 }, (v) => ({
+  return readSetting(RISK_KEY, { newUserMaxUsd: 0, newUserHours: 24, maxOrdersPerDay: 0 }, (v) => ({
     newUserMaxUsd: Math.max(0, num(v.newUserMaxUsd, 0)), newUserHours: Math.max(1, Math.min(720, num(v.newUserHours, 24))),
+    maxOrdersPerDay: Math.max(0, Math.round(num(v.maxOrdersPerDay, 0))),
   }));
 }
 
 export async function setRiskConfig(patch: Partial<RiskConfig>): Promise<RiskConfig> {
   const next = { ...(await getRiskConfig()), ...patch };
-  await writeSetting(RISK_KEY, { newUserMaxUsd: next.newUserMaxUsd, newUserHours: next.newUserHours });
+  await writeSetting(RISK_KEY, { newUserMaxUsd: next.newUserMaxUsd, newUserHours: next.newUserHours, maxOrdersPerDay: next.maxOrdersPerDay });
   return next;
 }
 
@@ -411,8 +414,19 @@ export async function setRiskConfig(patch: Partial<RiskConfig>): Promise<RiskCon
  * with no completed order are capped; everyone else passes. Amount in the
  * user's currency (minor units).
  */
-export async function firstOrderAllowed(userId: string, amountMinor: number, currency: Currency): Promise<{ ok: true } | { ok: false; maxUsd: number; hoursLeft: number }> {
+export type OrderGate =
+  | { ok: true }
+  | { ok: false; reason: "first_order_cap"; maxUsd: number; hoursLeft: number }
+  | { ok: false; reason: "daily_limit"; maxPerDay: number };
+
+export async function firstOrderAllowed(userId: string, amountMinor: number, currency: Currency): Promise<OrderGate> {
   const cfg = await getRiskConfig();
+  // Rolling 24 h order count — paid or awaiting payment both count, so a
+  // customer cannot open twenty unpaid orders either. 0 = no limit.
+  if (cfg.maxOrdersPerDay > 0) {
+    const n = await prisma.order.count({ where: { userId, createdAt: { gte: new Date(Date.now() - 86_400_000) }, status: { notIn: ["CANCELLED", "EXPIRED"] } } });
+    if (n >= cfg.maxOrdersPerDay) return { ok: false, reason: "daily_limit", maxPerDay: cfg.maxOrdersPerDay };
+  }
   if (cfg.newUserMaxUsd <= 0) return { ok: true };
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { createdAt: true, firstPurchaseAt: true } });
   if (!user || user.firstPurchaseAt) return { ok: true };
@@ -426,6 +440,6 @@ export async function firstOrderAllowed(userId: string, amountMinor: number, cur
     const first = await getRedis().set(`riskalert:${userId}`, "1", "EX", 86_400, "NX");
     if (first) await enqueueAdminAlert(`🛡 First-order cap hit: new account ${userId.slice(-6)} tried a ${usd.toFixed(2)} order (cap ${cfg.newUserMaxUsd}).`).catch(() => undefined);
   } catch { /* housekeeping */ }
-  return { ok: false, maxUsd: cfg.newUserMaxUsd, hoursLeft };
+  return { ok: false, reason: "first_order_cap", maxUsd: cfg.newUserMaxUsd, hoursLeft };
 }
 

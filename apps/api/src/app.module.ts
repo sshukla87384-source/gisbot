@@ -13,6 +13,8 @@ import { CatalogModule } from "./modules/catalog.module.js";
 import { CouponsModule } from "./modules/coupons.module.js";
 import { DeveloperModule } from "./modules/developer.module.js";
 import { ApiKeysModule } from "./modules/apikeys.module.js";
+import { MiniAppModule } from "./modules/miniapp.module.js";
+import { FeaturesModule } from "./modules/features.module.js";
 import { InventoryModule } from "./modules/inventory.module.js";
 import { OrdersModule } from "./modules/orders.module.js";
 import { PlatformModule } from "./modules/platform.module.js";
@@ -35,6 +37,8 @@ import { WalletsModule } from "./modules/wallets.module.js";
     PlatformModule,
     DeveloperModule,
     ApiKeysModule,
+    MiniAppModule,
+    FeaturesModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
