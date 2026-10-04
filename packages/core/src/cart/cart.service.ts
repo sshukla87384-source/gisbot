@@ -65,7 +65,10 @@ export async function removeItem(userId: string, itemId: string): Promise<void> 
 
 export async function clearCart(userId: string): Promise<void> {
   const cart = await prisma.cart.findUnique({ where: { userId } });
-  if (cart) await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+  if (!cart) return;
+  await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+  // A coupon belongs to the cart it was applied to; an empty cart has none.
+  if (cart.couponId) await prisma.cart.update({ where: { id: cart.id }, data: { couponId: null } }).catch(() => undefined);
 }
 
 /**

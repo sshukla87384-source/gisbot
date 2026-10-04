@@ -92,6 +92,7 @@ import {
   claimGift,
   listMyGifts,
   firstOrderAllowed,
+  syncComboDiscount,
   matchFaq,
   getOrderTracking,
   getOrderSummary,
@@ -1454,8 +1455,11 @@ export function createBot(): Bot<Ctx> {
     // New-account first-order cap, enforced on every rail (the checkout screen
     // already hides the buttons; this covers stale buttons and deep links).
     if (isPay || route === "ord:crypto" || route === "ord:cryptonet") {
+      // Same numbers the checkout screen used: combo synced, coupon deducted.
+      await syncComboDiscount(user.id, user.currency as Currency).catch(() => undefined);
       const cartNow = await getCartView(user.id, user.currency as Currency).catch(() => null);
-      const cap = cartNow ? await firstOrderAllowed(user.id, cartNow.subtotalMinor, user.currency as Currency).catch(() => ({ ok: true as const })) : { ok: true as const };
+      const disc = cartNow ? ((await getCartCoupon(user.id, user.currency as Currency).catch(() => null))?.discountMinor ?? 0) : 0;
+      const cap = cartNow ? await firstOrderAllowed(user.id, Math.max(0, cartNow.subtotalMinor - disc), user.currency as Currency).catch(() => ({ ok: true as const })) : { ok: true as const };
       if (!cap.ok) {
         if (isPay) await getRedis().del(`paylock:${user.id}`).catch(() => undefined);
         await ctx.answerCallbackQuery({ text: `New accounts can order up to ${cap.maxUsd} for the first ${cap.hoursLeft}h. Please start with a smaller order.`, show_alert: true }).catch(() => undefined);
@@ -2866,7 +2870,7 @@ export function createBot(): Bot<Ctx> {
         case "rnw:go": {
           // Renewal reminder tap: same product in a fresh cart, discount applied.
           try {
-            const r = await startRenewal(user.id, args[0] ?? "");
+            const r = await startRenewal(user.id, args[0] ?? "", user.currency as Currency);
             await ctx.answerCallbackQuery({ text: r.discountPct > 0 ? `🔁 ${r.discountPct}% renewal discount applied` : "🔁 Added to cart" });
             await render(ctx, await views.checkoutSummaryView(user), false);
           } catch (e) {

@@ -1,6 +1,7 @@
 import { prisma, type Currency, type Prisma } from "@gis/database";
 import { CoreError, formatMinor, type CurrencyCode } from "@gis/shared";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { getRedis } from "./redis.js";
 import { addToCart, clearCart } from "./cart/cart.service.js";
 import { convertMinor } from "./fx.js";
 import { applyCouponToCart, getCartCoupon, removeCouponFromCart } from "./orders/coupon.service.js";
@@ -42,17 +43,14 @@ const bool = (v: unknown, d: boolean): boolean => (typeof v === "boolean" ? v : 
  * A percentage coupon the system owns (RENEW10, COMBO10 …): created on first
  * use, unlimited, never shown in the admin's own list as something to manage.
  */
-async function ensureSystemCoupon(code: string, pct: number): Promise<string> {
+async function ensureSystemCoupon(code: string, pct: number, productId?: string): Promise<string> {
   const bp = Math.round(pct * 100);
-  const existing = await prisma.coupon.findUnique({ where: { code } });
-  if (existing) {
-    if (existing.valuePct !== bp || !existing.isActive || existing.deletedAt) {
-      await prisma.coupon.update({ where: { id: existing.id }, data: { valuePct: bp, isActive: true, deletedAt: null, type: "PERCENTAGE", scope: "GLOBAL", perUserLimit: 100_000, usageLimit: null, expiresAt: null } });
-    }
-    return existing.id;
-  }
-  const c = await prisma.coupon.create({
-    data: { code, type: "PERCENTAGE", scope: "GLOBAL", valuePct: bp, perUserLimit: 100_000, isActive: true },
+  const scope = productId ? "PRODUCT" as const : "GLOBAL" as const;
+  const products = productId ? { connect: [{ id: productId }] } : undefined;
+  const c = await prisma.coupon.upsert({
+    where: { code },
+    create: { code, type: "PERCENTAGE", scope, valuePct: bp, perUserLimit: 100_000, isActive: true, ...(products ? { products } : {}) },
+    update: { valuePct: bp, isActive: true, deletedAt: null, type: "PERCENTAGE", scope, perUserLimit: 100_000, usageLimit: null, expiresAt: null, ...(products ? { products } : {}) },
   });
   return c.id;
 }
@@ -81,7 +79,10 @@ export async function setRenewalConfig(patch: Partial<RenewalConfig>): Promise<R
   return next;
 }
 
-export const renewalCouponCode = (pct: number): string => `RENEW${Math.round(pct)}`;
+/** One coupon per product, so the discount can only ever land on that product's lines. */
+export const renewalCouponCode = (pct: number, productId: string): string => `RENEW${Math.round(pct)}-${productId.slice(-8).toUpperCase()}`;
+/** How long after expiry the renewal button keeps working. */
+const RENEWAL_GRACE_DAYS = 30;
 
 /**
  * Cron: one reminder per expiring item, never twice. Items whose product or
@@ -132,22 +133,27 @@ export async function runRenewalReminders(limit = 200): Promise<number> {
 }
 
 /** The 🔁 Renew tap: the same variant into an empty cart, discount applied. Returns the product name. */
-export async function startRenewal(userId: string, orderItemId: string): Promise<{ productName: string; variantId: string; discountPct: number }> {
+export async function startRenewal(userId: string, orderItemId: string, currency: Currency): Promise<{ productName: string; variantId: string; discountPct: number }> {
   const it = await prisma.orderItem.findFirst({
     where: { id: orderItemId, order: { userId } },
-    include: { variant: { include: { product: true } }, order: { select: { currency: true } } },
+    include: { variant: { include: { product: true } } },
   });
   if (!it) throw new CoreError("ORDER_NOT_FOUND");
   const v = it.variant;
   if (!v.isActive || v.deletedAt || v.product.status !== "ACTIVE" || v.product.deletedAt) throw new CoreError("PRODUCT_NOT_FOUND");
+  // The button is for the window around THIS expiry — reminded, and not long
+  // past the end date — otherwise an old delivery is a permanent discount.
   const cfg = await getRenewalConfig();
+  const eligible = Boolean(it.renewalRemindedAt) && Boolean(it.expiresAt) && (it.expiresAt as Date).getTime() + RENEWAL_GRACE_DAYS * 86_400_000 > Date.now();
   await clearCart(userId);
   await addToCart(userId, v.id, 1);
-  if (cfg.pct > 0) {
-    await ensureSystemCoupon(renewalCouponCode(cfg.pct), cfg.pct);
-    await applyCouponToCart(userId, renewalCouponCode(cfg.pct), it.order.currency as Currency).catch(() => undefined);
+  const pct = eligible ? cfg.pct : 0;
+  if (pct > 0) {
+    const code = renewalCouponCode(pct, v.productId);
+    await ensureSystemCoupon(code, pct, v.productId);
+    await applyCouponToCart(userId, code, currency).catch(() => undefined);
   }
-  return { productName: it.productNameSnap, variantId: v.id, discountPct: cfg.pct };
+  return { productName: it.productNameSnap, variantId: v.id, discountPct: pct };
 }
 
 // ── Combo discount + also-bought ─────────────────────────────────────────────
@@ -182,22 +188,25 @@ export const comboCouponCode = (pct: number): string => `COMBO${Math.round(pct)}
  */
 export async function syncComboDiscount(userId: string, currency: Currency): Promise<{ applied: boolean; pct: number; need: number; distinct: number }> {
   const cfg = await getComboConfig();
-  const cart = await prisma.cart.findUnique({ where: { userId }, include: { items: { include: { variant: { select: { productId: true } } } } } });
+  const cart = await prisma.cart.findUnique({ where: { userId }, include: { items: { include: { variant: { select: { productId: true } } } }, coupon: { select: { code: true } } } });
   const distinct = new Set((cart?.items ?? []).map((i) => i.variant.productId)).size;
-  const current = await getCartCoupon(userId, currency).catch(() => null);
-  const isCombo = current?.code.startsWith("COMBO") ?? false;
+  // Read the applied coupon from the cart itself: a customer's own code that
+  // is momentarily invalid must not be silently replaced by the combo.
+  const appliedCode = cart?.coupon?.code ?? null;
+  const isCombo = appliedCode !== null && /^COMBO\d+$/.test(appliedCode);
   if (!cfg.enabled) {
     if (isCombo) await removeCouponFromCart(userId).catch(() => undefined);
     return { applied: false, pct: 0, need: 0, distinct };
   }
   const eligible = distinct >= cfg.minProducts;
-  if (eligible && (!current || isCombo)) {
-    const code = comboCouponCode(cfg.pct);
-    if (current?.code !== code) {
+  const code = comboCouponCode(cfg.pct);
+  if (eligible && (appliedCode === null || isCombo)) {
+    if (appliedCode !== code) {
       await ensureSystemCoupon(code, cfg.pct);
       await applyCouponToCart(userId, code, currency).catch(() => undefined);
     }
-    return { applied: true, pct: cfg.pct, need: 0, distinct };
+    const live = await getCartCoupon(userId, currency).catch(() => null);
+    return { applied: live?.code === code, pct: cfg.pct, need: 0, distinct };
   }
   if (!eligible && isCombo) await removeCouponFromCart(userId).catch(() => undefined);
   return { applied: false, pct: cfg.pct, need: Math.max(0, cfg.minProducts - distinct), distinct };
@@ -294,11 +303,15 @@ export async function createWalletGift(userId: string, amountMinor: number, botU
   const expiresAt = new Date(Date.now() + GIFT_DAYS * 86_400_000);
   let code = giftCode();
   for (let i = 0; i < 5 && (await prisma.giftVoucher.findUnique({ where: { code } })); i++) code = giftCode();
-  const voucher = await prisma.giftVoucher.create({ data: { code, senderId: userId, amountMinor, currency, note: note?.slice(0, 120) ?? null, expiresAt } });
+  // Debit FIRST, then write the voucher: a crash in between leaves a ledger
+  // line and no voucher (refunded by hand), never a redeemable voucher that
+  // was never paid for.
+  const id = randomUUID().replace(/-/g, "");
+  await adjustWallet({ userId, amountMinor: -BigInt(amountMinor), type: "WITHDRAWAL", note: `Gift ${code}`, idempotencyKey: `gift-send:${id}` });
   try {
-    await adjustWallet({ userId, amountMinor: -BigInt(amountMinor), type: "WITHDRAWAL", note: `Gift ${code}`, idempotencyKey: `gift-send:${voucher.id}` });
+    await prisma.giftVoucher.create({ data: { id, code, senderId: userId, amountMinor, currency, note: note?.slice(0, 120) ?? null, expiresAt } });
   } catch (e) {
-    await prisma.giftVoucher.delete({ where: { id: voucher.id } }).catch(() => undefined);
+    await adjustWallet({ userId, amountMinor: BigInt(amountMinor), type: "REFUND", note: `Gift ${code} could not be created`, idempotencyKey: `gift-send-undo:${id}` }).catch(() => undefined);
     throw e;
   }
   return { code, amountMinor, currency, expiresAt, deepLink: `https://t.me/${botUsername}?start=gift_${code}` };
@@ -321,7 +334,14 @@ export async function claimGift(userId: string, rawCode: string): Promise<GiftCl
   const wallet = await prisma.wallet.findUnique({ where: { userId }, select: { currency: true } });
   const cur = (wallet?.currency ?? v.currency) as Currency;
   const credit = cur === v.currency ? v.amountMinor : convertMinor(v.amountMinor, v.currency as Currency, cur);
-  const bal = await adjustWallet({ userId, amountMinor: BigInt(credit), type: "DEPOSIT", note: `Gift ${v.code} redeemed`, idempotencyKey: `gift-claim:${v.id}` });
+  let bal: bigint;
+  try {
+    bal = await adjustWallet({ userId, amountMinor: BigInt(credit), type: "DEPOSIT", note: `Gift ${v.code} redeemed`, idempotencyKey: `gift-claim:${v.id}` });
+  } catch (e) {
+    // The credit did not land: hand the voucher back so it can be redeemed again.
+    await prisma.giftVoucher.updateMany({ where: { id: v.id, status: "CLAIMED", claimedById: userId }, data: { status: "PENDING", claimedById: null, claimedAt: null } }).catch(() => undefined);
+    throw e;
+  }
   if (v.senderId !== userId) {
     const sender = await prisma.user.findUnique({ where: { id: v.senderId }, select: { telegramId: true } });
     const claimer = await prisma.user.findUnique({ where: { id: userId }, select: { firstName: true, telegramHandle: true } });
@@ -340,7 +360,16 @@ export async function refundExpiredGifts(): Promise<number> {
   for (const v of rows) {
     const flipped = await prisma.giftVoucher.updateMany({ where: { id: v.id, status: "PENDING" }, data: { status: "REFUNDED" } });
     if (flipped.count === 0) continue;
-    await adjustWallet({ userId: v.senderId, amountMinor: BigInt(v.amountMinor), type: "REFUND", note: `Gift ${v.code} expired unclaimed`, idempotencyKey: `gift-refund:${v.id}` }).catch(() => undefined);
+    // The sender's wallet may have changed currency since the gift was made.
+    const w = await prisma.wallet.findUnique({ where: { userId: v.senderId }, select: { currency: true } });
+    const back = w && w.currency !== v.currency ? convertMinor(v.amountMinor, v.currency as Currency, w.currency as Currency) : v.amountMinor;
+    try {
+      await adjustWallet({ userId: v.senderId, amountMinor: BigInt(back), type: "REFUND", note: `Gift ${v.code} expired unclaimed`, idempotencyKey: `gift-refund:${v.id}` });
+    } catch (e) {
+      await prisma.giftVoucher.updateMany({ where: { id: v.id, status: "REFUNDED" }, data: { status: "PENDING" } }).catch(() => undefined);
+      await enqueueAdminAlert(`⚠️ Gift ${v.code} refund failed (${String(e instanceof Error ? e.message : e).slice(0, 120)}) — will retry next hour.`).catch(() => undefined);
+      continue;
+    }
     const sender = await prisma.user.findUnique({ where: { id: v.senderId }, select: { telegramId: true } });
     if (sender?.telegramId != null) {
       await enqueueTelegramMessage(sender.telegramId, `↩️ Your gift <code>${v.code}</code> was not redeemed within ${GIFT_DAYS} days — ${formatMinor(v.amountMinor, v.currency as CurrencyCode)} is back in your wallet.`).catch(() => undefined);
@@ -392,7 +421,11 @@ export async function firstOrderAllowed(userId: string, amountMinor: number, cur
   const usd = convertMinor(amountMinor, currency, "USD") / 100;
   if (usd <= cfg.newUserMaxUsd) return { ok: true };
   const hoursLeft = Math.max(1, Math.ceil((cfg.newUserHours * 3600_000 - ageMs) / 3600_000));
-  await enqueueAdminAlert(`🛡 First-order cap hit: new account ${userId.slice(-6)} tried a $${usd.toFixed(2)} order (cap $${cfg.newUserMaxUsd}).`).catch(() => undefined);
+  // Once a day per account — the checkout re-renders on every tap.
+  try {
+    const first = await getRedis().set(`riskalert:${userId}`, "1", "EX", 86_400, "NX");
+    if (first) await enqueueAdminAlert(`🛡 First-order cap hit: new account ${userId.slice(-6)} tried a ${usd.toFixed(2)} order (cap ${cfg.newUserMaxUsd}).`).catch(() => undefined);
+  } catch { /* housekeeping */ }
   return { ok: false, maxUsd: cfg.newUserMaxUsd, hoursLeft };
 }
 

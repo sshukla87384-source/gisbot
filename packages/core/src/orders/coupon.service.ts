@@ -206,6 +206,16 @@ export async function resolveCartCouponTx(tx: Tx, userId: string, currency: Curr
   if (live && live.usageLimit !== null && live.usedCount >= live.usageLimit) return null;
   const base = toCouponRow(cart.coupon) as CouponRow;
   const row: CouponRow = { ...base, usedCount: live?.usedCount ?? cart.coupon.usedCount };
+  // The automatic combo coupon is only ever valid while the cart holds enough
+  // distinct products. The checkout screen keeps it in sync, but a stale
+  // message or the API can charge a cart that no longer qualifies — so the
+  // money path checks the rule itself.
+  if (/^COMBO\d+$/.test(row.code)) {
+    const cfgRow = await tx.setting.findUnique({ where: { key: "combo.cfg" } });
+    const cfg = (cfgRow?.value ?? {}) as { enabled?: boolean; minProducts?: number };
+    const distinct = new Set((lines ?? []).map((l) => l.productId)).size;
+    if (cfg.enabled !== true || distinct < Math.max(2, Number(cfg.minProducts ?? 2))) return null;
+  }
   // Pass `tx` so per-user limits are counted inside this transaction.
   const res = await evaluate(row, userId, currency, subtotalMinor, tx as unknown as Pick<typeof prisma, "couponUsage" | "user">, lines);
   if (!res.ok || !res.discountMinor) return null;

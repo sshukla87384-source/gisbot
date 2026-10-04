@@ -115,7 +115,7 @@ export async function setBackupDaily(daily: boolean): Promise<void> {
  */
 export async function buildBackupJson(): Promise<{ json: string; counts: Record<string, number> }> {
   const bigintSafe = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
-  const [categories, products, variants, prices, keys, accounts, users, wallets, walletTx, orders, items, payments, coupons, settings, suppliers, reviews, terminal] = await Promise.all([
+  const [categories, products, variants, prices, keys, accounts, users, wallets, walletTx, orders, items, payments, coupons, settingsAll, suppliers, reviews, terminal, gifts, topups] = await Promise.all([
     prisma.category.findMany(),
     prisma.product.findMany(),
     prisma.productVariant.findMany(),
@@ -133,11 +133,18 @@ export async function buildBackupJson(): Promise<{ json: string; counts: Record<
     prisma.supplier.findMany(),
     prisma.review.findMany(),
     prisma.terminalPayment.findMany({ orderBy: { createdAt: "desc" }, take: 5000 }),
+    prisma.giftVoucher.findMany({ orderBy: { createdAt: "desc" }, take: 5000 }),
+    prisma.walletTopup.findMany({ orderBy: { createdAt: "desc" }, take: 5000 }),
   ]);
+  // Credentials never leave the database, encrypted or not: the hot-wallet
+  // seed, the panel passcode hash, API keys of providers and the 2FA secret
+  // are useless to a restore and dangerous in a chat.
+  const SECRET_SETTINGS = /^(terminal\.seed|bot\.admin_passcode|admin\.totp.*|translate\.api|binance\.api|nowpayments\.api|upi\.provider.*|bharatpe.*|web\.admin.*)$/;
+  const settings = settingsAll.filter((s) => !SECRET_SETTINGS.test(s.key));
   const data = {
     meta: { store: loadConfig().STORE_NAME, exportedAt: new Date().toISOString(), note: "Secrets are encrypted with ENCRYPTION_MASTER_KEY — keep that key safe and separate." },
     categories, products, variants, prices, licenseKeys: keys, digitalAccounts: accounts, users, wallets, walletTransactions: walletTx,
-    orders, orderItems: items, payments, coupons, settings, suppliers, reviews, terminalPayments: terminal,
+    orders, orderItems: items, payments, coupons, settings, suppliers, reviews, terminalPayments: terminal, giftVouchers: gifts, walletTopups: topups,
   };
   const counts: Record<string, number> = {};
   for (const [k, v] of Object.entries(data)) if (Array.isArray(v)) counts[k] = v.length;
@@ -182,6 +189,7 @@ export async function dailyReportExtras(): Promise<string[]> {
       JOIN "ProductVariant" v ON v."productId" = p."id" AND v."deletedAt" IS NULL AND v."isActive" = true
       LEFT JOIN "LicenseKey" k ON k."variantId" = v."id" AND k."status" = 'AVAILABLE' AND k."deletedAt" IS NULL
       WHERE p."status" = 'ACTIVE' AND p."deletedAt" IS NULL AND p."type" = 'LICENSE_KEY' AND p."fulfillmentMode" = 'AUTOMATIC'
+        AND p."supplierId" IS NULL AND p."reusableSecretEnc" IS NULL
       GROUP BY p."id", p."name" HAVING COUNT(k."id") <= 3 ORDER BY stock ASC LIMIT 5`;
     if (low.length > 0) lines.push(`📉 Low stock: ${low.map((l) => `${l.name} (${Number(l.stock)})`).join(", ")}`);
   } catch { /* skip */ }

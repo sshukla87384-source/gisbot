@@ -314,10 +314,20 @@ const DURATION_PROMPT = (lead: string): string =>
 
 const sessionKey = (tgId: number | bigint | string): string => `botadmin:${tgId}`;
 
+/** Full admin session. Support agents are NOT admins here — slash commands and alerts key off this. */
 export async function isBotAdmin(tgId: number | bigint | undefined): Promise<boolean> {
   if (tgId === undefined) return false;
   const v = await getRedis().get(sessionKey(tgId));
   return v === "1";
+}
+
+/** Any panel session — full admin or support agent. Panel navigation keys off this. */
+export async function hasPanelSession(tgId: number | bigint | undefined): Promise<boolean> {
+  if (tgId === undefined) return false;
+  const v = await getRedis().get(sessionKey(tgId));
+  if (v === "1") return true;
+  // An agent session stays valid only while the id is still on the agent list.
+  return v === "agent" && (await isAgentId(tgId));
 }
 
 function idAllowed(tgId: number): boolean {
@@ -344,10 +354,12 @@ async function isAgentOnly(tgId: number | undefined): Promise<boolean> {
   return isAgentId(tgId);
 }
 
+// No "confirm"/"approve": those mark an unpaid order as PAID and ship stock on
+// the operator's word alone. "txn" verifies against Binance, so it stays.
 const AGENT_ACTIONS = new Set([
-  "home", "logout", "m_orders", "orders", "recent", "ord", "odel", "osearch", "deliver", "dlv", "confirm", "approve", "reject", "cancel", "txn",
+  "home", "logout", "m_orders", "orders", "recent", "ord", "odel", "osearch", "deliver", "dlv", "reject", "cancel", "txn",
   "replace", "repl", "tks", "tk", "tkpic", "tkre", "tkres", "tkcls", "tkrepl", "tkrep", "reps", "rrview", "rrpic", "rrall", "rrok", "rrno",
-  "uinfo", "uord", "dm", "stats",
+  "uinfo", "uord", "dm",
 ]);
 const AGENT_AWAITING = new Set(["admin_ticket_reply", "admin_reject_note", "admin_order_search", "admin_manual_key", "admin_txnid", "admin_dm_reply", "admin_passcode", "admin_totp_code"]);
 
@@ -371,7 +383,7 @@ export async function adminCommand(ctx: Ctx): Promise<void> {
     await ctx.reply("⛔ Your Telegram account is not on the admin allowlist.");
     return;
   }
-  if (await isBotAdmin(tgId)) {
+  if (await hasPanelSession(tgId)) {
     await sendPanel(ctx, false);
     return;
   }
@@ -417,6 +429,15 @@ export async function handleAdminPasscode(ctx: Ctx): Promise<void> {
 /** Create the admin session and announce it. Shared by the 1FA and 2FA paths. */
 async function grantAdminSession(ctx: Ctx, tgId: number): Promise<void> {
   const redis = getRedis();
+  if (await isAgentOnly(tgId)) {
+    // A support-agent session: not in the admin member set (no money alerts,
+    // no slash commands), and only as long as the id stays on the agent list.
+    await redis.set(sessionKey(tgId), "agent");
+    await redis.del(`botadmin:try:${tgId}`);
+    await ctx.reply("✅ Support access granted — orders, tickets and replacements. Tap 🚪 Logout when done.");
+    await sendPanel(ctx, false);
+    return;
+  }
   {
     // Notify any admins already logged in that a new sign-in happened.
     const existing = await redis.smembers(BOT_ADMIN_MEMBERS_KEY);
@@ -435,7 +456,7 @@ async function grantAdminSession(ctx: Ctx, tgId: number): Promise<void> {
 }
 
 async function guard(ctx: Ctx): Promise<boolean> {
-  if (await isBotAdmin(ctx.from?.id)) return true;
+  if (await hasPanelSession(ctx.from?.id)) return true;
   await ctx.answerCallbackQuery({ text: "Session expired — send /admin", show_alert: true }).catch(() => undefined);
   return false;
 }
@@ -1048,7 +1069,7 @@ async function agentsView(ctx: Ctx): Promise<void> {
     "",
     ids.length ? `Current agents:\n${ids.map((i) => `• <code>${i}</code>`).join("\n")}` : "No agents yet.",
     "",
-    "<i>Someone on BOT_ADMIN_IDS stays a full admin even if listed here.</i>",
+    "<i>Someone on BOT_ADMIN_IDS stays a full admin even if listed here. Agents use the same passcode — set BOT_ADMIN_IDS on the server so a removed agent cannot log in as owner, and rotate the passcode when one leaves.</i>",
   ].join("\n"), kb, true);
 }
 
@@ -4163,7 +4184,15 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "riskhrs": ctx.session.awaiting = "admin_risk_hours"; await askStep(ctx, "⏱ For how many <b>hours</b> does an account count as new? (1–720)"); return;
     case "agents": return agentsView(ctx);
     case "agentadd": ctx.session.awaiting = "admin_agent_add"; await askStep(ctx, "👥 Send the agent's <b>Telegram numeric id</b> (they can see it under 👤 My Account → Your ID):"); return;
-    case "agentrm": { await setAgents((await listAgents()).filter((x) => x !== id)); flash(ctx, "✖️ Agent removed."); return agentsView(ctx); }
+    case "agentrm": {
+      await setAgents((await listAgents()).filter((x) => x !== id));
+      // Their session goes with the listing — a lingering session would be a
+      // full-admin one the moment the id is no longer "agent only".
+      await getRedis().del(sessionKey(id)).catch(() => undefined);
+      await getRedis().srem(BOT_ADMIN_MEMBERS_KEY, id).catch(() => undefined);
+      flash(ctx, "✖️ Agent removed and signed out.");
+      return agentsView(ctx);
+    }
     case "backup": return backupView(ctx);
     case "backuptog": { const c = await getBackupConfig(); await setBackupDaily(!c.daily); return backupView(ctx); }
     case "backupnow": {
@@ -4415,7 +4444,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await grantAdminSession(ctx, tgId);
     return true;
   }
-  if (!(await isBotAdmin(ctx.from?.id))) { await ctx.reply("Session expired — send /admin"); return true; }
+  if (!(await hasPanelSession(ctx.from?.id))) { await ctx.reply("Session expired — send /admin"); return true; }
   if (!AGENT_AWAITING.has(awaiting) && (await isAgentOnly(ctx.from?.id))) { await ctx.reply("Support agents can't do that."); return true; }
 
   if (awaiting === "admin_txnid") {
