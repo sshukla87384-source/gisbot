@@ -1421,7 +1421,7 @@ async function refMilestoneView(ctx: Ctx): Promise<void> {
     lines.push("", "<b>Top referrers</b>");
     for (const u of d.top) lines.push(`• ${u.handle ? `@${escapeHtml(u.handle)}` : escapeHtml(u.firstName ?? u.userId.slice(-6))} — ${u.purchased} bought / ${u.invited} invited`);
   }
-  lines.push("", "<i>Paid on top of the % rewards, once per milestone, in the customer's wallet currency at the live rate. Counting buyers (default) keeps fake-account farming unpaid. Runs every 5 minutes; also editable in the web portal → Store Features.</i>");
+  lines.push("", "<i>Paid on top of the % rewards, once per milestone, in the customer's wallet currency at the live rate. Default: every 10 friends invited → $0.50, again for every further 10 (only accounts still active count; ban a fake and it drops out). Switch to \"buyers\" if people farm invites. Runs every 5 minutes; also editable in the web portal → Store Features.</i>");
   await show(ctx, lines.join("\n"), kb, true);
 }
 

@@ -167,7 +167,10 @@ export interface MilestoneConfig {
 }
 
 const MILESTONE_KEY = "referral.milestones";
-const MILESTONE_DEFAULT: MilestoneConfig = { enabled: false, mode: "purchased", tiers: [], repeatLast: false };
+// Default: on, every 10 friends INVITED → $0.50, again for every further 10.
+// Invite counting only credits accounts that are still ACTIVE (a banned fake
+// account drops out of the count), and the admin can switch to "purchased".
+const MILESTONE_DEFAULT: MilestoneConfig = { enabled: true, mode: "invited", tiers: [{ count: 10, rewardUsd: 0.5 }], repeatLast: true };
 const MILESTONE_PREFIX = "refmile:";
 
 export async function getMilestoneConfig(): Promise<MilestoneConfig> {
@@ -181,7 +184,7 @@ export async function getMilestoneConfig(): Promise<MilestoneConfig> {
           .filter((t) => Number.isFinite(t.count) && t.count > 0 && Number.isFinite(t.rewardUsd) && t.rewardUsd > 0)
           .sort((a, b) => a.count - b.count)
       : [];
-    return { enabled: v.enabled === true, mode: v.mode === "invited" ? "invited" : "purchased", tiers, repeatLast: v.repeatLast === true };
+    return { enabled: v.enabled !== false, mode: v.mode === "purchased" ? "purchased" : "invited", tiers, repeatLast: v.repeatLast !== false };
   } catch {
     return MILESTONE_DEFAULT;
   }
@@ -236,8 +239,12 @@ export function nextMilestone(cfg: MilestoneConfig, n: number): MilestoneTier | 
   return null;
 }
 
+/** Who counts as "a referral" for the ladder: buyers, or every still-active invited account. */
+const countedFriendWhere = (mode: MilestoneConfig["mode"]) =>
+  mode === "purchased" ? { firstPurchaseAt: { not: null } } : { status: "ACTIVE" as const };
+
 async function referralCount(userId: string, mode: MilestoneConfig["mode"]): Promise<number> {
-  return prisma.user.count({ where: { referredById: userId, ...(mode === "purchased" ? { firstPurchaseAt: { not: null } } : {}) } });
+  return prisma.user.count({ where: { referredById: userId, ...countedFriendWhere(mode) } });
 }
 
 /** Customer-facing: where this referrer stands on the ladder. */
@@ -269,7 +276,7 @@ export async function runReferralMilestones(pageSize = 200, maxPages = 50): Prom
   for (let page = 0; page < maxPages; page++) {
     const batch = await prisma.user.groupBy({
       by: ["referredById"],
-      where: { referredById: { not: null }, ...(cfg.mode === "purchased" ? { firstPurchaseAt: { not: null } } : {}) },
+      where: { referredById: { not: null }, ...countedFriendWhere(cfg.mode) },
       _count: { _all: true },
       having: { referredById: { _count: { gte: minCount } } },
       orderBy: { referredById: "asc" },
@@ -338,7 +345,7 @@ export async function milestoneDashboard(): Promise<{
   const cfg = await getMilestoneConfig();
   const [paidRows, inviteGroups, buyGroups] = await Promise.all([
     prisma.walletTransaction.findMany({ where: { idempotencyKey: { startsWith: MILESTONE_PREFIX } }, select: { referenceNote: true } }),
-    prisma.user.groupBy({ by: ["referredById"], where: { referredById: { not: null } }, _count: { _all: true }, orderBy: { _count: { referredById: "desc" } }, take: 10 }),
+    prisma.user.groupBy({ by: ["referredById"], where: { referredById: { not: null }, status: "ACTIVE" }, _count: { _all: true }, orderBy: { _count: { referredById: "desc" } }, take: 10 }),
     prisma.user.groupBy({ by: ["referredById"], where: { referredById: { not: null }, firstPurchaseAt: { not: null } }, _count: { _all: true }, orderBy: { _count: { referredById: "desc" } }, take: 10 }),
   ]);
   const paidUsd = paidRows.reduce((s, t) => s + (Number(/\$([0-9.]+)/.exec(t.referenceNote ?? "")?.[1] ?? 0) || 0), 0);

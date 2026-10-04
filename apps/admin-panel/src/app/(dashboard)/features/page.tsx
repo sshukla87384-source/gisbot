@@ -336,7 +336,7 @@ function Referral({ f }: { f: Features }) {
         <div className="space-y-3">
           <h3 className="text-sm font-semibold">Milestone cashback ladder</h3>
           <Toggle on={ms.enabled} label="Enabled" onChange={(on) => m.mutate({ enabled: on })} disabled={m.isPending} />
-          <Toggle on={ms.mode === "purchased"} label={ms.mode === "purchased" ? "Counting friends who bought (recommended)" : "Counting friends who only started the bot"} onChange={(on) => m.mutate({ mode: on ? "purchased" : "invited" })} disabled={m.isPending} />
+          <Toggle on={ms.mode === "purchased"} label={ms.mode === "purchased" ? "Counting friends who bought" : "Counting friends invited (active accounts; default)"} onChange={(on) => m.mutate({ mode: on ? "purchased" : "invited" })} disabled={m.isPending} />
           <Toggle on={ms.repeatLast} label="Keep paying the last tier for every further batch" onChange={(on) => m.mutate({ repeatLast: on })} disabled={m.isPending} />
           <ul className="space-y-1 text-sm">
             {ms.tiers.length === 0 && <li className="text-slate-400">No milestones yet.</li>}
