@@ -22,6 +22,12 @@ interface Features {
   agents: { ids: string[] };
   alwaysAdmin: { telegramId: string | null; handle: string | null };
   faq: Array<{ id: string; q: string; a: string }>;
+  referral: { firstPct: number; repeatPct: number; holdHours: number };
+  milestones: {
+    enabled: boolean; mode: "purchased" | "invited"; repeatLast: boolean; tiers: Array<{ count: number; rewardUsd: number }>;
+    payouts: number; paidUsd: number; eligibleReferrers: number;
+    top: Array<{ userId: string; handle: string | null; firstName: string | null; invited: number; purchased: number }>;
+  };
   crypto: { configured: boolean; networks: string[]; catalogue: Array<{ code: string; label: string; stable: boolean }> };
   terminal: {
     seedConfigured: boolean; enabled: string[]; payout: Record<string, string>; sweepMinUsd: Record<string, number>;
@@ -52,6 +58,7 @@ export default function FeaturesPage() {
         <Crypto f={data} />
         <Terminal f={data} />
       </div>
+      <Referral f={data} />
       <Faq f={data} />
     </div>
   );
@@ -300,6 +307,70 @@ function Terminal({ f }: { f: Features }) {
         <NumberField label="Underpayment tolerance — volatile coins (%)" value={tol.v} step={0.1} onChange={(n) => setTol({ ...tol, v: n })} />
       </div>
       <Button variant="secondary" onClick={() => m.mutate({ toleranceStablePct: tol.s, toleranceVolatilePct: tol.v })} disabled={m.isPending}>Save tolerances</Button>
+    </Section>
+  );
+}
+
+function Referral({ f }: { f: Features }) {
+  const rates = useFeature("referral");
+  const m = useFeature("milestones");
+  const [r, setR] = useState({ first: f.referral.firstPct, repeat: f.referral.repeatPct });
+  const [tier, setTier] = useState({ count: "", usd: "" });
+  useEffect(() => setR({ first: f.referral.firstPct, repeat: f.referral.repeatPct }), [f.referral]);
+  const ms = f.milestones;
+  return (
+    <Section
+      title="🏆 Referral programme & milestone cashback"
+      hint="Percentage rewards on every referred order, plus a ladder of one-time cashbacks (e.g. 10 referrals → $0.50)."
+      badge={<Badge tone={ms.enabled ? "green" : "gray"}>{ms.enabled ? `ladder on · $${ms.paidUsd.toFixed(2)} paid` : "ladder off"}</Badge>}
+    >
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold">Percentage rewards</h3>
+          <NumberField label="Friend's first purchase (%)" value={r.first} step={0.5} onChange={(n) => setR({ ...r, first: n })} suffix="%" />
+          <NumberField label="Every purchase after (%)" value={r.repeat} step={0.5} onChange={(n) => setR({ ...r, repeat: n })} suffix="%" />
+          <p className="text-xs text-slate-500">Held {f.referral.holdHours} h against refunds, then credited to the referrer's wallet.</p>
+          <Button variant="secondary" onClick={() => rates.mutate({ firstPct: r.first, repeatPct: r.repeat })} disabled={rates.isPending}>Save rates</Button>
+        </div>
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold">Milestone cashback ladder</h3>
+          <Toggle on={ms.enabled} label="Enabled" onChange={(on) => m.mutate({ enabled: on })} disabled={m.isPending} />
+          <Toggle on={ms.mode === "purchased"} label={ms.mode === "purchased" ? "Counting friends who bought (recommended)" : "Counting friends who only started the bot"} onChange={(on) => m.mutate({ mode: on ? "purchased" : "invited" })} disabled={m.isPending} />
+          <Toggle on={ms.repeatLast} label="Keep paying the last tier for every further batch" onChange={(on) => m.mutate({ repeatLast: on })} disabled={m.isPending} />
+          <ul className="space-y-1 text-sm">
+            {ms.tiers.length === 0 && <li className="text-slate-400">No milestones yet.</li>}
+            {ms.tiers.map((t) => (
+              <li key={t.count} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-1.5">
+                <span><b>{t.count}</b> referrals → <b>${t.rewardUsd.toFixed(2)}</b> cashback</span>
+                <Button variant="ghost" onClick={() => m.mutate({ tiers: ms.tiers.filter((x) => x.count !== t.count) })} disabled={m.isPending}>Remove</Button>
+              </li>
+            ))}
+          </ul>
+          <div className="flex gap-2">
+            <Input type="number" min={1} placeholder="Referrals (e.g. 10)" value={tier.count} onChange={(e) => setTier({ ...tier, count: e.target.value })} />
+            <Input type="number" min={0.01} step={0.01} placeholder="Cashback USD (e.g. 0.5)" value={tier.usd} onChange={(e) => setTier({ ...tier, usd: e.target.value })} />
+            <Button
+              onClick={() => {
+                const count = Math.round(Number(tier.count)); const usd = Number(tier.usd);
+                if (!(count > 0) || !(usd > 0)) return;
+                m.mutate({ tiers: [...ms.tiers.filter((x) => x.count !== count), { count, rewardUsd: usd }] });
+                setTier({ count: "", usd: "" });
+              }}
+              disabled={m.isPending}
+            >Add</Button>
+          </div>
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>{ms.payouts} payouts · ${ms.paidUsd.toFixed(2)} paid · {ms.eligibleReferrers} referrers at/above the first tier</span>
+            <Button variant="secondary" onClick={() => m.mutate({ runNow: true })} disabled={m.isPending || !ms.enabled}>Pay due now</Button>
+          </div>
+          {ms.top.length > 0 && (
+            <div className="text-xs text-slate-600">
+              <p className="mb-1 font-medium">Top referrers</p>
+              {ms.top.map((u) => <p key={u.userId}>{u.handle ? `@${u.handle}` : (u.firstName ?? u.userId.slice(-6))} — {u.purchased} bought / {u.invited} invited</p>)}
+            </div>
+          )}
+        </div>
+      </div>
     </Section>
   );
 }

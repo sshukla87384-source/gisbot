@@ -18,6 +18,7 @@ import {
   getButtonConfig,
   getMiniAppConfig,
   miniAppUrl,
+  milestoneProgress,
   getCartCoupon,
   convertMinor,
   getBnplStatus,
@@ -636,7 +637,24 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
   // Referral rewards are credited to the WALLET, so they are wallet-currency
   // amounts. Printing them with user.currency mislabelled the figure after a
   // currency switch — and disagreed with 👤 My Account, which gets it right.
-  const [stats, cfg, wallet] = await Promise.all([getReferralStats(user.id), getReferralConfig(), getWallet(user.id)]);
+  const [stats, cfg, wallet, mile] = await Promise.all([getReferralStats(user.id), getReferralConfig(), getWallet(user.id), milestoneProgress(user.id).catch(() => null)]);
+  const ladder: string[] = [];
+  if (mile) {
+    const what = mile.cfg.mode === "purchased" ? "friends who buy" : "friends invited";
+    ladder.push(HR, `🏆 <b>Milestone bonuses</b> (${what})`);
+    for (const t of mile.cfg.tiers.slice(0, 6)) ladder.push(`${mile.count >= t.count ? "✅" : "▫️"} <b>${t.count}</b> → <b>$${t.rewardUsd.toFixed(2)}</b> cashback`);
+    if (mile.cfg.repeatLast && mile.cfg.tiers.length) {
+      const last = mile.cfg.tiers[mile.cfg.tiers.length - 1]!;
+      ladder.push(`🔁 …and <b>$${last.rewardUsd.toFixed(2)}</b> again for every further <b>${last.count}</b>`);
+    }
+    if (mile.next) {
+      const filled = Math.max(0, Math.min(10, Math.round((mile.count / mile.next.count) * 10)));
+      ladder.push(`${"🟩".repeat(filled)}${"⬜".repeat(10 - filled)} <b>${mile.count}/${mile.next.count}</b> — ${mile.next.count - mile.count} more to unlock $${mile.next.rewardUsd.toFixed(2)}`);
+    } else {
+      ladder.push(`🎉 You have unlocked every milestone (${mile.count} so far).`);
+    }
+    if (mile.paidUsd > 0) ladder.push(`💵 Milestone cashback received so far: <b>$${mile.paidUsd.toFixed(2)}</b>`);
+  }
   const link = `https://t.me/${botUsername}?start=ref_${user.referralCode}`;
   const store = loadConfig().STORE_NAME;
   const shareText = `🎁 Join ${store} — instant digital products at the best prices! Use my link:`;
@@ -665,6 +683,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
       `• <b>Every purchase after that</b>: you earn <b>${cfg.repeatPct}%</b>`,
       `• Rewards are held for <b>${cfg.holdHours}h</b> (anti-fraud), then auto-credited to your 💰 Wallet.`,
       `• No limit — the more friends buy, the more you earn. Spend rewards on any product.`,
+      ...ladder,
       HR,
       `🔗 <b>Your link</b> (tap to copy)`,
       `<code>${link}</code>`,

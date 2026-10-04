@@ -73,6 +73,11 @@ import {
   adminReplaceOrderItem,
   getReferralConfig,
   setReferralRate,
+  milestoneDashboard,
+  setMilestoneConfig,
+  addMilestoneTier,
+  removeMilestoneTier,
+  runReferralMilestones,
   setBnplLimit,
   adjustBnplLimit,
   settleBnplManual,
@@ -531,7 +536,8 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     ] },
     m_mkt: { title: "📣 <b>Marketing</b>", subtitle: "Reach & reward customers", rows: [
       [["📢 Broadcast", cb("adm", "bc"), "primary"], ["📣 Groups", cb("adm", "groups"), "primary"]],
-      [["🎁 Referral %", cb("adm", "refrates"), "primary"], ["🕒 BNPL Limit", cb("adm", "bnpl"), "primary"]],
+      [["🎁 Referral %", cb("adm", "refrates"), "primary"], ["🏆 Referral milestones", cb("adm", "refmile"), "success"]],
+      [["🕒 BNPL Limit", cb("adm", "bnpl"), "primary"]],
       [["🔥 Flash Sale Headline", cb("adm", "flashhead"), "primary"]],
       [["🎉 Special Sale (campaign)", cb("adm", "ssale"), "success"]],
       [["🗂 Share Full Stock List", cb("adm", "cataloglist"), "success"]],
@@ -1349,6 +1355,7 @@ async function refRatesView(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard()
     .text(`✏️ First purchase: ${c.firstPct}%`, cb("adm", "refset", "first")).row()
     .text(`✏️ Repeat purchase: ${c.repeatPct}%`, cb("adm", "refset", "repeat")).row()
+    .text("🏆 Milestone cashback dashboard", cb("adm", "refmile")).row()
     .text("◀️ Back", cb("adm", "home"));
   await show(ctx, [
     "🎁 <b>Referral rewards</b>",
@@ -1359,6 +1366,36 @@ async function refRatesView(ctx: Ctx): Promise<void> {
     "",
     "Tap a rate to change it.",
   ].join("\n"), kb, true);
+}
+
+async function refMilestoneView(ctx: Ctx): Promise<void> {
+  const d = await milestoneDashboard();
+  const c = d.cfg;
+  const kb = new InlineKeyboard()
+    .add(sbtn(c.enabled ? "⏸ Turn off" : "▶️ Turn on", cb("adm", "refmileon", c.enabled ? "0" : "1"), c.enabled ? "danger" : "success"))
+    .text(c.mode === "purchased" ? "🛍 Counting: buyers" : "👥 Counting: invites", cb("adm", "refmilemode")).row()
+    .text("➕ Add milestone", cb("adm", "refmileadd"))
+    .text(c.repeatLast ? "🔁 Repeat last: on" : "🔁 Repeat last: off", cb("adm", "refmilerep")).row();
+  for (const t of c.tiers) kb.text(`✖️ ${t.count} friends → $${t.rewardUsd.toFixed(2)}`, cb("adm", "refmilerm", String(t.count))).row();
+  kb.text("▶️ Pay due milestones now", cb("adm", "refmilerun")).row().text("◀️ Back", cb("adm", "refrates"));
+  const what = c.mode === "purchased" ? "friends who made a purchase" : "friends who started the bot";
+  const lines = [
+    "🏆 <b>Referral milestones</b>",
+    "",
+    c.enabled ? `▶️ <b>On</b> — counting <b>${what}</b>.` : "⏸ <b>Off</b> — the ladder is hidden from customers and nothing is paid.",
+    "",
+    c.tiers.length
+      ? `<b>Ladder</b>\n${c.tiers.map((t) => `• <b>${t.count}</b> ${c.mode === "purchased" ? "buyers" : "invites"} → <b>$${t.rewardUsd.toFixed(2)}</b> cashback`).join("\n")}${c.repeatLast ? `\n• then $${c.tiers[c.tiers.length - 1]!.rewardUsd.toFixed(2)} again every further ${c.tiers[c.tiers.length - 1]!.count}` : ""}`
+      : "<b>Ladder</b>: empty — tap ➕ Add milestone and send e.g. <code>10 0.5</code> (10 friends → $0.50).",
+    "",
+    `💵 Paid so far: <b>$${d.paidUsd.toFixed(2)}</b> across <b>${d.payouts}</b> payouts · 🎯 Referrers at/above first tier: <b>${d.eligibleReferrers}</b>`,
+  ];
+  if (d.top.length) {
+    lines.push("", "<b>Top referrers</b>");
+    for (const u of d.top) lines.push(`• ${u.handle ? `@${escapeHtml(u.handle)}` : escapeHtml(u.firstName ?? u.userId.slice(-6))} — ${u.purchased} bought / ${u.invited} invited`);
+  }
+  lines.push("", "<i>Paid on top of the % rewards, once per milestone, in the customer's wallet currency at the live rate. Counting buyers (default) keeps fake-account farming unpaid. Runs every 5 minutes; also editable in the web portal → Store Features.</i>");
+  await show(ctx, lines.join("\n"), kb, true);
 }
 
 const EMOJI_NAME_HINTS = "wallet, cart, vip, diamond, fire, gift, rocket, star, bolt, shop, money, chart, home, support · crypto buttons: crypto, deposit, usdt, bnb, tron, polygon, ton, sol, ltc (or a network code like usdttrc20)";
@@ -2918,6 +2955,28 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "🕒 Set a customer's <b>Pay Later (BNPL) limit</b>.\nSend: <code>&lt;@user or id&gt; &lt;amount&gt;</code> in their currency.\nExample: <code>@john 50</code> (or <code>0</code> to disable).");
       return;
     case "refrates": return refRatesView(ctx);
+    case "refmile": return refMilestoneView(ctx);
+    case "refmileon": await setMilestoneConfig({ enabled: id === "1" }); return refMilestoneView(ctx);
+    case "refmilemode": {
+      const cur = (await milestoneDashboard()).cfg;
+      await setMilestoneConfig({ mode: cur.mode === "purchased" ? "invited" : "purchased" });
+      return refMilestoneView(ctx);
+    }
+    case "refmilerep": {
+      const cur = (await milestoneDashboard()).cfg;
+      await setMilestoneConfig({ repeatLast: !cur.repeatLast });
+      return refMilestoneView(ctx);
+    }
+    case "refmilerm": await removeMilestoneTier(Number(id)); return refMilestoneView(ctx);
+    case "refmileadd":
+      ctx.session.awaiting = "admin_refmile_add";
+      await askStep(ctx, "🏆 Send <b>&lt;friends&gt; &lt;cashback USD&gt;</b>, e.g. <code>10 0.5</code> = after 10 referrals, $0.50 cashback.\nSend several lines to add several tiers at once.");
+      return;
+    case "refmilerun": {
+      const n = await runReferralMilestones();
+      flash(ctx, n > 0 ? `✅ Paid <b>${n}</b> milestone reward${n === 1 ? "" : "s"}.` : "Nothing due — every reached milestone is already paid.");
+      return refMilestoneView(ctx);
+    }
     case "refset":
       ctx.session.awaiting = id === "repeat" ? "admin_ref_repeat" : "admin_ref_first";
       await askStep(ctx, `🎁 Send the new <b>${id === "repeat" ? "repeat" : "first-purchase"}</b> referral reward percentage (e.g. <code>${id === "repeat" ? "2" : "5"}</code>). Send <code>0</code> to disable.`);
@@ -5016,6 +5075,18 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const st = await getBnplStatus(u.id);
     await ctx.reply(`✅ BNPL limit for ${escapeHtml(u.label)} set to <b>${(st.limitMinor / 100).toFixed(2)} ${st.currency}</b> (owed: ${(st.outstandingMinor / 100).toFixed(2)}).`, { parse_mode: "HTML" });
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_refmile_add") {
+    const pairs = text.split(/\n|,|;/).map((l) => l.trim()).filter(Boolean).map((l) => {
+      const m = /^(\d+)\s*[^\d.]*\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/.exec(l.replace(/[→\->=:]+/g, " "));
+      return m ? { count: Number(m[1]), rewardUsd: Number(m[2]) } : null;
+    });
+    const good = pairs.filter((p): p is { count: number; rewardUsd: number } => p !== null && p.count > 0 && p.rewardUsd > 0);
+    if (good.length === 0) { ctx.session.awaiting = "admin_refmile_add"; await ctx.reply("Send e.g. <code>10 0.5</code> — friends first, then the USD cashback.", { parse_mode: "HTML" }); return true; }
+    for (const g of good) await addMilestoneTier(g.count, g.rewardUsd);
+    flash(ctx, `✅ Added ${good.map((g) => `${g.count} → $${g.rewardUsd.toFixed(2)}`).join(", ")}.`);
+    await refMilestoneView(ctx);
     return true;
   }
   if (awaiting === "admin_ref_first" || awaiting === "admin_ref_repeat") {

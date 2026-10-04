@@ -9,6 +9,11 @@ import {
   getEnabledCryptoNetworks,
   getHideSoldOut,
   getMiniAppConfig,
+  milestoneDashboard,
+  setMilestoneConfig,
+  runReferralMilestones,
+  getReferralConfig,
+  setReferralRate,
   getNowPaymentsCreds,
   getPaymentRails,
   getRenewalConfig,
@@ -71,6 +76,15 @@ const bodies = {
     remove: z.string().max(64).optional(),
   }),
   crypto: z.object({ networks: z.array(z.string().max(24)).max(40) }),
+  referral: z.object({ firstPct: z.number().min(0).max(100).optional(), repeatPct: z.number().min(0).max(100).optional() }),
+  milestones: z.object({
+    enabled: z.boolean().optional(),
+    mode: z.enum(["purchased", "invited"]).optional(),
+    repeatLast: z.boolean().optional(),
+    tiers: z.array(z.object({ count: z.number().int().min(1).max(100_000), rewardUsd: z.number().min(0.01).max(10_000) })).max(20).optional(),
+    /** Pay every reached-but-unpaid milestone right now. */
+    runNow: z.boolean().optional(),
+  }),
   terminal: z.object({
     enabled: z.array(z.string().max(24)).max(20).optional(),
     payout: z.record(z.string().max(24), z.string().max(128)).optional(),
@@ -83,9 +97,10 @@ const bodies = {
 type FeatureName = keyof typeof bodies;
 
 async function snapshot() {
-  const [rails, risk, renewal, combo, miniapp, hideSoldOut, backup, agents, alwaysId, alwaysHandle, faq, cryptoNets, np, terminal, seed] = await Promise.all([
+  const [rails, risk, renewal, combo, miniapp, hideSoldOut, backup, agents, alwaysId, alwaysHandle, faq, cryptoNets, np, terminal, seed, referral, mile] = await Promise.all([
     getPaymentRails(), getRiskConfig(), getRenewalConfig(), getComboConfig(), getMiniAppConfig(), getHideSoldOut(), getBackupConfig(),
     listAgents(), getAlwaysAdminId(), getAlwaysAdminHandle(), listFaq(), getEnabledCryptoNetworks(), getNowPaymentsCreds(), getTerminalConfig(), hasTerminalSeed(),
+    getReferralConfig(), milestoneDashboard(),
   ]);
   return {
     rails: { upiEnabled: rails.upiEnabled, binanceEnabled: rails.binanceEnabled, upiMaxInr: rails.upiMaxMinor === null ? null : rails.upiMaxMinor / 100 },
@@ -98,6 +113,8 @@ async function snapshot() {
     agents: { ids: agents },
     alwaysAdmin: { telegramId: alwaysId, handle: alwaysHandle },
     faq,
+    referral: { firstPct: referral.firstPct, repeatPct: referral.repeatPct, holdHours: referral.holdHours },
+    milestones: { ...mile.cfg, payouts: mile.payouts, paidUsd: mile.paidUsd, eligibleReferrers: mile.eligibleReferrers, top: mile.top },
     crypto: {
       configured: np !== null,
       networks: cryptoNets,
@@ -161,6 +178,18 @@ export class FeaturesController {
         const b = validate(bodies.faq, body);
         if (b.add) await addFaq(b.add.q, b.add.a);
         if (b.remove) await removeFaq(b.remove);
+        break;
+      }
+      case "referral": {
+        const b = validate(bodies.referral, body);
+        if (b.firstPct !== undefined) await setReferralRate("first", b.firstPct);
+        if (b.repeatPct !== undefined) await setReferralRate("repeat", b.repeatPct);
+        break;
+      }
+      case "milestones": {
+        const { runNow, ...patch } = validate(bodies.milestones, body);
+        if (Object.keys(patch).length) await setMilestoneConfig(patch);
+        if (runNow) await runReferralMilestones();
         break;
       }
       case "crypto": {

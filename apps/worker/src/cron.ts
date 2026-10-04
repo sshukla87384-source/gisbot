@@ -14,6 +14,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   pollTerminalPayments,
   sweepTerminalPayments,
   runRenewalReminders,
+  runReferralMilestones,
   refundExpiredGifts,
   dailyReportExtras,
   getBackupConfig,
@@ -412,6 +413,15 @@ async function terminalSweep(): Promise<void> {
 }
 
 /** "Expires in N days — renew" reminders (hourly; one per item, ever). */
+async function referralMilestones(): Promise<void> {
+  const n = await runReferralMilestones();
+  if (n > 0) {
+    await prisma.auditLog.create({
+      data: { actorType: "SYSTEM", action: "cron.referralMilestones", entityType: "Wallet", after: { payouts: n } },
+    }).catch(() => undefined);
+  }
+}
+
 async function renewalReminders(): Promise<void> {
   const n = await runRenewalReminders();
   if (n > 0) {
@@ -505,6 +515,7 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     every(3600, "resellerstmt", 86_390, resellerStatements),
     every(3600, "renewals", 3590, renewalReminders),
     every(3600, "giftrefunds", 3590, giftRefunds),
+    every(300, "refmilestones", 290, referralMilestones),
     every(3600, "dailybackup", 86_390, dailyBackup),
   ];
 }
