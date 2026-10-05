@@ -15,6 +15,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   sweepTerminalPayments,
   runRenewalReminders,
   runReferralMilestones,
+  findWalletMismatches,
   releaseMaturedReferralRewards,
   refundExpiredGifts,
   dailyReportExtras,
@@ -251,20 +252,20 @@ async function lowStockAlerts(): Promise<void> {
 
 /** Ledger reconciliation: cached balance must equal SUM(ledger) (daily). */
 async function reconcileWallets(): Promise<void> {
-  const mismatches = await prisma.$queryRaw<Array<{ id: string; cached: bigint; actual: bigint | null }>>`
-    SELECT w."id", w."balanceMinor" AS "cached", SUM(t."amountMinor") AS "actual"
-    FROM "Wallet" w
-    LEFT JOIN "WalletTransaction" t ON t."walletId" = w."id"
-    GROUP BY w."id", w."balanceMinor"
-    HAVING w."balanceMinor" <> COALESCE(SUM(t."amountMinor"), 0)`;
-  if (mismatches.length > 0) {
-    await enqueueAdminAlert(
-      `🚨 Wallet reconciliation found ${mismatches.length} mismatch(es): ${mismatches
-        .slice(0, 5)
-        .map((m) => m.id)
-        .join(", ")}`,
-    );
-  }
+  // Daily check that every wallet's balance equals the sum of its history.
+  // The alert says WHO and by HOW MUCH, and offers the one-tap repair.
+  const mismatches = await findWalletMismatches(20);
+  if (mismatches.length === 0) return;
+  const money = (m: number, c: string) => `${c === "INR" ? "₹" : "$"}${(Math.abs(m) / 100).toFixed(2)}`;
+  await enqueueAdminAlert(
+    [
+      `🧮 <b>Wallet check: ${mismatches.length} wallet${mismatches.length === 1 ? "" : "s"} where the balance ≠ its history</b>`,
+      "",
+      ...mismatches.slice(0, 8).map((m) => `• ${m.label}: balance <b>${money(m.cachedMinor, m.currency)}</b>, history adds up to ${money(m.ledgerMinor, m.currency)} (${m.diffMinor > 0 ? "+" : "−"}${money(m.diffMinor, m.currency)})`),
+      "",
+      "Usually a currency switch made before switches were recorded in the history — the customer's balance is right, the history is missing a line. Open 🧰 Tools → 🧮 Wallet check to add the missing line (balances are not changed).",
+    ].join("\n"),
+  );
 }
 
 /** Remind anyone who left a payment half-finished — once each (every 5 min). */

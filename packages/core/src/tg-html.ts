@@ -189,7 +189,7 @@ export function entitiesToTelegramHtml(text: string, entities: readonly TgEntity
       default: return "</blockquote>";
     }
   };
-  const usable = ents.map((e) => ({ e, o: open(e) })).filter((x): x is { e: TgEntity; o: string } => x.o !== null);
+  const usable = ents.map((e, idx) => ({ e, o: open(e), idx })).filter((x): x is { e: TgEntity; o: string; idx: number } => x.o !== null);
   // Telegram nests entities properly; emit at each boundary the closers
   // (innermost first) then the openers (outermost first).
   const points = new Set<number>([0, text.length]);
@@ -198,9 +198,11 @@ export function entitiesToTelegramHtml(text: string, entities: readonly TgEntity
   let out = "";
   for (let k = 0; k < sorted.length; k++) {
     const p = sorted[k]!;
-    const ending = usable.filter(({ e }) => e.offset + e.length === p).sort((a, b) => b.e.offset - a.e.offset || a.e.length - b.e.length);
+    // Ties (two entities on the same range) break by entity order: opened in
+    // order, closed in exact reverse — otherwise <b><i>x</b></i>.
+    const ending = usable.filter(({ e }) => e.offset + e.length === p).sort((a, b) => b.e.offset - a.e.offset || a.e.length - b.e.length || b.idx - a.idx);
     for (const { e } of ending) out += close(e);
-    const starting = usable.filter(({ e }) => e.offset === p).sort((a, b) => b.e.length - a.e.length);
+    const starting = usable.filter(({ e }) => e.offset === p).sort((a, b) => b.e.length - a.e.length || a.idx - b.idx);
     for (const { o } of starting) out += o;
     const next = sorted[k + 1];
     if (next !== undefined) out += esc(text.slice(p, next));

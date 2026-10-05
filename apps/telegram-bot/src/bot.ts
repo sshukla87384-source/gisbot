@@ -139,7 +139,7 @@ import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminText, is
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
 import { LOCALES, t } from "./i18n.js";
-import { vipAnimation, successCard, num } from "./premium.js";
+import { withPurchaseAnimation, successCard, num } from "./premium.js";
 import { e as pe, networkEmoji } from "./emoji.js";
 import * as views from "./views.js";
 import type { View } from "./views.js";
@@ -390,10 +390,10 @@ export function createBot(): Bot<Ctx> {
     // Admins always get through, otherwise enabling it would lock the operator
     // out of the very panel that turns it back off. /admin stays reachable for
     // the same reason, before the passcode session exists.
-    const isAdminHere = await isBotAdmin(ctx.from.id);
     const cmd = ctx.message?.text ?? "";
+    // Both lookups at once: this runs on every single update.
+    const [isAdminHere, maint] = await Promise.all([isBotAdmin(ctx.from.id), getMaintenance()]);
     if (!isAdminHere && !cmd.startsWith("/admin")) {
-      const maint = await getMaintenance();
       if (maint.enabled) {
         await ctx.reply(maint.message, { parse_mode: "HTML" }).catch(() => undefined);
         return;
@@ -1442,6 +1442,41 @@ export function createBot(): Bot<Ctx> {
   });
 
   // ── Callback router (Bot UX doc §1: every callback answered < 1 s) ──
+  // ── Instant feel ──
+  // A button's spinner stays until the callback is answered, and most handlers
+  // answered only after their database work. Now: if a handler has not
+  // answered within 250 ms the spinner is cleared for it; a later answer with
+  // an ALERT is shown as a short self-deleting note instead of being lost
+  // (plain toasts are simply dropped). Anything still running after 0.7 s gets
+  // Telegram's "typing…" indicator, so the customer always sees motion.
+  bot.use(async (ctx, next) => {
+    if (!ctx.chat) return next();
+    const typing = setTimeout(() => { void ctx.api.sendChatAction(ctx.chat!.id, "typing").catch(() => undefined); }, 700);
+    if (!ctx.callbackQuery) {
+      try { return await next(); } finally { clearTimeout(typing); }
+    }
+    let answered = false;
+    const original = ctx.answerCallbackQuery.bind(ctx);
+    const patched = async (other?: Parameters<typeof original>[0]): Promise<true> => {
+      if (!answered) { answered = true; return original(other); }
+      const opt = typeof other === "string" ? { text: other, show_alert: false } : (other ?? {});
+      if (opt.text && opt.show_alert && ctx.chat) {
+        const note = await ctx.reply(opt.text).catch(() => undefined);
+        if (note) setTimeout(() => { void ctx.api.deleteMessage(ctx.chat!.id, note.message_id).catch(() => undefined); }, 8000);
+      }
+      return true;
+    };
+    (ctx as unknown as { answerCallbackQuery: typeof patched }).answerCallbackQuery = patched;
+    const early = setTimeout(() => { if (!answered) { answered = true; void original().catch(() => undefined); } }, 250);
+    try {
+      await next();
+    } finally {
+      clearTimeout(early);
+      clearTimeout(typing);
+      if (!answered) { answered = true; await original().catch(() => undefined); }
+    }
+  });
+
   bot.on("callback_query:data", async (ctx) => {
     const parsed = parseCb(ctx.callbackQuery.data);
     if (!parsed) {
@@ -1665,8 +1700,8 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:paywalletok": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
-          await vipAnimation(ctx);
-          const result = await checkoutWithWallet(user.id);
+          // The animation runs while the order is processed, not before it.
+          const result = await withPurchaseAnimation(ctx, () => checkoutWithWallet(user.id));
           await ctx.reply(
             successCard("Order Success", [
               `✅ Payment confirmed`,
@@ -1771,9 +1806,8 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:paybnplok": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
-          await vipAnimation(ctx);
           try {
-            const result = await checkoutWithBnpl(user.id);
+            const result = await withPurchaseAnimation(ctx, () => checkoutWithBnpl(user.id));
             await ctx.reply(
               successCard("Order Placed — Pay Later", [
                 `✅ Placed on 🕒 Pay Later (BNPL)`,

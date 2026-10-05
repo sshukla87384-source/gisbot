@@ -135,6 +135,9 @@ import {
   scheduleBroadcast,
   setFlashSale,
   setProductImage,
+  setCustomEmojiEntries,
+  findWalletMismatches,
+  repairWalletLedger,
   getAutoEmojiConfig,
   setAutoEmojiConfig,
   premiumGlyphMap,
@@ -581,6 +584,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🔄 Re-derive INR prices", cb("adm", "tlprice"), "success"], ["📈 Bulk ±%", cb("adm", "tladj"), "primary"]],
       [["🔍 Find order by key", cb("adm", "tlkey"), "primary"]],
       [["📊 Stock health", cb("adm", "tlstock"), "primary"], ["🛡 Customer risk", cb("adm", "tlrisk"), "primary"]],
+      [["🧮 Wallet check", cb("adm", "wchk"), "primary"]],
       [["📄 Export orders (CSV)", cb("adm", "tlcsv"), "primary"]],
       [["💾 Backup (JSON)", cb("adm", "backup"), "success"]],
     ] },
@@ -1262,7 +1266,8 @@ function descriptionFromMessage(ctx: Ctx, text: string): { description: string; 
     return { description: text.slice(0, 4000), descriptionHtml: html };
   }
   if (looksLikeTelegramHtml(text)) {
-    return { description: plainDescription(text).slice(0, 4000), descriptionHtml: sanitizeTelegramHtml(text).slice(0, 8000) };
+    // Cut the source, then clean it: cutting the HTML could split a tag.
+    return { description: plainDescription(text).slice(0, 4000), descriptionHtml: sanitizeTelegramHtml(text.slice(0, 6000)) };
   }
   return { description: text.slice(0, 4000), descriptionHtml: null };
 }
@@ -4105,6 +4110,29 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_tool_key";
       await askStep(ctx, "🔍 Paste the key, or the <b>id</b> of an account, to trace who received it:");
       return;
+    case "wchk": {
+      const list = await findWalletMismatches(20);
+      const kb = new InlineKeyboard();
+      if (list.length > 0) kb.add(sbtn(`🔧 Add the missing history line (${list.length})`, cb("adm", "wfix"), "success")).row();
+      kb.text("🔄 Refresh", cb("adm", "wchk")).text("◀️ Back", cb("adm", "m_tools"));
+      await show(ctx, [
+        "🧮 <b>Wallet check</b>",
+        "",
+        list.length === 0
+          ? "✅ Every wallet's balance matches its history."
+          : list.map((m) => `• ${escapeHtml(m.label)}: balance <b>${fmt(m.cachedMinor, m.currency)}</b> · history ${fmt(m.ledgerMinor, m.currency)} · diff ${fmt(m.diffMinor, m.currency)}`).join("\n"),
+        "",
+        "<i>A mismatch means the balance changed without a matching history line — before this update a currency switch did exactly that. Repair adds one ADJUSTMENT line per wallet so the history adds up; nobody's balance changes.</i>",
+      ].join("\n"), kb, true);
+      return;
+    }
+    case "wfix": {
+      const list = await findWalletMismatches(50);
+      let n = 0;
+      for (const m of list) { const r = await repairWalletLedger(m.walletId, ctx.user.id).catch(() => ({ repaired: false })); if (r.repaired) n++; }
+      flash(ctx, `🔧 Repaired <b>${n}</b> wallet histor${n === 1 ? "y" : "ies"}.`);
+      return handleAdminCallback(ctx, "wchk", []);
+    }
     case "tlstock": {
       const h = await stockHealth();
       const kb = new InlineKeyboard().text("🔄 Refresh", cb("adm", "tlstock")).text("◀️ Back", cb("adm", "m_tools"));
@@ -5169,12 +5197,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
   if (awaiting === "admin_emoji_pack") {
-    const packNames = [...text.matchAll(/(?:t\.me\/addemoji\/|^|\s)([A-Za-z0-9_]{3,64})(?=\s|$)/g)].map((m) => m[1]!).filter((n) => !/^(https?|t|me|addemoji)$/i.test(n));
+    const linked = [...text.matchAll(/addemoji\/([A-Za-z0-9_]{3,64})/g)].map((m) => m[1]!);
+    const packNames = linked.length > 0 ? linked : (/^[A-Za-z0-9_]{3,64}$/.test(text.trim()) ? [text.trim()] : []);
     if (packNames.length === 0) { ctx.session.awaiting = "admin_emoji_pack"; await askStep(ctx, "Send a link like <code>https://t.me/addemoji/PackName</code>."); return true; }
     const existing = await premiumGlyphMap().catch(() => ({ map: new Map<string, string>() }));
     const have = new Set(existing.map.keys());
     let added = 0;
     const report: string[] = [];
+    const batch: Array<{ name: string; id: string; glyph: string }> = [];
     for (const name of packNames.slice(0, 10)) {
       try {
         const set = await ctx.api.getStickerSet(name);
@@ -5186,7 +5216,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
           const key = glyph.replace(/\uFE0F/g, "");
           if (!id || !key || have.has(key)) continue; // first pack wins; your own picks are never overwritten
           have.add(key);
-          await setCustomEmojiEntry(`pack_${[...key].map((ch) => ch.codePointAt(0)!.toString(16)).join("_")}`.slice(0, 24), id, glyph);
+          batch.push({ name: `pack_${[...key].map((ch) => ch.codePointAt(0)!.toString(16)).join("_")}`.slice(0, 24), id, glyph });
           n++;
         }
         added += n;
@@ -5195,6 +5225,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
         report.push(`❌ ${escapeHtml(name)}: pack not found`);
       }
     }
+    // One write for the whole import, not a read-modify-write per emoji.
+    if (batch.length > 0) await setCustomEmojiEntries(batch);
     invalidatePremiumGlyphMap();
     setDynamicEmojis(await getCustomEmojiRegistry());
     flash(ctx, `📦 Imported <b>${added}</b> premium emoji.\n${report.join("\n")}`);
@@ -5207,15 +5239,17 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const msgText = ctx.message?.text ?? text;
     let added = 0;
     const seen = new Set<string>();
+    const bulk: Array<{ name: string; id: string; glyph: string }> = [];
     for (const e of ents.slice(0, 100)) {
       const glyph = msgText.slice(e.offset, e.offset + e.length);
       const key = glyph.replace(/\uFE0F/g, "");
       if (!key || seen.has(key)) continue;
       seen.add(key);
       const name = `auto_${[...key].map((ch) => ch.codePointAt(0)!.toString(16)).join("_")}`.slice(0, 24);
-      await setCustomEmojiEntry(name, e.custom_emoji_id!, glyph);
+      bulk.push({ name, id: e.custom_emoji_id!, glyph });
       added++;
     }
+    if (bulk.length > 0) await setCustomEmojiEntries(bulk);
     invalidatePremiumGlyphMap();
     setDynamicEmojis(await getCustomEmojiRegistry());
     flash(ctx, `✅ Added <b>${added}</b> premium emoji — they now replace the plain ones across the bot.`);
@@ -5270,8 +5304,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
   if (awaiting === "admin_ref_months") {
-    const m = Number.parseInt(text.replace(/\D/g, ""), 10);
-    if (!Number.isFinite(m) || m < 0 || m > 120) { ctx.session.awaiting = "admin_ref_months"; await ctx.reply("Send a number of months between 0 and 120 (0 = lifetime)."); return true; }
+    const m = Number(text.trim());
+    if (!Number.isInteger(m) || m < 0 || m > 120) { ctx.session.awaiting = "admin_ref_months"; await ctx.reply("Send a number of months between 0 and 120 (0 = lifetime)."); return true; }
     await setReferralCommissionMonths(m);
     flash(ctx, m > 0 ? `✅ Repeat commission now runs for <b>${m} month${m === 1 ? "" : "s"}</b> after a friend's first purchase.` : "✅ Repeat commission now runs for <b>life</b>.");
     await refRatesView(ctx);

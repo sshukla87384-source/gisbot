@@ -196,9 +196,15 @@ const MARKUP_METHODS = new Set([...TEXT_METHODS, ...CAPTION_METHODS, "editMessag
  * premiumizes every outgoing message. On a 400 caused by what it added, the
  * call is repeated exactly as the caller made it — never worse than before.
  */
+/** A 400 the premium additions can cause — and only those trigger the plain retry. */
+const PREMIUM_CAUSE = /custom.?emoji|CUSTOM_EMOJI|DOCUMENT_INVALID|ENTITY|entities|icon|EMOJI/i;
+
 export function premiumEmojiTransformer(opts: { buttons: boolean }) {
+  // When Telegram refuses premium emoji (bot owner without Premium), stop
+  // adding them for a while instead of paying two API calls per message.
+  let refusedUntil = 0;
   return async (prev: ApiCall, method: string, payload: unknown, signal?: AbortSignal) => {
-    if (!MARKUP_METHODS.has(method) || !payload || typeof payload !== "object") return prev(method, payload, signal);
+    if (!MARKUP_METHODS.has(method) || !payload || typeof payload !== "object" || Date.now() < refusedUntil) return prev(method, payload, signal);
     let state: { cfg: AutoEmojiConfig; map: Map<string, string> };
     try { state = await premiumGlyphMap(); } catch { return prev(method, payload, signal); }
     if (!state.cfg.enabled || state.map.size === 0) return prev(method, payload, signal);
@@ -212,7 +218,13 @@ export function premiumEmojiTransformer(opts: { buttons: boolean }) {
     const changed = next.text !== p.text || next.caption !== p.caption || next.reply_markup !== p.reply_markup;
     if (!changed) return prev(method, payload, signal);
     const res = await prev(method, next, signal);
-    if (!res.ok && res.error_code === 400) return prev(method, payload, signal);
+    // Retry plain only for a premium-caused rejection. "message is not
+    // modified", "chat not found" and the like are returned as they are — a
+    // retry would flip an unchanged message between premium and plain.
+    if (!res.ok && res.error_code === 400 && PREMIUM_CAUSE.test(res.description ?? "") && !/not modified/i.test(res.description ?? "")) {
+      refusedUntil = Date.now() + 10 * 60_000;
+      return prev(method, payload, signal);
+    }
     return res;
   };
 }

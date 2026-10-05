@@ -249,7 +249,12 @@ export async function announceProduct(
   const usdMinor = usdPriced.length > 0 ? Math.min(...usdPriced) : null;
   const btnEmoji = productEmoji(p.iconEmoji, p.name);
   const priceTxt = usdMinor !== null ? `${(usdMinor / 100).toFixed(2)} USDT` : cheapest ? fmtMinor(cheapest.minor, cheapest.currency) : "";
-  const buttonText = `${btnEmoji ? `${btnEmoji} ` : ""}${stripLeadingEmoji(p.name)}${priceTxt ? ` - ${priceTxt}` : ""}${unlimited || totalStock > 0 ? ` (Stock: ${stockTxt})` : ""}`.slice(0, 64);
+  const suffix = `${priceTxt ? ` - ${priceTxt}` : ""}${unlimited || totalStock > 0 ? ` (Stock: ${stockTxt})` : ""}`;
+  const head = `${btnEmoji ? `${btnEmoji} ` : ""}${stripLeadingEmoji(p.name)}`;
+  // Telegram caps a label at 64 characters: shorten the NAME (by whole
+  // characters, never splitting an emoji) and keep price and stock intact.
+  const room = Math.max(8, 64 - suffix.length);
+  const buttonText = `${head.length > room ? `${[...head].slice(0, room - 1).join("")}…` : head}${suffix}`;
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
 
   const res = await sendBroadcast({
@@ -447,7 +452,10 @@ export async function announceRestock(
         `${iconHtml}${nameDisp} — Stock: ${currentStock}`,
       ].join("\n")
     : `📣 <b>${qtyAdded} new stock added for</b> ${iconHtml}${nameDisp}`;
-  const btnLabel = `${iconTxt}${stripLeadingEmoji(p.name)} - ${usdt} USDT (Stock: ${currentStock})`.slice(0, 64);
+  const rsSuffix = ` - ${usdt} USDT (Stock: ${currentStock})`;
+  const rsHead = `${iconTxt}${stripLeadingEmoji(p.name)}`;
+  const rsRoom = Math.max(8, 64 - rsSuffix.length);
+  const btnLabel = `${rsHead.length > rsRoom ? `${[...rsHead].slice(0, rsRoom - 1).join("")}…` : rsHead}${rsSuffix}`;
 
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
   const res = await sendBroadcast({

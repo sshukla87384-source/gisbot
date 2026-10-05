@@ -54,33 +54,65 @@ export function errorCard(reason: string): string {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * VIP purchase animation — edits ONE message through frames (~900ms each).
- * Cosmetic only; the caller performs the real checkout separately.
+ * The purchase animation, run ALONGSIDE the real work instead of before it.
+ *
+ * The old version played six 900 ms frames and only then started the checkout,
+ * so every wallet purchase waited ~6 s for a cartoon. Now the first frame goes
+ * out at once, frames tick while the order is processed (≈ every 0.6 s — fast
+ * enough to feel alive, slow enough for Telegram's edit limits), and the
+ * moment the work finishes the final frame shows and the message is removed.
+ * The work's result or error passes straight through.
  */
-export async function vipAnimation(ctx: Context): Promise<void> {
-  const bar = (f: number) => "🟩".repeat(f) + "□".repeat(10 - f);
-  const frames = [
-    `${bar(1)}\n⏳ ${bold("Initializing Purchase")}…`,
-    `${bar(3)}\n📈 ${bold("Checking Stock")}…`,
-    `${bar(5)}\n💳 ${bold("Processing Payment")}…`,
-    `${bar(7)}\n📦 ${bold("Preparing Account")}…`,
-    `${bar(9)}\n🚀 ${bold("Delivering Product")}…`,
-    `${bar(10)}\n🎉 ${bold("Order Completed Successfully")}`,
-  ];
+export async function withPurchaseAnimation<T>(ctx: Context, work: () => Promise<T>): Promise<T> {
+  const steps = [
+    ["🔐", "Securing payment"],
+    ["📦", "Reserving your item"],
+    ["⚡", "Preparing delivery"],
+    ["🚀", "Almost there"],
+  ] as const;
+  const spinner = ["◐", "◓", "◑", "◒"];
+  const frame = (i: number, pct: number): string => {
+    const [icon, label] = steps[Math.min(steps.length - 1, Math.floor(i / 2))]!;
+    const filled = Math.round(pct / 10);
+    return `${spinner[i % spinner.length]} ${bold("Processing your order")}\n${"▰".repeat(filled)}${"▱".repeat(10 - filled)} <b>${num(pct)}%</b>\n${icon} ${label}…`;
+  };
   let msgId: number | undefined;
+  let done = false;
+  let tick = 0;
+  let pct = 12;
   try {
-    const sent = await ctx.reply(frames[0]!, { parse_mode: "HTML" });
+    const sent = await ctx.reply(frame(0, pct), { parse_mode: "HTML" });
     msgId = sent.message_id;
-    for (let i = 1; i < frames.length; i++) {
-      await sleep(900);
-      if (ctx.chat) await ctx.api.editMessageText(ctx.chat.id, msgId, frames[i]!, { parse_mode: "HTML" }).catch(() => undefined);
+  } catch { /* animation is best-effort */ }
+  const loop = (async () => {
+    while (!done && msgId && ctx.chat) {
+      await sleep(600);
+      if (done) break;
+      tick++;
+      // Ease towards 90 % — it never claims "done" before the work is.
+      pct = Math.min(90, pct + Math.max(3, Math.round((90 - pct) / 3)));
+      await ctx.api.editMessageText(ctx.chat.id, msgId, frame(tick, pct), { parse_mode: "HTML" }).catch(() => undefined);
     }
-    await sleep(700);
-    // The animation has played; the real receipt and the delivery follow it.
-    // Leaving "Order Completed Successfully" behind just pushes the customer's
-    // keys further up the chat.
-    if (ctx.chat && msgId) await ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
-  } catch {
-    /* animation is best-effort */
+  })();
+  try {
+    const result = await work();
+    done = true;
+    await loop;
+    if (msgId && ctx.chat) {
+      await ctx.api.editMessageText(ctx.chat.id, msgId, `✅ ${bold("Payment confirmed")}\n${"▰".repeat(10)} <b>${num(100)}%</b>\n🎉 Delivering now…`, { parse_mode: "HTML" }).catch(() => undefined);
+      await sleep(450);
+      await ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
+    }
+    return result;
+  } catch (e) {
+    done = true;
+    await loop;
+    if (msgId && ctx.chat) await ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
+    throw e;
   }
+}
+
+/** @deprecated kept for callers outside the purchase path. */
+export async function vipAnimation(ctx: Context): Promise<void> {
+  await withPurchaseAnimation(ctx, async () => undefined);
 }

@@ -9,12 +9,11 @@ import { getRedis } from "./redis.js";
 import { productRatings } from "./followup.service.js";
 import { getHideSoldOut, stockMapFor, UNLIMITED_STOCK } from "./catalog/catalog.service.js";
 import { getLedger, getWallet } from "./wallet/wallet.service.js";
-import { addToCart, clearCart, getCartView } from "./cart/cart.service.js";
 import { checkoutWithWallet, type CheckoutResult } from "./orders/checkout.service.js";
 import { listOrders, revealOrderDeliveries } from "./orders/order.service.js";
 import { buildCombinedDeliveryText, buildDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./orders/assign.js";
 import { DELIVERY_FOLLOWUP, deliveryButtons, enqueueTelegramDocument, enqueueTelegramMessage } from "./queues.js";
-import { firstOrderAllowed, listMyGifts, syncComboDiscount } from "./growth.service.js";
+import { firstOrderAllowed, listMyGifts } from "./growth.service.js";
 import { getReferralConfig, milestoneProgress, referralEarnings } from "./referral.service.js";
 import { getReferralStats, setUserCurrency } from "./users/user.service.js";
 import { tierOf } from "./loyalty.service.js";
@@ -188,8 +187,8 @@ export async function miniAppProfile(telegramId: string): Promise<{ known: boole
 export const publicImageUrl = (url: string | null | undefined): string | null => (url && /^https?:\/\//i.test(url) ? url : null);
 
 /** The customer behind a verified initData, or null when they never started the bot. */
-export async function resolveMiniAppUser(initData: string): Promise<{ id: string; telegramId: bigint; currency: Currency; firstName: string | null; referralCode: string; locale: string } | null> {
-  const tg = verifyInitData(initData);
+export async function resolveMiniAppUser(initData: string, maxAgeSec = 86_400): Promise<{ id: string; telegramId: bigint; currency: Currency; firstName: string | null; referralCode: string; locale: string } | null> {
+  const tg = verifyInitData(initData, maxAgeSec);
   if (!tg) return null;
   const u = await prisma.user.findFirst({
     where: { telegramId: BigInt(tg.telegramId), status: "ACTIVE" },
@@ -264,7 +263,7 @@ export async function miniAppReferral(userId: string, referralCode: string, botU
     holdHours: cfg.holdHours,
     commissionMonths: cfg.commissionMonths,
     milestones: mile ? { mode: mile.cfg.mode, tiers: mile.cfg.tiers, repeatLast: mile.cfg.repeatLast, count: mile.count, next: mile.next, paidUsd: mile.paidUsd } : null,
-    held: earn ? { minor: earn.heldMinor, currency: earn.heldCurrency, count: earn.heldCount, readyCount: earn.readyCount, nextReleaseAt: earn.nextReleaseAt?.toISOString() ?? null } : null,
+    held: earn ? { minor: earn.heldMinor, readyMinor: earn.readyMinor, currency: earn.heldCurrency, count: earn.heldCount, readyCount: earn.readyCount, nextReleaseAt: earn.nextReleaseAt?.toISOString() ?? null } : null,
   };
 }
 
@@ -291,56 +290,71 @@ export async function miniAppProfileFull(userId: string, telegramId: bigint) {
 
 export type MiniAppBuyResult =
   | { ok: true; orderId: string; orderNumber: string; totalMinor: number; currency: Currency; pendingManual: number; delivered: Array<{ productName: string; variantName: string; values: Array<{ label: string; value: string }> }> }
-  | { ok: false; reason: "insufficient" | "stock" | "unavailable" | "first_order_cap" | "daily_limit" | "error"; message: string; needMinor?: number; currency?: Currency };
+  | { ok: false; reason: "insufficient" | "stock" | "unavailable" | "first_order_cap" | "daily_limit" | "price_changed" | "error"; message: string; needMinor?: number; currency?: Currency };
 
 /**
  * Buy one variant with the wallet, from the Mini App. Same gates as the bot's
- * checkout (order limits, combo), the cart is replaced by this one line so
- * what the page quoted is what is charged, and the delivery goes to the chat
- * exactly as a bot purchase would — plus it is returned for the page to show.
+ * checkout (order limits), priced live on the server — never from the page's
+ * cached quote — and refused if the price rose above what the buyer was shown.
+ * The customer's bot cart and coupon are NOT touched: the basket is passed
+ * straight to checkout. One purchase at a time per customer (Redis lock), and
+ * the delivery also goes to the chat exactly as a bot purchase would.
  */
-export async function miniAppBuyWithWallet(user: { id: string; telegramId: bigint; currency: Currency }, variantId: string, qty: number): Promise<MiniAppBuyResult> {
+export async function miniAppBuyWithWallet(
+  user: { id: string; telegramId: bigint; currency: Currency },
+  variantId: string,
+  qty: number,
+  quote?: { totalMinor: number; currency: Currency },
+): Promise<MiniAppBuyResult> {
   const quantity = Math.max(1, Math.min(50, Math.round(qty)));
+  const redis = getRedis();
+  const lockKey = `buylock:${user.id}`;
+  const locked = await redis.set(lockKey, "1", "EX", 30, "NX").catch(() => "OK");
+  if (locked !== "OK") return { ok: false, reason: "error", message: "Your previous purchase is still processing — one moment." };
   try {
-    await clearCart(user.id);
-    await addToCart(user.id, variantId, quantity);
-  } catch {
-    return { ok: false, reason: "unavailable", message: "That product is no longer available." };
+    const variant = await prisma.productVariant.findFirst({
+      where: { id: variantId, isActive: true, deletedAt: null, product: { status: "ACTIVE", deletedAt: null } },
+      select: { id: true },
+    });
+    if (!variant) return { ok: false, reason: "unavailable", message: "That product is no longer available." };
+    const wallet = await getWallet(user.id);
+    // The order limits look at the amount; use the quote when there is one,
+    // the server price decides the charge either way.
+    const approx = quote ? (quote.currency === wallet.currency ? quote.totalMinor : convertPriceMinor(quote.totalMinor, quote.currency, wallet.currency)) : 0;
+    const gate = await firstOrderAllowed(user.id, approx, wallet.currency).catch(() => ({ ok: true as const }));
+    if (!gate.ok) {
+      return gate.reason === "daily_limit"
+        ? { ok: false, reason: "daily_limit", message: `Daily limit: up to ${gate.maxPerDay} orders per 24 hours. Please try again later.` }
+        : { ok: false, reason: "first_order_cap", message: `New accounts can order up to $${gate.maxUsd} for the first ${gate.hoursLeft} h — start with a smaller order.` };
+    }
+    // 1 % headroom for currency rounding between the page's quote and the wallet.
+    const maxTotalMinor = quote ? Math.ceil(approx * 1.01) + 1 : undefined;
+    let result: CheckoutResult;
+    try {
+      result = await checkoutWithWallet(user.id, "DIRECT", { direct: [{ variantId, quantity }], ...(maxTotalMinor !== undefined ? { maxTotalMinor } : {}) });
+    } catch (e) {
+      const code = isCoreError(e) ? e.code : "";
+      if (code === "VALIDATION_FAILED" && isCoreError(e) && e.message === "PRICE_CHANGED") {
+        const m = e.meta as { totalMinor?: number; currency?: Currency } | undefined;
+        return { ok: false, reason: "price_changed", message: `The price just changed${m?.totalMinor ? ` to ${formatMinor(m.totalMinor, (m.currency ?? wallet.currency) as CurrencyCode)}` : ""} — please check and tap again.` };
+      }
+      if (code === "INSUFFICIENT_BALANCE") return { ok: false, reason: "insufficient", message: "Wallet balance is too low — top up first.", currency: wallet.currency };
+      if (code === "OUT_OF_STOCK" || code === "CART_ITEM_UNAVAILABLE") return { ok: false, reason: "stock", message: "Not enough stock for that right now — please pick another option." };
+      return { ok: false, reason: "error", message: "Could not complete the purchase. Nothing was charged." };
+    }
+    await dispatchDeliveriesToTelegram(user.telegramId, result).catch(() => undefined);
+    return {
+      ok: true,
+      orderId: result.orderId,
+      orderNumber: result.orderNumber,
+      totalMinor: result.totalMinor,
+      currency: result.currency,
+      pendingManual: result.pendingManualItems,
+      delivered: result.deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, values: deliveredValues({ kind: d.kind, ...d.secret }) })),
+    };
+  } finally {
+    await redis.del(lockKey).catch(() => undefined);
   }
-  const wallet = await getWallet(user.id);
-  const cart = await getCartView(user.id, wallet.currency);
-  if (!cart.allAvailable) return { ok: false, reason: "stock", message: "Not enough stock for that quantity right now." };
-  await syncComboDiscount(user.id, wallet.currency).catch(() => undefined);
-  const gate = await firstOrderAllowed(user.id, cart.subtotalMinor, wallet.currency).catch(() => ({ ok: true as const }));
-  if (!gate.ok) {
-    return gate.reason === "daily_limit"
-      ? { ok: false, reason: "daily_limit", message: `Daily limit: up to ${gate.maxPerDay} orders per 24 hours. Please try again later.` }
-      : { ok: false, reason: "first_order_cap", message: `New accounts can order up to $${gate.maxUsd} for the first ${gate.hoursLeft} h — start with a smaller order.` };
-  }
-  if (Number(wallet.balanceMinor) < cart.subtotalMinor) {
-    return { ok: false, reason: "insufficient", message: "Wallet balance is too low — top up first.", needMinor: cart.subtotalMinor - Number(wallet.balanceMinor), currency: wallet.currency };
-  }
-  let result: CheckoutResult;
-  try {
-    result = await checkoutWithWallet(user.id, "DIRECT");
-  } catch (e) {
-    const code = isCoreError(e) ? e.code : "";
-    if (code === "INSUFFICIENT_BALANCE") return { ok: false, reason: "insufficient", message: "Wallet balance is too low — top up first.", currency: wallet.currency };
-    if (code === "OUT_OF_STOCK" || code === "CART_ITEM_UNAVAILABLE") return { ok: false, reason: "stock", message: "Sold out while you were deciding — please pick another option." };
-    return { ok: false, reason: "error", message: "Could not complete the purchase. Nothing was charged." };
-  }
-  // The chat gets the same delivery a bot purchase sends (keys message + the
-  // detached navigation), so the customer has it in two places.
-  await dispatchDeliveriesToTelegram(user.telegramId, result).catch(() => undefined);
-  return {
-    ok: true,
-    orderId: result.orderId,
-    orderNumber: result.orderNumber,
-    totalMinor: result.totalMinor,
-    currency: result.currency,
-    pendingManual: result.pendingManualItems,
-    delivered: result.deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, values: deliveredValues({ kind: d.kind, ...d.secret }) })),
-  };
 }
 
 async function dispatchDeliveriesToTelegram(telegramId: bigint, r: CheckoutResult): Promise<void> {

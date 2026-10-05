@@ -135,3 +135,53 @@ export async function refundWalletForOrder(
     return true;
   });
 }
+
+
+export interface WalletMismatch { walletId: string; userId: string; label: string; currency: Currency; cachedMinor: number; ledgerMinor: number; diffMinor: number }
+
+/**
+ * Wallets whose stored balance is not the sum of their ledger. The usual
+ * cause was a currency switch before it was recorded in the ledger (the
+ * balance was converted, the history was not); anything else is worth a look.
+ */
+export async function findWalletMismatches(limit = 50): Promise<WalletMismatch[]> {
+  const rows = await prisma.$queryRaw<Array<{ id: string; userId: string; currency: Currency; cached: bigint; actual: bigint | null }>>`
+    SELECT w."id", w."userId", w."currency", w."balanceMinor" AS "cached", SUM(t."amountMinor") AS "actual"
+    FROM "Wallet" w
+    LEFT JOIN "WalletTransaction" t ON t."walletId" = w."id"
+    GROUP BY w."id", w."userId", w."currency", w."balanceMinor"
+    HAVING w."balanceMinor" <> COALESCE(SUM(t."amountMinor"), 0)
+    LIMIT ${limit}`;
+  if (rows.length === 0) return [];
+  const users = await prisma.user.findMany({ where: { id: { in: rows.map((r) => r.userId) } }, select: { id: true, telegramHandle: true, firstName: true, telegramId: true } });
+  return rows.map((r) => {
+    const u = users.find((x) => x.id === r.userId);
+    const cached = Number(r.cached);
+    const ledger = Number(r.actual ?? 0n);
+    return {
+      walletId: r.id, userId: r.userId, currency: r.currency, cachedMinor: cached, ledgerMinor: ledger, diffMinor: cached - ledger,
+      label: u?.telegramHandle ? `@${u.telegramHandle}` : (u?.firstName ?? (u?.telegramId ? String(u.telegramId) : r.userId.slice(-6))),
+    };
+  });
+}
+
+/**
+ * Bring a wallet's ledger in line with its balance by posting the difference
+ * as one ADJUSTMENT row. The balance the customer sees does not change — the
+ * history just gets the entry it was missing.
+ */
+export async function repairWalletLedger(walletId: string, actorId?: string): Promise<{ repaired: boolean; diffMinor: number }> {
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+      SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "id" = ${walletId} FOR UPDATE`;
+    const w = locked[0];
+    if (!w) return { repaired: false, diffMinor: 0 };
+    const sum = await tx.walletTransaction.aggregate({ where: { walletId }, _sum: { amountMinor: true } });
+    const diff = w.balanceMinor - (sum._sum.amountMinor ?? 0n);
+    if (diff === 0n) return { repaired: false, diffMinor: 0 };
+    await tx.walletTransaction.create({
+      data: { walletId, type: "ADJUSTMENT", amountMinor: diff, balanceAfterMinor: w.balanceMinor, currency: w.currency, referenceNote: "ledger repair (reconciliation)", actorId },
+    });
+    return { repaired: true, diffMinor: Number(diff) };
+  });
+}

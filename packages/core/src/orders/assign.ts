@@ -68,9 +68,19 @@ export function deliveryExpiry(
 }
 
 /** Re-price the user's cart from live price rows (RETAIL tier). */
-export async function priceCart(tx: Tx, userId: string, currency: Currency, channel: "DIRECT" | "API" = "DIRECT"): Promise<PricedLine[]> {
+export async function priceCart(tx: Tx, userId: string, currency: Currency, channel: "DIRECT" | "API" = "DIRECT", direct?: Array<{ variantId: string; quantity: number }>): Promise<PricedLine[]> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
-  const cart = await tx.cart.findUnique({
+  // `direct`: price an explicit basket (a one-tap Mini App purchase) without
+  // reading — or later clearing — the customer's cart.
+  const cart = direct
+    ? {
+        items: await Promise.all(direct.map(async (d) => {
+          const variant = await tx.productVariant.findUnique({ where: { id: d.variantId }, include: { product: true, prices: { where: { tier: { name: "RETAIL" } } } } });
+          if (!variant) throw new CoreError("VARIANT_NOT_FOUND");
+          return { variant, quantity: d.quantity };
+        })),
+      }
+    : await tx.cart.findUnique({
     where: { userId },
     include: {
       items: {

@@ -320,20 +320,25 @@ export async function miniAppReachableUrl(): Promise<string | null> {
   if (!url) return null;
   const redis = getRedis();
   const key = "miniapp:reachable";
-  try {
-    const cached = await redis.get(key);
-    if (cached === "1") return url;
-    if (cached === "0") return null;
-  } catch { /* probe */ }
-  let ok = false;
-  try {
-    const res = await fetch(`${url}/catalog?currency=USD`, { method: "GET", signal: AbortSignal.timeout(4000), headers: { accept: "application/json" } });
-    ok = res.ok;
-  } catch {
-    ok = false;
-  }
-  await redis.set(key, ok ? "1" : "0", "EX", ok ? 300 : 60).catch(() => undefined);
-  return ok ? url : null;
+  let cached: string | null = null;
+  try { cached = await redis.get(key); } catch { /* treat as unknown */ }
+  if (cached === "1") return url;
+  if (cached === "0") return null;
+  // Unknown: probe in the BACKGROUND and answer from the last known state.
+  // The home menu used to wait up to 4 s here whenever the cache had expired.
+  void (async () => {
+    const lock = await redis.set(`${key}:probe`, "1", "EX", 30, "NX").catch(() => null);
+    if (lock !== "OK") return;
+    let ok = false;
+    try {
+      const res = await fetch(`${url}/catalog?currency=USD`, { method: "GET", signal: AbortSignal.timeout(4000), headers: { accept: "application/json" } });
+      ok = res.ok;
+    } catch { ok = false; }
+    await redis.set(key, ok ? "1" : "0", "EX", ok ? 300 : 60).catch(() => undefined);
+    await redis.set(`${key}:last`, ok ? "1" : "0", "EX", 86_400).catch(() => undefined);
+  })();
+  const last = await redis.get(`${key}:last`).catch(() => null);
+  return last === "1" ? url : null;
 }
 
 /**

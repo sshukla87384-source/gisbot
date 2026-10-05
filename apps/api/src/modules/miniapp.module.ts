@@ -50,7 +50,12 @@ const currencyQ = z.enum(["USD", "INR"]).catch("USD");
 const authed = z.object({ initData: z.string().min(1).max(8192) });
 const ordersBody = authed.extend({ page: z.number().int().min(1).max(500).optional() });
 const orderBody = authed.extend({ orderId: z.string().min(1).max(64) });
-const buyBody = authed.extend({ variantId: z.string().min(1).max(64), qty: z.number().int().min(1).max(50).optional() });
+const buyBody = authed.extend({
+  variantId: z.string().min(1).max(64),
+  qty: z.number().int().min(1).max(50).optional(),
+  quoteMinor: z.number().int().min(0).max(1_000_000_000).optional(),
+  quoteCurrency: z.enum(["USD", "INR"]).optional(),
+});
 const currencyBody = authed.extend({ currency: z.enum(["USD", "INR"]) });
 
 async function botUsername(): Promise<string | null> {
@@ -96,12 +101,14 @@ export class MiniAppController {
     return { user, ...profile, bot: await botUsername() };
   }
 
-  private async who(body: unknown, schema: z.ZodTypeAny = authed) {
+  private async who(body: unknown, schema: z.ZodTypeAny = authed, maxAgeSec = 86_400) {
+    // The admin's off switch stops the whole web shop, not just the page.
+    if (!(await getMiniAppConfig()).enabled) throw new ApiError(404, "DISABLED", "The web shop is turned off.");
     const parsed = schema.safeParse(body);
     if (!parsed.success) throw new ApiError(400, "VALIDATION", "Bad request");
     const data = parsed.data as z.infer<typeof authed> & Record<string, unknown>;
-    const user = await resolveMiniAppUser(data.initData);
-    if (!user) throw new ApiError(401, "NOT_A_CUSTOMER", "Open the bot and tap Start once, then come back.");
+    const user = await resolveMiniAppUser(data.initData, maxAgeSec);
+    if (!user) throw new ApiError(401, "NOT_A_CUSTOMER", "Please close and reopen the shop — or tap Start in the bot once if you are new.");
     return { user, data };
   }
 
@@ -113,7 +120,8 @@ export class MiniAppController {
 
   @Post("order")
   async order(@Body() body: unknown) {
-    const { user, data } = await this.who(body, orderBody);
+    // Returns decrypted keys: a fresher signature than the read-only screens.
+    const { user, data } = await this.who(body, orderBody, 6 * 3600);
     const o = await miniAppOrder(user.id, String(data.orderId));
     if (!o) throw new ApiError(404, "NOT_FOUND", "Order not found.");
     return o;
@@ -153,8 +161,10 @@ export class MiniAppController {
 
   @Post("buy")
   async buy(@Body() body: unknown) {
-    const { user, data } = await this.who(body, buyBody);
-    return miniAppBuyWithWallet({ id: user.id, telegramId: user.telegramId, currency: user.currency }, String(data.variantId), Number(data.qty ?? 1));
+    // Spends money: a fresher signature than the read-only screens.
+    const { user, data } = await this.who(body, buyBody, 6 * 3600);
+    const quote = typeof data.quoteMinor === "number" && data.quoteCurrency ? { totalMinor: data.quoteMinor as number, currency: data.quoteCurrency as "USD" | "INR" } : undefined;
+    return miniAppBuyWithWallet({ id: user.id, telegramId: user.telegramId, currency: user.currency }, String(data.variantId), Number(data.qty ?? 1), quote);
   }
 }
 

@@ -181,7 +181,16 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
   return { deliveries, pendingManualItems };
 }
 
-export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<CheckoutResult> {
+export async function checkoutWithWallet(
+  userId: string,
+  channel: "DIRECT" | "API" = "DIRECT",
+  /**
+   * `direct`: buy exactly these lines, leaving the cart (and its coupon) alone.
+   * `maxTotalMinor`: refuse if the price moved above what the buyer was shown
+   * (in the wallet currency) — a Mini App quote can be a minute old.
+   */
+  opts: { direct?: Array<{ variantId: string; quantity: number }>; maxTotalMinor?: number } = {},
+): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
 
   const result = await prisma.$transaction(
@@ -205,11 +214,14 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
       if (!wallet) throw new CoreError("WALLET_NOT_FOUND");
 
       // 2) Re-price cart from live rows in the wallet currency.
-      const lines = await priceCart(tx, userId, wallet.currency, channel);
+      const lines = await priceCart(tx, userId, wallet.currency, channel, opts.direct);
       const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-      const coupon = await resolveCartCouponTx(tx, userId, wallet.currency, subtotalMinor, couponLines(lines));
+      const coupon = opts.direct ? null : await resolveCartCouponTx(tx, userId, wallet.currency, subtotalMinor, couponLines(lines));
       const discountMinor = coupon?.discountMinor ?? 0;
       const totalMinor = Math.max(0, subtotalMinor - discountMinor);
+      if (opts.maxTotalMinor !== undefined && totalMinor > opts.maxTotalMinor) {
+        throw new CoreError("VALIDATION_FAILED", "PRICE_CHANGED", { totalMinor, currency: wallet.currency });
+      }
       if (wallet.balanceMinor < BigInt(totalMinor)) throw new CoreError("INSUFFICIENT_BALANCE");
 
       // 3) Create order.
@@ -272,14 +284,16 @@ export async function checkoutWithWallet(userId: string, channel: "DIRECT" | "AP
         where: { id: userId, firstPurchaseAt: null },
         data: { firstPurchaseAt: new Date() },
       });
-      const cart = await tx.cart.findUnique({ where: { userId } });
-      if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      if (!opts.direct) {
+        const cart = await tx.cart.findUnique({ where: { userId } });
+        if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      }
 
       await tx.auditLog.create({
         data: {
           actorId: userId,
           actorType: "USER",
-          action: "order.checkout.wallet",
+          action: opts.direct ? "order.checkout.wallet.direct" : "order.checkout.wallet",
           entityType: "Order",
           entityId: order.id,
           after: { orderNumber, totalMinor, currency: wallet.currency, items: lines.length },

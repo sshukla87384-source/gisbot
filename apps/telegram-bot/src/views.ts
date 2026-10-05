@@ -672,7 +672,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
   if (earn && earn.heldCount > 0) {
     const hrs = earn.nextReleaseAt ? Math.max(1, Math.ceil((earn.nextReleaseAt.getTime() - Date.now()) / 3_600_000)) : 0;
     money.push(earn.readyCount > 0
-      ? `⏳ Ready to transfer: <b>${fmt(earn.heldMinor, earn.heldCurrency)}</b> — tap 💰 Transfer to wallet below.`
+      ? `⏳ Ready to transfer: <b>${fmt(earn.readyMinor, earn.heldCurrency)}</b> — tap 💰 Transfer to wallet below.${earn.heldMinor > earn.readyMinor ? ` (+${fmt(earn.heldMinor - earn.readyMinor, earn.heldCurrency)} still on hold)` : ""}`
       : `⏳ On hold: <b>${fmt(earn.heldMinor, earn.heldCurrency)}</b> — unlocks in ~${hrs}h (${cfg.holdHours}h anti-fraud hold), then moves to your wallet by itself.`);
   }
 
@@ -698,7 +698,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
     .url("📤 Share my link", `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(shareText)}`)
     .row();
   if (earn && earn.heldCount > 0) {
-    kb.add(sbtn(earn.readyCount > 0 ? `💰 Transfer ${fmt(earn.heldMinor, earn.heldCurrency)} to wallet` : "💰 Transfer to wallet", cb("ref", "claim"), earn.readyCount > 0 ? "success" : "primary")).row();
+    kb.add(sbtn(earn.readyCount > 0 ? `💰 Transfer ${fmt(earn.readyMinor, earn.heldCurrency)} to wallet` : "💰 Transfer to wallet", cb("ref", "claim"), earn.readyCount > 0 ? "success" : "primary")).row();
   }
   kb.add(sbtn("💳 My wallet", cb("wal", "view"), "primary")).row();
   backToMenuRow(kb);

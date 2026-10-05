@@ -10,6 +10,8 @@
  * "${" except the deliberate store-name interpolations.
  */
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** A safe JS string literal inside an inline <script> (no </script> breakout). */
+const jsString = (s: string): string => JSON.stringify(s).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 
 export function disabledPage(store: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(store)}</title>
@@ -90,6 +92,9 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
 .toast.on{opacity:.95}
 .seg{display:flex;background:var(--bg);border-radius:10px;padding:3px}.seg div{flex:1;text-align:center;padding:7px;border-radius:8px;font-size:13px;cursor:pointer}.seg div.on{background:var(--sbg);font-weight:700}
 .center{text-align:center}.gap{height:8px}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:rot .7s linear infinite;vertical-align:-2px}
+@keyframes rot{to{transform:rotate(360deg)}}
+.card{animation:pop .28s ease both}@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -124,9 +129,12 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
 <script>
 (function(){
   var tg = window.Telegram && Telegram.WebApp; if (tg) { tg.ready(); tg.expand(); }
+  var STORE = ${jsString(store)};
   var base = location.pathname.replace(/[/]+$/, "");
   var initData = (tg && tg.initData) || "";
-  var cat = null, currency = "USD", bot = null, active = "all", q = "", meBal = null, known = false, loaded = {};
+  var cat = null, currency = "USD", bot = null, active = "all", q = "", meBal = null, balCur = "USD", known = false, loaded = {};
+  // The wallet keeps its own currency; only compare it with prices in the same one.
+  function sameCur(){ return cat && balCur === cat.currency; }
   var $ = function(id){ return document.getElementById(id); };
   function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
   function money(minor, cur){ if (minor==null) return ""; var n = Math.abs(minor)/100; var s = cur==="INR" ? "₹" : "$"; var t = (Number.isInteger(n) ? n.toLocaleString("en-IN") : n.toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})); return (minor<0?"−":"") + s + t; }
@@ -181,7 +189,7 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
     function draw(){
       var hero = p.imageUrl ? '<img src="'+esc(p.imageUrl)+'" alt="">' : esc(p.iconEmoji||"🎁");
       var total = sel && sel.priceMinor != null ? sel.priceMinor * qty : null;
-      var canWallet = known && sel && sel.inStock && total != null && meBal != null && meBal >= total;
+      var canWallet = known && sel && sel.inStock && total != null && meBal != null && sameCur() && meBal >= total;
       var html = '<div class="hero">'+hero+'</div><h2>'+esc(p.name)+'</h2>'
         + (p.rating ? '<div class="rating">⭐ '+p.rating+' · '+p.ratingCount+' reviews</div>' : '')
         + (p.description ? '<div class="desc">'+esc(p.description)+'</div>' : '<div class="gap"></div>')
@@ -190,9 +198,9 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
         + (sel && sel.inStock
             ? (canWallet
                 ? '<button class="btn ok" id="buyw">⚡ Pay '+money(total, cat.currency)+' from wallet — instant</button>'
-                : (known && meBal != null && total != null
-                    ? '<button class="btn sec" id="topup">💳 Wallet '+money(meBal, cat.currency)+' — top up '+money(total - meBal, cat.currency)+' more</button>'
-                    : ''))
+                : (known && meBal != null && total != null && sameCur()
+                    ? '<button class="btn sec" id="topup">💳 Wallet '+money(meBal, balCur)+' — top up '+money(total - meBal, cat.currency)+' more</button>'
+                    : (known && meBal != null && total != null ? '<button class="btn sec" id="buyw2">⚡ Pay from wallet ('+money(meBal, balCur)+')</button>' : '')))
               + '<button class="btn'+(canWallet?" sec":"")+'" id="buyb">🛒 Pay with UPI / Binance / Crypto — in bot</button>'
             : '<button class="btn" disabled>🔔 Sold out</button>')
         + '<div class="foot">Wallet purchases are delivered right here and in the chat. Other payment methods open the bot.</div>';
@@ -201,11 +209,16 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
       var qm = $("qm"), qp = $("qp"); if (qm) qm.onclick = function(){ if (qty>1) { qty--; draw(); } }; if (qp) qp.onclick = function(){ if (qty<50) { qty++; draw(); } };
       var bb = $("buyb"); if (bb) bb.onclick = function(){ openBot("p_" + encodeURIComponent(p.slug)); };
       var tu = $("topup"); if (tu) tu.onclick = function(){ openBot("topup"); };
-      var bw = $("buyw"); if (bw) bw.onclick = function(){
-        bw.disabled = true; bw.textContent = "Processing…";
-        api("buy", { variantId: sel.id, qty: qty }).then(function(r){
-          if (!r.ok) { haptic("bad"); bw.disabled = false; draw(); toast(r.message || "Could not buy"); if (r.reason === "insufficient") openBot("topup"); return; }
-          haptic("ok"); meBal = Math.max(0, meBal - r.totalMinor); header();
+      var bw = $("buyw") || $("buyw2"); if (bw) bw.onclick = function(){
+        bw.disabled = true; bw.innerHTML = '<span class="spin"></span> Processing…';
+        api("buy", { variantId: sel.id, qty: qty, quoteMinor: total, quoteCurrency: cat.currency }).then(function(r){
+          if (!r.ok) {
+            haptic("bad"); bw.disabled = false; toast(r.message || "Could not buy");
+            if (r.reason === "insufficient") openBot("topup");
+            if (r.reason === "price_changed" || r.reason === "stock") { loadCatalog(); closeSheet(); return; }
+            draw(); return;
+          }
+          haptic("ok"); if (r.currency === balCur) meBal = Math.max(0, meBal - r.totalMinor); else loaded.wallet = false; header();
           var vals = r.delivered.map(function(d){ return '<div class="panel" style="background:var(--bg)"><b>'+esc(d.productName)+'</b>' + d.values.map(function(v){ return '<div class="kv"><span class="mut">'+esc(v.label)+'</span><code>'+esc(v.value)+'</code><button class="copy" data-c="'+esc(v.value)+'">Copy</button></div>'; }).join("") + '</div>'; }).join("");
           openSheet('<div class="center" style="font-size:44px">🎉</div><h2 class="center">Order '+esc(r.orderNumber)+' delivered!</h2><p class="center mut">Paid '+money(r.totalMinor, r.currency)+' from your wallet. Also sent to your chat and saved in 📦 Orders.</p>'
             + (r.pendingManual > 0 ? '<p class="center mut">🕐 '+r.pendingManual+' item(s) are prepared by hand and will arrive in the chat.</p>' : '')
@@ -267,7 +280,7 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
   function loadWallet(){
     var el = $("p-wallet"); if (!known) { needLogin(el); return; }
     api("wallet").then(function(w){
-      loaded.wallet = true; meBal = w.balanceMinor; header();
+      loaded.wallet = true; meBal = w.balanceMinor; balCur = w.currency; header();
       var tx = w.entries.length ? w.entries.map(function(e){ var plus = e.amountMinor >= 0; return '<div class="row"><div>'+esc(e.type.replace(/_/g," ").toLowerCase())+'<div class="sub">'+when(e.createdAt)+(e.note?' · '+esc(e.note):'')+'</div></div><b style="color:'+(plus?"var(--ok)":"inherit")+'">'+(plus?"+":"")+money(e.amountMinor, w.currency)+'</b></div>'; }).join("") : '<div class="mut center">No transactions yet.</div>';
       var gifts = w.gifts.length ? '<h3>🎀 Gifts you sent</h3><div class="panel">'+w.gifts.map(function(g){ return '<div class="row"><div><code>'+esc(g.code)+'</code><div class="sub">'+when(g.createdAt)+'</div></div><div style="text-align:right"><b>'+money(g.amountMinor, g.currency)+'</b><div><span class="pill '+(g.status==="CLAIMED"?"ok":g.status==="REFUNDED"?"bad":"wait")+'">'+esc(g.status.toLowerCase())+'</span></div></div></div>'; }).join("")+'</div>' : '';
       el.innerHTML = '<div class="panel center"><div class="mut">Wallet balance</div><div class="big">'+money(w.balanceMinor, w.currency)+(w.currency==="USD"?' <span class="mut" style="font-size:14px">USDT</span>':'')+'</div><button class="btn" id="tu">➕ Top up — crypto / Binance / UPI</button><button class="btn sec" id="gift">🎀 Send a gift from balance</button></div>'
@@ -297,7 +310,8 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
       if (r.held && r.held.count > 0) {
         var hrs = r.held.nextReleaseAt ? Math.max(1, Math.ceil((new Date(r.held.nextReleaseAt).getTime() - Date.now())/3600000)) : 0;
         held = r.held.readyCount > 0
-          ? '<button class="btn ok" id="claim">💰 Transfer '+money(r.held.minor, r.held.currency)+' to wallet</button>'
+          ? '<button class="btn ok" id="claim">💰 Transfer '+money(r.held.readyMinor, r.held.currency)+' to wallet</button>'
+            + (r.held.minor > r.held.readyMinor ? '<div class="mut center" style="margin-top:6px">+ '+money(r.held.minor - r.held.readyMinor, r.held.currency)+' still in the '+r.holdHours+'h anti-fraud hold</div>' : '')
           : '<div class="mut center" style="margin-top:8px">⏳ On hold: <b>'+money(r.held.minor, r.held.currency)+'</b> — unlocks in ~'+hrs+'h ('+r.holdHours+'h anti-fraud hold), then moves to your wallet by itself.</div>';
       }
       el.innerHTML = '<div class="panel">'+pitch+'</div>'
@@ -306,7 +320,7 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
         + (r.link ? '<h3>🔗 Your link</h3><div class="panel"><div class="kv"><code>'+esc(r.link)+'</code><button class="copy" data-c="'+esc(r.link)+'">Copy</button></div><button class="btn" id="share">📤 Share my link</button></div>' : '')
         + '<div class="panel mut">⚡ <b>3 steps:</b> share your link → friend joins &amp; buys → money lands in your wallet.</div>';
       bindCopy();
-      var sh = $("share"); if (sh) sh.onclick = function(){ var text = "🎁 Join ${esc(store)} — instant digital products at the best prices! Use my link:"; var u = "https://t.me/share/url?url=" + encodeURIComponent(r.link) + "&text=" + encodeURIComponent(text); if (tg && tg.openTelegramLink) tg.openTelegramLink(u); else location.href = u; };
+      var sh = $("share"); if (sh) sh.onclick = function(){ var text = "🎁 Join " + STORE + " — instant digital products at the best prices! Use my link:"; var u = "https://t.me/share/url?url=" + encodeURIComponent(r.link) + "&text=" + encodeURIComponent(text); if (tg && tg.openTelegramLink) tg.openTelegramLink(u); else location.href = u; };
       var cl = $("claim"); if (cl) cl.onclick = function(){ cl.disabled = true; api("referral/claim").then(function(x){ haptic("ok"); toast(x.credited>0 ? "✅ "+money(x.creditedMinor, x.currency||r.currency)+" moved to your wallet" : "Nothing ready yet"); loaded.wallet = false; loadRefer(); }).catch(function(e){ cl.disabled=false; toast(e.message); }); };
     }).catch(function(e){ if (e.code === "NOT_A_CUSTOMER") needLogin(el); else el.innerHTML = '<div class="empty">'+esc(e.message)+'</div>'; });
   }
@@ -322,17 +336,17 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
         + '<div class="row"><span>💱 Currency</span><div class="seg" id="cur"><div data-c="USD"'+(u.currency==="USD"?' class="on"':'')+'>$ USD</div><div data-c="INR"'+(u.currency==="INR"?' class="on"':'')+'>₹ INR</div></div></div></div>'
         + tier + tk
         + '<div class="panel"><button class="btn" id="sup">💬 Chat with support</button><button class="btn sec" id="help">❓ Help &amp; FAQ</button><button class="btn sec" id="acct">👤 Full account in bot</button></div>';
-      Array.prototype.forEach.call($("cur").children, function(d){ d.onclick = function(){ var c = d.getAttribute("data-c"); if (c===u.currency) return; api("currency", { currency: c }).then(function(){ haptic("ok"); currency = c; toast("Prices now in "+c); loaded = {}; loadCatalog(); loadMe(); }).catch(function(e){ toast(e.message); }); }; });
+      Array.prototype.forEach.call($("cur").children, function(d){ d.onclick = function(){ var c = d.getAttribute("data-c"); if (c===u.currency) return; api("currency", { currency: c }).then(function(){ haptic("ok"); currency = c; balCur = c; toast("Prices now in "+c); loaded = {}; loadCatalog(); loadMe(); api("wallet").then(function(w){ meBal = w.balanceMinor; balCur = w.currency; header(); }).catch(function(){}); }).catch(function(e){ toast(e.message); }); }; });
       $("sup").onclick = function(){ openBot("support"); }; $("help").onclick = function(){ openBot("support"); }; $("acct").onclick = function(){ openBot("account"); };
     }).catch(function(e){ if (e.code === "NOT_A_CUSTOMER") needLogin(el); else el.innerHTML = '<div class="empty">'+esc(e.message)+'</div>'; });
   }
 
   // ── Header / boot ──
-  function header(){ if (!known) { $("me").innerHTML = "Tap /start in the bot<br>to unlock wallet &amp; orders"; return; } $("me").innerHTML = (meBal!=null ? "💰 <b>"+money(meBal, currency)+"</b>" : "") ; }
+  function header(){ if (!known) { $("me").innerHTML = "Tap /start in the bot<br>to unlock wallet &amp; orders"; return; } $("me").innerHTML = (meBal!=null ? "💰 <b>"+money(meBal, balCur)+"</b>" : "") ; }
   if (initData) {
     api("me").then(function(d){
       bot = d.bot || bot;
-      if (d && d.known) { known = true; currency = d.currency || "USD"; meBal = d.balanceMinor; $("me").innerHTML = "Hi, <b>" + esc(d.firstName || (d.user && d.user.firstName) || "there") + "</b><br>💰 " + money(d.balanceMinor, d.balanceCurrency || currency) + " · 📦 " + d.orders; }
+      if (d && d.known) { known = true; currency = d.currency || "USD"; meBal = d.balanceMinor; balCur = d.balanceCurrency || currency; $("me").innerHTML = "Hi, <b>" + esc(d.firstName || (d.user && d.user.firstName) || "there") + "</b><br>💰 " + money(d.balanceMinor, d.balanceCurrency || currency) + " · 📦 " + d.orders; }
       else header();
     }).catch(header).then(loadCatalog);
   } else { header(); loadCatalog(); }

@@ -9,6 +9,7 @@ import { invalidate, cached } from "./redis.js";
 import { usdtRate, priceInrFromUsd, priceUsdFromInr } from "./fx.js";
 import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./orders/assign.js";
 import { clearPaymentPrompts } from "./orders/pay-prompt.service.js";
+import { sanitizeTelegramHtml } from "./tg-html.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -358,8 +359,14 @@ export async function setProductName(productId: string, name: string, nameHtml: 
   await invalidate("cat:*");
 }
 
+/** Keep stored HTML under 8000 chars without leaving half a tag or an unclosed one. */
+function capHtml(html: string): string {
+  if (html.length <= 8000) return html;
+  return sanitizeTelegramHtml(html.slice(0, 7900).replace(/<[^>]*$/, ""));
+}
+
 export async function setProductDescription(productId: string, description: string, descriptionHtml: string | null = null): Promise<void> {
-  await prisma.product.update({ where: { id: productId }, data: { description: description.slice(0, 4000), descriptionHtml: descriptionHtml?.slice(0, 8000) ?? null } });
+  await prisma.product.update({ where: { id: productId }, data: { description: description.slice(0, 4000), descriptionHtml: descriptionHtml ? capHtml(descriptionHtml) : null } });
   await invalidate("cat:*");
 }
 
@@ -415,7 +422,9 @@ export async function setButton(key: ButtonLabelKey, label: string, icon: string
 export async function hostImageFromUrl(sourceUrl: string, fileName = "photo"): Promise<string | null> {
   const cfg = loadConfig();
   const base = (cfg.PUBLIC_API_URL ?? "").replace(/\/+$/, "");
-  if (!base) return null;
+  // Telegram and the Mini App must be able to fetch it: https on a public
+  // host only — never localhost or a private address.
+  if (!/^https:\/\//i.test(base) || /^https:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(base)) return null;
   try {
     const res = await fetch(sourceUrl, { signal: AbortSignal.timeout(20_000) });
     if (!res.ok) return null;
@@ -1005,7 +1014,7 @@ export async function createProductFull(input: {
         name: input.name.slice(0, 200),
         nameHtml: input.nameHtml?.slice(0, 500) || null,
         description: input.description?.slice(0, 4000) || null,
-        descriptionHtml: input.descriptionHtml?.slice(0, 8000) || null,
+        descriptionHtml: input.descriptionHtml ? capHtml(input.descriptionHtml) : null,
         type: spec.type as never,
         status: "DRAFT",
         categoryId,
@@ -1283,6 +1292,13 @@ export async function getCustomEmojiRegistry(): Promise<Record<string, CustomEmo
 export async function setCustomEmojiEntry(name: string, id: string, glyph: string): Promise<void> {
   const cur = await getCustomEmojiRegistry();
   cur[name.trim().toLowerCase().slice(0, 24)] = { id, glyph };
+  await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
+}
+
+/** Many entries in one write (pack import, bulk add). */
+export async function setCustomEmojiEntries(entries: Array<{ name: string; id: string; glyph: string }>): Promise<void> {
+  const cur = await getCustomEmojiRegistry();
+  for (const e of entries) cur[e.name.trim().toLowerCase().slice(0, 24)] = { id: e.id, glyph: e.glyph };
   await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
 }
 

@@ -149,10 +149,17 @@ export async function setUserCurrency(userId: string, currency: Currency): Promi
     // balance would silently gain or lose value on a currency switch.
     const w = await tx.wallet.findUnique({ where: { userId }, select: { id: true, balanceMinor: true, currency: true } });
     if (w && w.currency !== currency) {
-      await tx.wallet.update({
-        where: { id: w.id },
-        data: { currency, balanceMinor: BigInt(Math.round(convertMinor(Number(w.balanceMinor), w.currency as Currency, currency))) },
-      });
+      const converted = BigInt(Math.round(convertMinor(Number(w.balanceMinor), w.currency as Currency, currency)));
+      await tx.wallet.update({ where: { id: w.id }, data: { currency, balanceMinor: converted } });
+      // The conversion goes in the ledger as a pair — the old balance out in
+      // the old currency, the converted one in, in the new — so the ledger
+      // still adds up to the balance. Without it every switch with money in
+      // the wallet tripped the daily "wallet reconciliation mismatch" alert.
+      if (w.balanceMinor !== 0n) {
+        const note = `currency switch ${w.currency}→${currency}`;
+        await tx.walletTransaction.create({ data: { walletId: w.id, type: "ADJUSTMENT", amountMinor: -w.balanceMinor, balanceAfterMinor: 0n, currency: w.currency, referenceNote: note } });
+        await tx.walletTransaction.create({ data: { walletId: w.id, type: "ADJUSTMENT", amountMinor: converted, balanceAfterMinor: converted, currency, referenceNote: note } });
+      }
     }
   });
 }

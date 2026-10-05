@@ -125,17 +125,20 @@ export async function releaseMaturedReferralRewards(opts: { referrerId?: string;
 }
 
 /** What the customer sees on Refer & Earn: held vs credited, and when the next hold lifts. */
-export async function referralEarnings(userId: string): Promise<{ heldMinor: number; heldCurrency: Currency; heldCount: number; nextReleaseAt: Date | null; readyCount: number }> {
+export async function referralEarnings(userId: string): Promise<{ heldMinor: number; readyMinor: number; heldCurrency: Currency; heldCount: number; nextReleaseAt: Date | null; readyCount: number }> {
   const now = new Date();
   const [wallet, held, ready, next] = await Promise.all([
     prisma.wallet.findUnique({ where: { userId }, select: { currency: true } }),
-    prisma.referralReward.findMany({ where: { referrerId: userId, status: "PENDING_HOLD" }, select: { amountMinor: true, currency: true } }),
+    prisma.referralReward.findMany({ where: { referrerId: userId, status: "PENDING_HOLD" }, select: { amountMinor: true, currency: true, holdUntil: true } }),
     prisma.referralReward.count({ where: { referrerId: userId, status: "PENDING_HOLD", holdUntil: { lt: now } } }),
     prisma.referralReward.findFirst({ where: { referrerId: userId, status: "PENDING_HOLD", holdUntil: { gte: now } }, orderBy: { holdUntil: "asc" }, select: { holdUntil: true } }),
   ]);
   const cur = (wallet?.currency ?? "USD") as Currency;
-  const heldMinor = held.reduce((s, r) => s + (r.currency === cur ? r.amountMinor : convertMinor(r.amountMinor, r.currency, cur)), 0);
-  return { heldMinor, heldCurrency: cur, heldCount: held.length, nextReleaseAt: next?.holdUntil ?? null, readyCount: ready };
+  const inCur = (r: { amountMinor: number; currency: Currency }) => (r.currency === cur ? r.amountMinor : convertMinor(r.amountMinor, r.currency, cur));
+  const heldMinor = held.reduce((s, r) => s + inCur(r), 0);
+  // Only matured rewards move on "Transfer"; the button quotes exactly those.
+  const readyMinor = held.filter((r) => r.holdUntil < now).reduce((s, r) => s + inCur(r), 0);
+  return { heldMinor, readyMinor, heldCurrency: cur, heldCount: held.length, nextReleaseAt: next?.holdUntil ?? null, readyCount: ready };
 }
 
 /** Set a referral reward rate (percent, e.g. 5 or 2). */
@@ -267,6 +270,8 @@ export async function milestoneProgress(userId: string): Promise<{ cfg: Mileston
  * many payouts were made. Each payout is announced to the referrer.
  */
 export async function runReferralMilestones(pageSize = 200, maxPages = 50): Promise<number> {
+  // Switching the referral programme off stops milestone payouts too.
+  if (!promoFlagsCached().referral) return 0;
   const cfg = await getMilestoneConfig();
   if (!cfg.enabled || cfg.tiers.length === 0) return 0;
   const minCount = cfg.tiers[0]?.count ?? 1;
