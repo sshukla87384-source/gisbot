@@ -109,6 +109,12 @@ function isSingleEmoji(s: string): boolean {
   return !!m && m.length === 1 && m[0].replace(/️/g, "") === s;
 }
 
+/** The emoji the bot's own buttons and screens use most — the coverage report in 🎨 Custom Emoji. */
+export const BOT_UI_GLYPHS = [
+  "◀️", "▶️", "🏠", "🛍", "🛒", "🗂", "📦", "💰", "💳", "🎁", "🔗", "📤", "⚡", "✅", "❌", "🎫", "💬", "👤", "🌐", "💱",
+  "🔥", "🎯", "📋", "🔄", "🧾", "➕", "✏️", "🗑", "⭐", "🪙", "🇮🇳", "📊", "🔔", "🏆", "👥", "🧑‍💻", "🎡", "💎", "🔑", "🛟",
+];
+
 /** Telegram caps a message's entities; stay well inside it. */
 const MAX_CUSTOM_EMOJI = 50;
 
@@ -162,14 +168,17 @@ export function premiumizeKeyboard<T>(markup: T, map: Map<string, string>): T {
   let changed = false;
   const rows = kb.map((row) => row.map((b) => {
     if (!b || typeof b.text !== "string" || b.icon_custom_emoji_id || b.copy_text) return b;
-    const lead = /^\s*/.exec(b.text)![0].length;
-    EMOJI_SEQ.lastIndex = 0;
-    const m = b.text.slice(lead).match(new RegExp(`^${EMOJI_SEQ.source}`, "u"));
-    if (!m) return b;
-    const id = map.get(emojiKey(m[0]));
+    const label = b.text.trim();
+    // The emoji a label starts with ("🎁 Refer"), else the one it ends with
+    // ("Next ▶️") — either becomes the premium icon, shown before the text.
+    const head = label.match(new RegExp(`^${EMOJI_SEQ.source}`, "u"));
+    const tail = head ? null : label.match(new RegExp(`${EMOJI_SEQ.source}$`, "u"));
+    const glyph = head?.[0] ?? tail?.[0];
+    if (!glyph) return b;
+    const id = map.get(emojiKey(glyph));
     if (!id) return b;
-    const rest = b.text.slice(lead + m[0].length).trimStart();
-    if (!rest) return b; // an emoji-only label keeps its glyph
+    const rest = (head ? label.slice(glyph.length) : label.slice(0, label.length - glyph.length)).trim();
+    if (!rest) return b; // an emoji-only label keeps its glyph (a label cannot be empty)
     changed = true;
     return { ...b, text: rest, icon_custom_emoji_id: id };
   }));

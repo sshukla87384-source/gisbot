@@ -1284,9 +1284,9 @@ export async function replaceSelectView(user: BotUser, orderId: string, selected
     }
   }
   if (pages > 1) {
-    if (p > 1) kb.text("◀️", cb("rep", "pg", orderId, String(p - 1)));
+    if (p > 1) kb.text("◀️ Prev", cb("rep", "pg", orderId, String(p - 1)));
     kb.text(`${p}/${pages}`, cb("mnu", "noop"));
-    if (p < pages) kb.text("▶️", cb("rep", "pg", orderId, String(p + 1)));
+    if (p < pages) kb.text("Next ▶️", cb("rep", "pg", orderId, String(p + 1)));
     kb.row();
   }
   if (sel.size > 0) {

@@ -122,6 +122,7 @@ export interface SessionData {
     | "admin_refmile_add"
     | "admin_ref_months"
     | "admin_emoji_bulk"
+    | "admin_emoji_pack"
     | "admin_agent_add"
     | "admin_faq_q"
     | "admin_faq_a"

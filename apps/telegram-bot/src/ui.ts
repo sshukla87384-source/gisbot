@@ -76,9 +76,9 @@ export function paginationRow(
 ): InlineKeyboard {
   if (pages <= 1) return kb;
   kb.row();
-  if (page > 1) kb.text("◀️", cb(ns, action, ...extraArgs, page - 1));
+  if (page > 1) kb.text("◀️ Prev", cb(ns, action, ...extraArgs, page - 1));
   kb.text(`${page}/${pages}`, cb("mnu", "noop"));
-  if (page < pages) kb.text("▶️", cb(ns, action, ...extraArgs, page + 1));
+  if (page < pages) kb.text("Next ▶️", cb(ns, action, ...extraArgs, page + 1));
   return kb;
 }
 

@@ -139,6 +139,7 @@ import {
   setAutoEmojiConfig,
   premiumGlyphMap,
   invalidatePremiumGlyphMap,
+  BOT_UI_GLYPHS,
   entitiesToTelegramHtml,
   looksLikeTelegramHtml,
   plainDescription,
@@ -1464,13 +1465,17 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard()
     .add(sbtn(auto.enabled ? "✨ Premium everywhere: ON" : "✨ Premium everywhere: OFF", cb("adm", "emojiauto", auto.enabled ? "0" : "1"), auto.enabled ? "success" : "danger")).row()
     .text(auto.learn ? "🧠 Use emoji from my products: ON" : "🧠 Use emoji from my products: OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
+    .add(sbtn("📦 Import a premium emoji pack (1 link)", cb("adm", "emojipack"), "success")).row()
     .add(sbtn("📥 Bulk add (send many at once)", cb("adm", "emojibulk"), "primary")).row()
     .text("➕ Add one (with a name)", cb("adm", "emojiadd")).row();
   for (const n of names.slice(0, 20)) kb.text(`✖️ ${n}`, cb("adm", "emojirm", n)).row();
   kb.text("◀️ Back", cb("adm", "home"));
-  const preview = names.length
-    ? names.slice(0, 40).map((n) => `• <b>${escapeHtml(n)}</b>: <tg-emoji emoji-id="${reg[n]!.id}">${reg[n]!.glyph}</tg-emoji>`).join("\n")
-    : "No custom emoji added yet.";
+  const covered = BOT_UI_GLYPHS.filter((g) => glyphs.map.has(g.replace(/\uFE0F/g, "")));
+  const missing = BOT_UI_GLYPHS.filter((g) => !glyphs.map.has(g.replace(/\uFE0F/g, "")));
+  const userNames = names.filter((n) => !n.startsWith("auto_") && !n.startsWith("pack_"));
+  const preview = userNames.length
+    ? userNames.slice(0, 30).map((n) => `• <b>${escapeHtml(n)}</b>: <tg-emoji emoji-id="${reg[n]!.id}">${reg[n]!.glyph}</tg-emoji>`).join("\n")
+    : "";
   await show(ctx, [
     "🎨 <b>Custom emoji</b>",
     "",
@@ -1478,7 +1483,10 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
       ? `✨ <b>Premium everywhere is ON</b> — every page, button, broadcast and delivery swaps a plain emoji for your premium one automatically. <b>${glyphs.map.size}</b> emoji are premium right now${auto.learn ? " (yours below + the ones used in your product names/descriptions)" : ""}.`
       : "✨ Premium everywhere is OFF — only the named spots below use premium emoji.",
     "",
-    "📥 <b>Bulk add</b>: send one message with many premium emoji (e.g. 🔥✅💰🛒⚡🎁) — each one replaces its plain version across the whole bot.",
+    `🧩 <b>Bot buttons & screens covered: ${covered.length}/${BOT_UI_GLYPHS.length}</b>${missing.length ? `\nStill plain: ${missing.join(" ")}` : " — everything is premium ✅"}`,
+    "",
+    "📦 <b>Import a pack</b>: paste any premium emoji pack link (<code>t.me/addemoji/…</code>) — every emoji in it is applied to all buttons (Next, Refer, links…), screens and posts at once.",
+    "📥 <b>Bulk add</b>: or send one message with many premium emoji (e.g. 🔥✅💰🛒⚡🎁).",
     `➕ <b>Add one</b> with a name to theme a specific spot: <i>${EMOJI_NAME_HINTS}</i>`,
     "",
     preview,
@@ -1542,9 +1550,9 @@ async function userOrdersView(ctx: Ctx, userId: string, page: number): Promise<v
   }
   if (res.pages > 1) {
     const row: Array<[string, string]> = [];
-    if (res.page > 1) row.push(["◀️", cb("adm", "uord", `${userId}~${res.page - 1}`)]);
+    if (res.page > 1) row.push(["◀️ Prev", cb("adm", "uord", `${userId}~${res.page - 1}`)]);
     row.push([`${res.page}/${res.pages}`, cb("adm", "uord", `${userId}~${res.page}`)]);
-    if (res.page < res.pages) row.push(["▶️", cb("adm", "uord", `${userId}~${res.page + 1}`)]);
+    if (res.page < res.pages) row.push(["Next ▶️", cb("adm", "uord", `${userId}~${res.page + 1}`)]);
     for (const [label, data] of row) kb.text(label, data);
     kb.row();
   }
@@ -1919,9 +1927,9 @@ async function categoriseView(ctx: Ctx): Promise<void> {
     kb.text(`${box} ${p.visible ? "👁" : "🙈"} ${p.name.slice(0, 24)}${where}`, cb("adm", "cattog", p.id)).row();
   }
   if (r.pages > 1) {
-    if (r.page > 1) kb.text("◀️", cb("adm", "catpg", String(r.page - 1)));
+    if (r.page > 1) kb.text("◀️ Prev", cb("adm", "catpg", String(r.page - 1)));
     kb.text(`${r.page}/${r.pages}`, cb("mnu", "noop"));
-    if (r.page < r.pages) kb.text("▶️", cb("adm", "catpg", String(r.page + 1)));
+    if (r.page < r.pages) kb.text("Next ▶️", cb("adm", "catpg", String(r.page + 1)));
     kb.row();
   }
   kb.text("☑️ This page", cb("adm", "catpage")).text(`☑️ All ${r.total}`, cb("adm", "catall"));
@@ -2127,9 +2135,9 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   });
 
   if (r.pages > 1) {
-    if (r.page > 1) kb.text("◀️", cb("adm", "sppg", `${supplierId}~${r.page - 1}`));
+    if (r.page > 1) kb.text("◀️ Prev", cb("adm", "sppg", `${supplierId}~${r.page - 1}`));
     kb.text(`${r.page}/${r.pages}`, cb("adm", "supprods", supplierId));
-    if (r.page < r.pages) kb.text("▶️", cb("adm", "sppg", `${supplierId}~${r.page + 1}`));
+    if (r.page < r.pages) kb.text("Next ▶️", cb("adm", "sppg", `${supplierId}~${r.page + 1}`));
     kb.row();
   }
 
@@ -3017,6 +3025,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "emojilearn":
       await setAutoEmojiConfig({ learn: id === "1" });
       return emojiRegistryView(ctx);
+    case "emojipack":
+      ctx.session.awaiting = "admin_emoji_pack";
+      await askStep(ctx, "📦 Send a <b>premium emoji pack link</b> — e.g. <code>https://t.me/addemoji/PackName</code> (open any premium emoji → tap the pack name → Share → copy link). You can send several links, one per line.");
+      return;
     case "emojibulk":
       ctx.session.awaiting = "admin_emoji_bulk";
       await askStep(ctx, "📥 Send <b>one message with all the premium emoji</b> you want to use (from your Premium keyboard or copied from any message). Each one replaces its plain version everywhere.");
@@ -5154,6 +5166,39 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     if (!target) { await ctx.reply("No customer selected."); return true; }
     const ok = await dmUser(target, text.trim().slice(0, 3000));
     await ctx.reply(ok ? "✅ Reply sent to the customer." : "❌ Couldn't reach that customer.");
+    return true;
+  }
+  if (awaiting === "admin_emoji_pack") {
+    const packNames = [...text.matchAll(/(?:t\.me\/addemoji\/|^|\s)([A-Za-z0-9_]{3,64})(?=\s|$)/g)].map((m) => m[1]!).filter((n) => !/^(https?|t|me|addemoji)$/i.test(n));
+    if (packNames.length === 0) { ctx.session.awaiting = "admin_emoji_pack"; await askStep(ctx, "Send a link like <code>https://t.me/addemoji/PackName</code>."); return true; }
+    const existing = await premiumGlyphMap().catch(() => ({ map: new Map<string, string>() }));
+    const have = new Set(existing.map.keys());
+    let added = 0;
+    const report: string[] = [];
+    for (const name of packNames.slice(0, 10)) {
+      try {
+        const set = await ctx.api.getStickerSet(name);
+        if (set.sticker_type !== "custom_emoji") { report.push(`⚠️ ${escapeHtml(name)}: not a premium emoji pack`); continue; }
+        let n = 0;
+        for (const st of set.stickers) {
+          const id = (st as { custom_emoji_id?: string }).custom_emoji_id;
+          const glyph = st.emoji ?? "";
+          const key = glyph.replace(/\uFE0F/g, "");
+          if (!id || !key || have.has(key)) continue; // first pack wins; your own picks are never overwritten
+          have.add(key);
+          await setCustomEmojiEntry(`pack_${[...key].map((ch) => ch.codePointAt(0)!.toString(16)).join("_")}`.slice(0, 24), id, glyph);
+          n++;
+        }
+        added += n;
+        report.push(`✅ ${escapeHtml(set.title)}: ${n} new emoji`);
+      } catch {
+        report.push(`❌ ${escapeHtml(name)}: pack not found`);
+      }
+    }
+    invalidatePremiumGlyphMap();
+    setDynamicEmojis(await getCustomEmojiRegistry());
+    flash(ctx, `📦 Imported <b>${added}</b> premium emoji.\n${report.join("\n")}`);
+    await emojiRegistryView(ctx);
     return true;
   }
   if (awaiting === "admin_emoji_bulk") {
