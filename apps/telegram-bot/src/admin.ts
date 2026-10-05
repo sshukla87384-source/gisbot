@@ -135,6 +135,10 @@ import {
   scheduleBroadcast,
   setFlashSale,
   setProductImage,
+  getAutoEmojiConfig,
+  setAutoEmojiConfig,
+  premiumGlyphMap,
+  invalidatePremiumGlyphMap,
   entitiesToTelegramHtml,
   looksLikeTelegramHtml,
   plainDescription,
@@ -1455,23 +1459,31 @@ async function refMilestoneView(ctx: Ctx): Promise<void> {
 const EMOJI_NAME_HINTS = "wallet, cart, vip, diamond, fire, gift, rocket, star, bolt, shop, money, chart, home, support · crypto buttons: crypto, deposit, usdt, bnb, tron, polygon, ton, sol, ltc (or a network code like usdttrc20)";
 
 async function emojiRegistryView(ctx: Ctx): Promise<void> {
-  const reg = await getCustomEmojiRegistry();
+  const [reg, auto, glyphs] = await Promise.all([getCustomEmojiRegistry(), getAutoEmojiConfig(), premiumGlyphMap().catch(() => ({ map: new Map<string, string>() }))]);
   const names = Object.keys(reg);
-  const kb = new InlineKeyboard().text("➕ Add emoji", cb("adm", "emojiadd")).row();
+  const kb = new InlineKeyboard()
+    .add(sbtn(auto.enabled ? "✨ Premium everywhere: ON" : "✨ Premium everywhere: OFF", cb("adm", "emojiauto", auto.enabled ? "0" : "1"), auto.enabled ? "success" : "danger")).row()
+    .text(auto.learn ? "🧠 Use emoji from my products: ON" : "🧠 Use emoji from my products: OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
+    .add(sbtn("📥 Bulk add (send many at once)", cb("adm", "emojibulk"), "primary")).row()
+    .text("➕ Add one (with a name)", cb("adm", "emojiadd")).row();
   for (const n of names.slice(0, 20)) kb.text(`✖️ ${n}`, cb("adm", "emojirm", n)).row();
   kb.text("◀️ Back", cb("adm", "home"));
   const preview = names.length
-    ? names.map((n) => `• <b>${escapeHtml(n)}</b>: <tg-emoji emoji-id="${reg[n]!.id}">${reg[n]!.glyph}</tg-emoji>`).join("\n")
+    ? names.slice(0, 40).map((n) => `• <b>${escapeHtml(n)}</b>: <tg-emoji emoji-id="${reg[n]!.id}">${reg[n]!.glyph}</tg-emoji>`).join("\n")
     : "No custom emoji added yet.";
   await show(ctx, [
     "🎨 <b>Custom emoji</b>",
     "",
-    "Add your Telegram premium emoji here to use them across the bot UI (menu, headers, buttons where supported).",
-    `Use these names to theme built-in spots: <i>${EMOJI_NAME_HINTS}</i>`,
+    auto.enabled
+      ? `✨ <b>Premium everywhere is ON</b> — every page, button, broadcast and delivery swaps a plain emoji for your premium one automatically. <b>${glyphs.map.size}</b> emoji are premium right now${auto.learn ? " (yours below + the ones used in your product names/descriptions)" : ""}.`
+      : "✨ Premium everywhere is OFF — only the named spots below use premium emoji.",
+    "",
+    "📥 <b>Bulk add</b>: send one message with many premium emoji (e.g. 🔥✅💰🛒⚡🎁) — each one replaces its plain version across the whole bot.",
+    `➕ <b>Add one</b> with a name to theme a specific spot: <i>${EMOJI_NAME_HINTS}</i>`,
     "",
     preview,
     "",
-    "Tap ➕ Add emoji, then send one premium emoji.",
+    "<i>Premium emoji show only if the bot owner's account has Telegram Premium; otherwise Telegram shows the normal emoji — nothing breaks.</i>",
   ].join("\n"), kb, true);
 }
 
@@ -2999,8 +3011,19 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_emoji_capture";
       await askStep(ctx, "🎨 Send <b>one premium emoji</b> (from your Telegram Premium keyboard). I'll capture it.");
       return;
+    case "emojiauto":
+      await setAutoEmojiConfig({ enabled: id === "1" });
+      return emojiRegistryView(ctx);
+    case "emojilearn":
+      await setAutoEmojiConfig({ learn: id === "1" });
+      return emojiRegistryView(ctx);
+    case "emojibulk":
+      ctx.session.awaiting = "admin_emoji_bulk";
+      await askStep(ctx, "📥 Send <b>one message with all the premium emoji</b> you want to use (from your Premium keyboard or copied from any message). Each one replaces its plain version everywhere.");
+      return;
     case "emojirm":
       await removeCustomEmojiEntry(id);
+      invalidatePremiumGlyphMap();
       setDynamicEmojis(await getCustomEmojiRegistry());
       flash(ctx, `✖️ Removed <b>${escapeHtml(id)}</b>.`);
       return emojiRegistryView(ctx);
@@ -5133,6 +5156,27 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await ctx.reply(ok ? "✅ Reply sent to the customer." : "❌ Couldn't reach that customer.");
     return true;
   }
+  if (awaiting === "admin_emoji_bulk") {
+    const ents = ((ctx.message?.entities ?? []) as Array<{ type: string; offset: number; length: number; custom_emoji_id?: string }>).filter((e) => e.type === "custom_emoji" && e.custom_emoji_id);
+    if (ents.length === 0) { ctx.session.awaiting = "admin_emoji_bulk"; await askStep(ctx, "No premium emoji found in that message. Send premium emoji (needs Telegram Premium)."); return true; }
+    const msgText = ctx.message?.text ?? text;
+    let added = 0;
+    const seen = new Set<string>();
+    for (const e of ents.slice(0, 100)) {
+      const glyph = msgText.slice(e.offset, e.offset + e.length);
+      const key = glyph.replace(/\uFE0F/g, "");
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const name = `auto_${[...key].map((ch) => ch.codePointAt(0)!.toString(16)).join("_")}`.slice(0, 24);
+      await setCustomEmojiEntry(name, e.custom_emoji_id!, glyph);
+      added++;
+    }
+    invalidatePremiumGlyphMap();
+    setDynamicEmojis(await getCustomEmojiRegistry());
+    flash(ctx, `✅ Added <b>${added}</b> premium emoji — they now replace the plain ones across the bot.`);
+    await emojiRegistryView(ctx);
+    return true;
+  }
   if (awaiting === "admin_emoji_capture") {
     const ents = ((ctx.message?.entities ?? []) as Array<{ type: string; offset: number; length: number; custom_emoji_id?: string }>).filter((e) => e.type === "custom_emoji");
     const first = ents[0];
@@ -5149,6 +5193,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     ctx.session.pendEmojiId = ctx.session.pendEmojiGlyph = undefined;
     if (!name || !eid) { await ctx.reply("Please send a valid name (letters/numbers)."); return true; }
     await setCustomEmojiEntry(name, eid, glyph);
+    invalidatePremiumGlyphMap();
     setDynamicEmojis(await getCustomEmojiRegistry());
     await ctx.reply(`✅ Saved <b>${escapeHtml(name)}</b> → <tg-emoji emoji-id="${eid}">${glyph}</tg-emoji>. It now shows across the bot.`, { parse_mode: "HTML" }).catch(() => ctx.reply(`✅ Saved ${name}.`));
     await emojiRegistryView(ctx);

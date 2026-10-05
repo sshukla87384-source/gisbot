@@ -54,3 +54,4 @@ export * from "./upi-provider.service.js";
 export * from "./miniapp.service.js";
 export * from "./campaign-templates.service.js";
 export * from "./tg-html.js";
+export * from "./premium-emoji.service.js";

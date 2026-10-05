@@ -14,6 +14,7 @@ import {
   stripTelegramHtml,
   TELEGRAM_TEXT_MAX,
   ensureCryptoProvider,
+  premiumEmojiTransformer,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -38,6 +39,8 @@ async function main(): Promise<void> {
 
   const connection = getQueueConnection();
   const telegram = new Api(config.BOT_TOKEN);
+  // Premium emoji on every broadcast, delivery and alert the worker sends.
+  telegram.config.use(premiumEmojiTransformer({ buttons: config.BUTTON_STYLES_ENABLED }) as never);
   const resend = config.RESEND_API_KEY ? new Resend(config.RESEND_API_KEY) : null;
   let warnedEmailOff = false;
 

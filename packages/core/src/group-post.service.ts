@@ -1,4 +1,3 @@
-import { richDescription } from "./tg-html.js";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
@@ -60,18 +59,14 @@ async function buildProductPost(productId: string): Promise<{ caption: string; i
   if (onSale && p.salePercentBp) lines.push(`🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>`, "");
   if (cheapest) lines.push(`💰 <b>Price: ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`, "");
   if (stock !== null) lines.push(`📦 In stock: <b>${stock}</b>`, "");
-  // Cleaned rather than escaped: an imported description's markup used to be
-  // posted to the group as literal <tg-emoji …> text.
-  const desc = richDescription(p.description, p.descriptionHtml, { dropTags: ["blockquote"] });
-  for (const line of desc.split("\n").map((l) => l.trim()).filter(Boolean)) {
-    lines.push(/^(?:<[^>]+>)*\s*[\p{Extended_Pictographic}]/u.test(line) ? line : `✅ ${line}`);
-  }
+  // No description and no photo in a group post: name, price and stock, and
+  // the button opens the full product card in the bot.
 
   const buttons: OutboxButton[] | undefined = cfg.BOT_USERNAME
     ? [{ text: onSale ? "⚡ Buy Now 🔥" : "⚡ Buy Now", url: `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` }]
     : undefined;
 
-  return { caption: lines.join("\n"), imageUrl: p.imageUrl ?? undefined, buttons };
+  return { caption: lines.join("\n").replace(/\n+$/, ""), buttons };
 }
 
 /** Post a product to all active registered groups/channels. Returns count posted. */

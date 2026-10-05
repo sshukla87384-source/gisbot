@@ -1,5 +1,6 @@
 import { isDev, loadConfig } from "@gis/config";
 import {
+  premiumEmojiTransformer,
   addToCart,
   adjustWallet,
   releaseMaturedReferralRewards,
@@ -251,6 +252,10 @@ async function submitReplaceOrTicket(ctx: Ctx, proofFileId: string | undefined):
 export function createBot(): Bot<Ctx> {
   const config = loadConfig();
   const bot = new Bot<Ctx>(config.BOT_TOKEN);
+  // Premium emoji on every page without touching each screen: plain emoji the
+  // shop owns a premium version of are swapped on the way out (and leading
+  // button emoji become button icons). Falls back to the original on a 400.
+  bot.api.config.use(premiumEmojiTransformer({ buttons: config.BUTTON_STYLES_ENABLED }) as never);
 
   // Serialize updates per user. Webhook mode handles POSTs concurrently and
   // Telegram redelivers on timeout, so without this a double-tap ran the same

@@ -1,4 +1,3 @@
-import { richDescription } from "./tg-html.js";
 import { loadConfig } from "@gis/config";
 import { stockMapFor } from "./catalog/catalog.service.js";
 import { prisma } from "@gis/database";
@@ -258,7 +257,8 @@ export async function announceProduct(
     body: lines.join("\n"),
     bodyIsHtml: true,
     segment: "all",
-    imageUrl: p.imageUrl ?? undefined,
+    // No photo and no description in any announcement: those belong to the
+    // product card, which the button opens. A post is the news, short.
     buttonText: buttonUrl ? buttonText : undefined,
     buttonUrl,
     buttonStyle: "success",
@@ -310,15 +310,11 @@ export async function announceFlashSale(
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = (() => { const h = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name); return h ? `${h} ` : ""; })();
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
-  // Cleaned, not escaped: a copied/imported description keeps its quote and
-  // premium emoji instead of showing the raw tags.
-  const descDisp = richDescription(p.description, p.descriptionHtml);
   const hook = (await nextFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
   const lines = [
     hook,
     "━━━━━━━━━━━━━━━━━━━━",
     `${icon}${nameDisp}`,
-    ...(descDisp ? [descDisp] : []),
     "",
     `🏷 <b>${pct}% OFF</b>${left ? `   ·   ⏳ <b>${left}</b>` : ""}`,
     cheapest ? `💸 <s>${fmtMinor(cheapest.was, cheapest.currency)}</s> ➜ <b>${fmtMinor(cheapest.now, cheapest.currency)}</b>` : "",
@@ -333,7 +329,7 @@ export async function announceFlashSale(
     body: lines.join("\n"),
     bodyIsHtml: true,
     segment: "all",
-    imageUrl: p.imageUrl ?? undefined,
+    // Photo and description stay on the product card (one tap away).
     buttonText: buttonUrl ? "🛒 Grab the deal 🔥" : undefined,
     buttonUrl,
     buttonIcon: productEmojiId(p.nameHtml),
@@ -459,7 +455,6 @@ export async function announceRestock(
     body,
     bodyIsHtml: true,
     segment: "all",
-    imageUrl: p.imageUrl ?? undefined,
     buttonText: buttonUrl ? btnLabel : undefined,
     buttonUrl,
     buttonStyle: "success",

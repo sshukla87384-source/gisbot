@@ -72,9 +72,9 @@ export function renderPromo(style: PromoStyle, c: PromoContext): string {
   const n = `${c.icon ? `${c.icon} ` : ""}<b>${esc(c.name)}</b>`;
   const price = `<b>${c.priceUsdt} USDT</b>`;
   const stockLine = c.stock === null ? "" : `📦 Only <b>${c.stock}</b> left in stock`;
-  const bulletBlock = c.bullets.length
-    ? `<blockquote>${c.bullets.map((b) => `✅ <i>${esc(b)}</i>`).join("\n")}</blockquote>`
-    : "";
+  // Descriptions are not repeated in promos — they live on the product card
+  // the Buy button opens. The feature-style post uses the shop's own promises.
+  const bulletBlock = "";
   const buy = c.bot ? `🔔 BUY NOW @${c.bot}` : "";
 
   switch (style) {
