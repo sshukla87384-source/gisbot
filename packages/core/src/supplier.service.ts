@@ -80,8 +80,11 @@ export async function detectAuthStyle(s: SupplierRow, path = "/products"): Promi
 /** URL candidates: as given, and with an /api/v1 prefix if the base has no version segment. */
 function urlCandidates(baseUrl: string, path: string): string[] {
   const b = baseUrl.replace(/\/$/, "");
-  const hasVersion = /\/api\/v\d+/.test(b);
-  return hasVersion ? [`${b}${path}`] : [`${b}${path}`, `${b}/api/v1${path}`];
+  // Already versioned (…/api/v1 or …/v1), or the path carries its own version.
+  const hasVersion = /\/(api\/)?v\d+(\/|$)/.test(b) || /^\/(api\/)?v\d+\//.test(path);
+  // Unversioned base: try as given, then /api/v1 and plain /v1 (api.qamify.site
+  // serves /v1/products, /v1/orders — the old candidates never reached them).
+  return hasVersion ? [`${b}${path}`] : [`${b}${path}`, `${b}/api/v1${path}`, `${b}/v1${path}`];
 }
 
 /** Fetch that tolerates a missing /api/v1 prefix (retries the versioned URL on 404). */
@@ -445,8 +448,45 @@ const KEY_FIELD_RE = /(licen[sc]e|serial|voucher|redeem|coupon|activation|cd[_-]
 const EXCLUDE_FIELD_RE = /(idempoten|request|trace|order[_-]?id|orderid|txn|transaction|invoice|reference|\bref\b|\bid\b|status|message|success|error|created|updated|timestamp)/i;
 const STATUS_WORDS = /^(true|false|ok|yes|no|success|failed|failure|error|pending|completed|done|processing|active|null|none|n\/a)$/i;
 
+/**
+ * The delivered units when the vendor lists them explicitly — an `items` /
+ * `codes` / `keys` / `accounts` / `deliveries` array of strings or of objects
+ * carrying `content` / `key` / `code` / `value` / `credential` (Qamify:
+ * `order.items[].content`). Used before the generic walk, which would also
+ * pick up the ORDER's own code ("RA-1A2B3C4D5E") as if it were a key.
+ */
+function structuredDelivered(j: any): string[] | null {
+  if (!j || typeof j !== "object") return null;
+  const holders = [j, j.order, j.data, j.result, j.data?.order].filter((h) => h && typeof h === "object");
+  for (const h of holders) {
+    for (const name of ["items", "codes", "keys", "accounts", "deliveries", "delivered", "licenses", "credentials"]) {
+      const arr = (h as Record<string, unknown>)[name];
+      if (!Array.isArray(arr) || arr.length === 0) continue;
+      const vals = arr.map((el) => {
+        if (typeof el === "string") return el.trim();
+        if (el && typeof el === "object") {
+          const o = el as Record<string, unknown>;
+          for (const k of ["content", "key", "code", "value", "credential", "credentials", "account", "license", "text", "data"]) {
+            const v = o[k];
+            if (typeof v === "string" && v.trim()) return v.trim();
+          }
+          // login + password style objects
+          const user = ["username", "email", "login", "user"].map((k) => o[k]).find((v): v is string => typeof v === "string" && v.trim() !== "");
+          const pass = ["password", "pass", "pwd"].map((k) => o[k]).find((v): v is string => typeof v === "string" && v.trim() !== "");
+          if (user && pass) return `${user}|${pass}`;
+        }
+        return "";
+      }).filter((v) => v.length > 0);
+      if (vals.length > 0) return [...new Set(vals)];
+    }
+  }
+  return null;
+}
+
 /** Deeply extract delivered credential strings from any supplier order response shape. */
 function extractDeliveredKeys(j: any, exclude: string[] = []): string[] {
+  const structured = structuredDelivered(j);
+  if (structured) return structured.filter((v) => !exclude.includes(v));
   const out: string[] = [];
   const bad = (v: string): boolean => v.startsWith("sup-") || exclude.some((e) => e && v === e);
   const walk = (node: any, keyName?: string): void => {
@@ -481,7 +521,8 @@ function supplierRejection(j: unknown): string | null {
     const status = typeof o.status === "string" ? o.status.toLowerCase() : "";
     const flagged = o.success === false || o.ok === false || FAILED.has(status);
     if (!flagged) return null;
-    const reason = [o.error, o.message, o.reason, o.detail, status]
+    const errObj = o.error && typeof o.error === "object" ? (o.error as Record<string, unknown>) : null;
+    const reason = [errObj?.code, errObj?.message, o.error, o.message, o.reason, o.detail, status]
       .find((v): v is string => typeof v === "string" && v.trim() !== "");
     return (reason ?? "rejected").slice(0, 160);
   };
@@ -566,6 +607,12 @@ export async function placeSupplierOrder(
       // A refusal in a 200 body is final — polling it would only re-read the refusal.
       const rej = supplierRejection(json);
       if (rej) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
+      // Not an order API at all: a REST vendor answers its base URL with a
+      // service banner ({"ok":true,"service":"reseller-api","docs":"/docs"}).
+      // That was read as "order accepted, no key" — nothing had been bought,
+      // the REST order call was never made, and the admin was told the vendor
+      // charged. Only a reply that talks about an order counts as accepted.
+      if (!looksLikeOrderReply(json)) { lastReason = "base URL is not an action-style order API"; break; }
       // Accepted but still processing — poll the status endpoint once.
       const rec = await lookupSupplierOrder(s, extId, excl);
       if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
@@ -584,21 +631,46 @@ export async function placeSupplierOrder(
   const orderPaths = [...new Set([docCfg?.orderPath, "/orders", "/order"].filter((x): x is string => !!x).map((x) => (x.startsWith("/") ? x : `/${x}`)))];
   for (const orderPath of orderPaths) {
     try {
-      const res = await supFetch(s, orderPath, {
+      const post = (body: Record<string, unknown>) => supFetch(s, orderPath, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": extId },
-        body: JSON.stringify({ product_id: pid, productId: pid, service_id: pid, serviceId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId }),
+        body: JSON.stringify(body),
       });
-      const text = await res.text().catch(() => "");
+      let res = await post({ product_id: pid, productId: pid, service_id: pid, serviceId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId });
+      let text = await res.text().catch(() => "");
+      // A 400 means nothing was performed: a strict validator may refuse our
+      // extra field names, so try once more with only the essentials.
+      if (res.status === 400) {
+        res = await post({ product_id: pid, qty, quantity: qty });
+        text = await res.text().catch(() => "");
+      }
       if (res.status === 404 || res.status === 405) { lastReason = `${res.status} ${orderPath}`; continue; }
       lastRaw = text.slice(0, 500) || lastRaw;
+      let errJson: unknown = null; try { errJson = JSON.parse(text); } catch { /* not JSON */ }
+      const errCode = ((errJson as { error?: { code?: string; message?: string; retry_after_seconds?: number } } | null)?.error ?? null);
+      if (res.status === 409 && errCode?.code && errCode.code !== "idempotency_key_conflict") {
+        // out_of_stock, insufficient_balance, pricing_error … — refused, nothing charged.
+        return { ok: false, keys: [], reason: `REJECTED: ${errCode.code}${errCode.message ? ` — ${errCode.message}` : ""}`, raw: lastRaw, rejected: true };
+      }
+      if (res.status === 429) {
+        const wait = errCode?.retry_after_seconds ?? Number(res.headers.get("retry-after") ?? 0);
+        return { ok: false, keys: [], reason: `REJECTED: ${errCode?.code ?? "rate_limited"}${wait ? ` — vendor asks to wait ${Math.ceil(wait / 60)} min; retrying automatically` : ""}`, raw: lastRaw, rejected: true };
+      }
       if (res.status === 409) {
-        const rec = await lookupSupplierOrder(s, extId, excl);
+        // Same idempotency key already used: the order exists upstream — fetch it.
+        const rec = await lookupByIdempotency(s, orderPath, extId, excl);
         if (rec.keys.length > 0) return { ok: true, keys: rec.keys, raw: rec.raw };
+        const rec2 = await lookupSupplierOrder(s, extId, excl);
+        if (rec2.keys.length > 0) return { ok: true, keys: rec2.keys, raw: rec2.raw };
         lastReason = "409 duplicate, and the order lookup returned no key";
         break;
       }
-      if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; break; }
+      if (!res.ok) {
+        const rej = supplierRejection(errJson);
+        if (rej && res.status >= 400 && res.status < 500) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
+        lastReason = `${res.status} ${text.slice(0, 160)}`;
+        break;
+      }
       const { keys, json } = readKeys(text);
       if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
       const rej = supplierRejection(json);
@@ -620,6 +692,19 @@ export async function placeSupplierOrder(
   return { ok: false, keys: [], reason: lastReason || "NO_KEY_IN_RESPONSE", raw: lastRaw };
 }
 
+/** Does a 2xx body actually describe an order (and not, say, a service banner)? */
+function looksLikeOrderReply(j: unknown): boolean {
+  if (!j || typeof j !== "object") return false;
+  if (supplierOrderId(j)) return true;
+  const o = j as Record<string, unknown>;
+  for (const h of [o, o.order, o.data, o.result]) {
+    if (!h || typeof h !== "object") continue;
+    const keys = Object.keys(h as object).map((k) => k.toLowerCase());
+    if (keys.some((k) => /order|status|external|delivered|items|accounts|codes|keys/.test(k))) return true;
+  }
+  return false;
+}
+
 /** Look an order up by our external id and pull the delivered accounts/keys out. */
 /** The vendor's own id for an order, from any of the usual places in a 2xx body. */
 function supplierOrderId(j: unknown): string | null {
@@ -628,7 +713,10 @@ function supplierOrderId(j: unknown): string | null {
   for (const holder of [o, o.order, o.data, o.result]) {
     if (!holder || typeof holder !== "object") continue;
     const h = holder as Record<string, unknown>;
-    for (const k of ["id", "order_id", "orderId", "orderNumber", "order_number"]) {
+    // `code` is an order code only inside an order object (Qamify "RA-…");
+    // at the top level it is usually an error code.
+    const keys = holder === o ? ["id", "order_id", "orderId", "orderNumber", "order_number"] : ["id", "order_id", "orderId", "orderNumber", "order_number", "code"];
+    for (const k of keys) {
       const v = h[k];
       if (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) return String(v);
     }
@@ -660,6 +748,23 @@ async function lookupSupplierOrderRest(s: SupplierRow, orderPath: string, id: st
     }
   }
   return { keys: [], raw: "" };
+}
+
+/** Recover an order by OUR idempotency key (Qamify: GET /orders/by-idempotency/:key, then GET /orders/:code). Never charges. */
+async function lookupByIdempotency(s: SupplierRow, orderPath: string, key: string, excl: string[]): Promise<{ keys: string[]; raw: string }> {
+  const base = orderPath.replace(/\/$/, "");
+  try {
+    const res = await supFetch(s, `${base}/by-idempotency/${encodeURIComponent(key)}`, {}, false);
+    if (!res.ok) return { keys: [], raw: "" };
+    const text = await res.text().catch(() => "");
+    let j: unknown; try { j = JSON.parse(text); } catch { return { keys: [], raw: "" }; }
+    const direct = extractDeliveredKeys(j, [...excl, key]);
+    if (direct.length > 0) return { keys: direct, raw: text.slice(0, 500) };
+    const id = supplierOrderId(j);
+    return id ? lookupSupplierOrderRest(s, orderPath, id, excl) : { keys: [], raw: text.slice(0, 500) };
+  } catch {
+    return { keys: [], raw: "" };
+  }
 }
 
 async function lookupSupplierOrder(s: SupplierRow, extId: string, excl: string[]): Promise<{ keys: string[]; raw: string }> {
@@ -1074,6 +1179,17 @@ export async function setAllSupplierProductsVisible(supplierId: string, visible:
 }
 
 /** Fulfill an order item by buying from its linked supplier and delivering the key. */
+/**
+ * The retry sweep runs every minute; without this every failed attempt sent the
+ * same alert again (three identical warnings in two minutes). One alert per
+ * order line and reason, every 6 hours.
+ */
+async function alertOnce(orderItemId: string, reason: string): Promise<boolean> {
+  const tag = reason.replace(/[^A-Za-z0-9_:-]/g, "").slice(0, 40) || "x";
+  const ok = await getRedis().set(`supalert:${orderItemId}:${tag}`, "1", "EX", 6 * 3600, "NX").catch(() => "OK");
+  return ok === "OK";
+}
+
 export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: boolean; reason?: string }> {
   const item = await prisma.orderItem.findUnique({ where: { id: orderItemId }, include: { variant: { include: { product: true } } } });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
@@ -1113,17 +1229,25 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
       // supply (out of stock, our credit with them exhausted) stops being sold
       // for the next five minutes until the scheduled sync notices.
       void logWallet("supplier.fulfil", `Supplier rejected the order: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
+      if (!(await alertOnce(orderItemId, r.reason ?? "rejected"))) return { ok: false, reason: r.reason ?? "REJECTED" };
       await enqueueAdminAlert(
         `⛔ <b>Supplier REJECTED the order — not charged</b>\nProduct: ${esc(item.productNameSnap)}\nVendor says: <code>${esc(r.reason ?? "unknown")}</code>\n\nDeliver this order manually or refund it. If the reason is a balance / limit, top up your account with the vendor. Their catalogue is being re-synced now.`,
       ).catch(() => undefined);
       void syncSupplierProducts(supplierId).catch(() => undefined);
       return { ok: false, reason: r.reason ?? "REJECTED" };
     }
-    // A charge may have gone through but we couldn't read the key — never drop it silently.
-    void logWallet("supplier.fulfil", `Supplier charged but no key parsed: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
-    await enqueueAdminAlert(
-      `⚠️ <b>Supplier charged but no key parsed</b>\nProduct: ${esc(item.productNameSnap)}\nReason: ${r.reason ?? "unknown"}\nDeliver this order manually. Raw supplier response (send to support to fix mapping):\n<code>${esc(r.raw ?? "").slice(0, 400)}</code>`,
-    ).catch(() => undefined);
+    // We could not get a key. Only ACCEPTED_NO_KEY means the vendor took the
+    // order; anything else (no order endpoint found, network error) means
+    // nothing was bought — and the 60 s sweep will try again by itself.
+    const accepted = r.reason === "ACCEPTED_NO_KEY";
+    void logWallet("supplier.fulfil", `${accepted ? "Supplier accepted but no key parsed" : "Supplier order not placed"}: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
+    if (await alertOnce(orderItemId, r.reason ?? "unknown")) {
+      await enqueueAdminAlert(
+        accepted
+          ? `⚠️ <b>Supplier accepted the order but sent no key</b>\nProduct: ${esc(item.productNameSnap)}\nIt may have been charged. The bot keeps checking; if it does not arrive, deliver manually. Raw supplier response:\n<code>${esc(r.raw ?? "").slice(0, 400)}</code>`
+          : `⚠️ <b>Could not place the supplier order — nothing was bought</b>\nProduct: ${esc(item.productNameSnap)}\nReason: <code>${esc(r.reason ?? "unknown")}</code>\nThe bot retries every minute. If it keeps failing, check the supplier's URL/key in 🏭 Suppliers or deliver manually.${r.raw ? `\nLast response:\n<code>${esc(r.raw).slice(0, 300)}</code>` : ""}`,
+      ).catch(() => undefined);
+    }
     return { ok: false, reason: r.reason ?? "NO_KEY" };
   } finally {
     await getRedis().del(lockKey).catch(() => undefined);
