@@ -85,6 +85,8 @@ const bodies = {
     tiers: z.array(z.object({ count: z.number().int().min(1).max(100_000), rewardUsd: z.number().min(0.01).max(10_000) })).max(20).optional(),
     /** Pay every reached-but-unpaid milestone right now. */
     runNow: z.boolean().optional(),
+    /** Count only friends who join from now on. */
+    restartNow: z.boolean().optional(),
   }),
   terminal: z.object({
     enabled: z.array(z.string().max(24)).max(20).optional(),
@@ -199,8 +201,8 @@ export class FeaturesController {
         break;
       }
       case "milestones": {
-        const { runNow, ...patch } = validate(bodies.milestones, body);
-        if (Object.keys(patch).length) await setMilestoneConfig(patch);
+        const { runNow, restartNow, ...patch } = validate(bodies.milestones, body);
+        if (Object.keys(patch).length || restartNow) await setMilestoneConfig({ ...patch, ...(restartNow ? { startedAt: new Date().toISOString() } : {}) });
         if (runNow) await runReferralMilestones();
         break;
       }

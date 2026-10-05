@@ -1441,12 +1441,14 @@ async function refMilestoneView(ctx: Ctx): Promise<void> {
     .text("➕ Add milestone", cb("adm", "refmileadd"))
     .text(c.repeatLast ? "🔁 Repeat last: on" : "🔁 Repeat last: off", cb("adm", "refmilerep")).row();
   for (const t of c.tiers) kb.text(`✖️ ${t.count} friends → $${t.rewardUsd.toFixed(2)}`, cb("adm", "refmilerm", String(t.count))).row();
-  kb.text("▶️ Pay due milestones now", cb("adm", "refmilerun")).row().text("◀️ Back", cb("adm", "refrates"));
+  kb.text("▶️ Pay due milestones now", cb("adm", "refmilerun")).row()
+    .text("🔄 Restart counting from today", cb("adm", "refmilereset")).row()
+    .text("◀️ Back", cb("adm", "refrates"));
   const what = c.mode === "purchased" ? "friends who made a purchase" : "friends who started the bot";
   const lines = [
     "🏆 <b>Referral milestones</b>",
     "",
-    c.enabled ? `▶️ <b>On</b> — counting <b>${what}</b>.` : "⏸ <b>Off</b> — the ladder is hidden from customers and nothing is paid.",
+    c.enabled ? `▶️ <b>On</b> — counting <b>${what}</b> who joined since <b>${new Date(c.startedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</b> (new referrals only — nothing is paid for older ones).` : "⏸ <b>Off</b> — the ladder is hidden from customers and nothing is paid.",
     "",
     c.tiers.length
       ? `<b>Ladder</b>\n${c.tiers.map((t) => `• <b>${t.count}</b> ${c.mode === "purchased" ? "buyers" : "invites"} → <b>$${t.rewardUsd.toFixed(2)}</b> cashback`).join("\n")}${c.repeatLast ? `\n• then $${c.tiers[c.tiers.length - 1]!.rewardUsd.toFixed(2)} again every further ${c.tiers[c.tiers.length - 1]!.count}` : ""}`
@@ -1458,7 +1460,7 @@ async function refMilestoneView(ctx: Ctx): Promise<void> {
     lines.push("", "<b>Top referrers</b>");
     for (const u of d.top) lines.push(`• ${u.handle ? `@${escapeHtml(u.handle)}` : escapeHtml(u.firstName ?? u.userId.slice(-6))} — ${u.purchased} bought / ${u.invited} invited`);
   }
-  lines.push("", "<i>Paid on top of the % rewards, once per milestone, in the customer's wallet currency at the live rate. Default: every 10 friends invited → $0.50, again for every further 10 (only accounts still active count; ban a fake and it drops out). Switch to \"buyers\" if people farm invites. Runs every 5 minutes; also editable in the web portal → Store Features.</i>");
+  lines.push("", "<i>Paid on top of the % rewards, once per milestone, in the customer's wallet currency at the live rate. Default: every 10 NEW friends invited → $0.50, again for every further 10 (only accounts still active count; ban a fake and it drops out). Switch to \"buyers\" if people farm invites. Runs every 5 minutes; also editable in the web portal → Store Features.</i>");
   await show(ctx, lines.join("\n"), kb, true);
 }
 
@@ -3095,6 +3097,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return refMilestoneView(ctx);
     }
     case "refmilerm": await removeMilestoneTier(Number(id)); return refMilestoneView(ctx);
+    case "refmilereset":
+      await setMilestoneConfig({ startedAt: new Date().toISOString() });
+      flash(ctx, "🔄 The ladder now counts only friends who join from today.");
+      return refMilestoneView(ctx);
     case "refmileadd":
       ctx.session.awaiting = "admin_refmile_add";
       await askStep(ctx, "🏆 Send <b>&lt;friends&gt; &lt;cashback USD&gt;</b>, e.g. <code>10 0.5</code> = after 10 referrals, $0.50 cashback.\nSend several lines to add several tiers at once.");

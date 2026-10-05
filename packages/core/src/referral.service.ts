@@ -167,29 +167,49 @@ export interface MilestoneConfig {
   tiers: MilestoneTier[];
   /** Keep paying the LAST tier's reward every time another `lastTier.count` friends arrive. */
   repeatLast: boolean;
+  /**
+   * Only friends who joined ON OR AFTER this moment count. Set the first time
+   * the ladder is seen, so switching it on never pays out for referrals that
+   * happened before — new referrals only.
+   */
+  startedAt: string;
 }
 
 const MILESTONE_KEY = "referral.milestones";
 // Default: on, every 10 friends INVITED → $0.50, again for every further 10.
 // Invite counting only credits accounts that are still ACTIVE (a banned fake
 // account drops out of the count), and the admin can switch to "purchased".
-const MILESTONE_DEFAULT: MilestoneConfig = { enabled: true, mode: "invited", tiers: [{ count: 10, rewardUsd: 0.5 }], repeatLast: true };
+const MILESTONE_DEFAULT: Omit<MilestoneConfig, "startedAt"> = { enabled: true, mode: "invited", tiers: [{ count: 10, rewardUsd: 0.5 }], repeatLast: true };
 const MILESTONE_PREFIX = "refmile:";
 
 export async function getMilestoneConfig(): Promise<MilestoneConfig> {
   try {
     const row = await prisma.setting.findUnique({ where: { key: MILESTONE_KEY } });
     const v = row?.value as Partial<MilestoneConfig> | null | undefined;
-    if (!v || typeof v !== "object") return MILESTONE_DEFAULT;
-    const tiers = Array.isArray(v.tiers)
-      ? v.tiers
-          .map((t) => ({ count: Math.round(Number((t as MilestoneTier).count)), rewardUsd: Number((t as MilestoneTier).rewardUsd) }))
-          .filter((t) => Number.isFinite(t.count) && t.count > 0 && Number.isFinite(t.rewardUsd) && t.rewardUsd > 0)
-          .sort((a, b) => a.count - b.count)
-      : [];
-    return { enabled: v.enabled !== false, mode: v.mode === "purchased" ? "purchased" : "invited", tiers, repeatLast: v.repeatLast !== false };
+    const base: Omit<MilestoneConfig, "startedAt"> = !v || typeof v !== "object"
+      ? MILESTONE_DEFAULT
+      : {
+          enabled: v.enabled !== false,
+          mode: v.mode === "purchased" ? "purchased" : "invited",
+          tiers: Array.isArray(v.tiers)
+            ? v.tiers
+                .map((t) => ({ count: Math.round(Number((t as MilestoneTier).count)), rewardUsd: Number((t as MilestoneTier).rewardUsd) }))
+                .filter((t) => Number.isFinite(t.count) && t.count > 0 && Number.isFinite(t.rewardUsd) && t.rewardUsd > 0)
+                .sort((a, b) => a.count - b.count)
+            : [],
+          repeatLast: v.repeatLast !== false,
+        };
+    const started = v && typeof v === "object" && typeof v.startedAt === "string" && !Number.isNaN(Date.parse(v.startedAt)) ? v.startedAt : null;
+    if (started) return { ...base, startedAt: started };
+    // First sight of the ladder (or a row from before this field existed):
+    // start counting NOW, and remember it, so nothing is paid for old referrals.
+    const startedAt = new Date().toISOString();
+    const value = { enabled: base.enabled, mode: base.mode, tiers: base.tiers.map((t) => ({ count: t.count, rewardUsd: t.rewardUsd })), repeatLast: base.repeatLast, startedAt };
+    await prisma.setting.upsert({ where: { key: MILESTONE_KEY }, create: { key: MILESTONE_KEY, value }, update: { value } });
+    return { ...base, startedAt };
   } catch {
-    return MILESTONE_DEFAULT;
+    // Unknown start: count nothing rather than everything.
+    return { ...MILESTONE_DEFAULT, startedAt: new Date().toISOString() };
   }
 }
 
@@ -204,7 +224,7 @@ export async function setMilestoneConfig(patch: Partial<MilestoneConfig>): Promi
     if (count >= 1 && count <= 100_000 && usd > 0 && usd <= 10_000) byCount.set(count, usd);
   }
   const tiers = [...byCount.entries()].map(([count, rewardUsd]) => ({ count, rewardUsd })).sort((a, b) => a.count - b.count).slice(0, 20);
-  const value = { enabled: next.enabled, mode: next.mode, tiers, repeatLast: next.repeatLast };
+  const value = { enabled: next.enabled, mode: next.mode, tiers, repeatLast: next.repeatLast, startedAt: next.startedAt };
   await prisma.setting.upsert({ where: { key: MILESTONE_KEY }, create: { key: MILESTONE_KEY, value }, update: { value } });
   return { ...next, tiers };
 }
@@ -243,11 +263,14 @@ export function nextMilestone(cfg: MilestoneConfig, n: number): MilestoneTier | 
 }
 
 /** Who counts as "a referral" for the ladder: buyers, or every still-active invited account. */
-const countedFriendWhere = (mode: MilestoneConfig["mode"]) =>
-  mode === "purchased" ? { firstPurchaseAt: { not: null } } : { status: "ACTIVE" as const };
+/** Who counts toward the ladder: friends who joined since the ladder started — buyers, or every still-active invite. */
+const countedFriendWhere = (cfg: Pick<MilestoneConfig, "mode" | "startedAt">) => ({
+  createdAt: { gte: new Date(cfg.startedAt) },
+  ...(cfg.mode === "purchased" ? { firstPurchaseAt: { not: null } } : { status: "ACTIVE" as const }),
+});
 
-async function referralCount(userId: string, mode: MilestoneConfig["mode"]): Promise<number> {
-  return prisma.user.count({ where: { referredById: userId, ...countedFriendWhere(mode) } });
+async function referralCount(userId: string, cfg: Pick<MilestoneConfig, "mode" | "startedAt">): Promise<number> {
+  return prisma.user.count({ where: { referredById: userId, ...countedFriendWhere(cfg) } });
 }
 
 /** Customer-facing: where this referrer stands on the ladder. */
@@ -255,7 +278,7 @@ export async function milestoneProgress(userId: string): Promise<{ cfg: Mileston
   const cfg = await getMilestoneConfig();
   if (!cfg.enabled || cfg.tiers.length === 0) return null;
   const [count, paid] = await Promise.all([
-    referralCount(userId, cfg.mode),
+    referralCount(userId, cfg),
     prisma.walletTransaction.findMany({ where: { idempotencyKey: { startsWith: `${MILESTONE_PREFIX}${userId}:` } }, select: { referenceNote: true } }),
   ]);
   // The note carries the USD figure ("milestone 10 friends · $0.50"), so the
@@ -281,7 +304,7 @@ export async function runReferralMilestones(pageSize = 200, maxPages = 50): Prom
   for (let page = 0; page < maxPages; page++) {
     const batch = await prisma.user.groupBy({
       by: ["referredById"],
-      where: { referredById: { not: null }, ...countedFriendWhere(cfg.mode) },
+      where: { referredById: { not: null }, ...countedFriendWhere(cfg) },
       _count: { _all: true },
       having: { referredById: { _count: { gte: minCount } } },
       orderBy: { referredById: "asc" },
@@ -309,7 +332,9 @@ export async function runReferralMilestones(pageSize = 200, maxPages = 50): Prom
     ]);
     if (!wallet || !user || user.status !== "ACTIVE") continue;
     for (const m of reached) {
-      const key = `${MILESTONE_PREFIX}${referrerId}:${m.count}`;
+      // Tagged with the ladder's start, so a restart ("count from today") is
+      // a fresh ladder rather than colliding with milestones paid before it.
+      const key = `${MILESTONE_PREFIX}${referrerId}:${m.count}@${Date.parse(cfg.startedAt).toString(36)}`;
       if (doneKeys.has(key)) continue;
       const usdMinor = Math.round(m.rewardUsd * 100);
       const amountMinor = wallet.currency === "USD" ? usdMinor : convertMinor(usdMinor, "USD", wallet.currency);

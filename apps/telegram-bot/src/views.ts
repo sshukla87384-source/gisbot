@@ -679,7 +679,7 @@ export async function referralView(user: BotUser, botUsername: string): Promise<
   // Milestone ladder + progress bar.
   const ladder: string[] = [];
   if (mile) {
-    ladder.push(HR, `🏆 <b>Bonus ladder</b> (${what})`);
+    ladder.push(HR, `🏆 <b>Bonus ladder</b> (new ${what} from ${new Date(mile.cfg.startedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })})`);
     for (const t of mile.cfg.tiers.slice(0, 6)) ladder.push(`${mile.count >= t.count ? "✅" : "▫️"} <b>${t.count}</b> → <b>$${t.rewardUsd.toFixed(2)}</b>`);
     if (mile.cfg.repeatLast && mile.cfg.tiers.length) {
       const last = mile.cfg.tiers[mile.cfg.tiers.length - 1]!;

@@ -24,7 +24,7 @@ interface Features {
   faq: Array<{ id: string; q: string; a: string }>;
   referral: { firstPct: number; repeatPct: number; holdHours: number; commissionMonths: number };
   milestones: {
-    enabled: boolean; mode: "purchased" | "invited"; repeatLast: boolean; tiers: Array<{ count: number; rewardUsd: number }>;
+    enabled: boolean; mode: "purchased" | "invited"; repeatLast: boolean; tiers: Array<{ count: number; rewardUsd: number }>; startedAt: string;
     payouts: number; paidUsd: number; eligibleReferrers: number;
     top: Array<{ userId: string; handle: string | null; firstName: string | null; invited: number; purchased: number }>;
   };
@@ -337,6 +337,10 @@ function Referral({ f }: { f: Features }) {
           <h3 className="text-sm font-semibold">Milestone cashback ladder</h3>
           <Toggle on={ms.enabled} label="Enabled" onChange={(on) => m.mutate({ enabled: on })} disabled={m.isPending} />
           <Toggle on={ms.mode === "purchased"} label={ms.mode === "purchased" ? "Counting friends who bought" : "Counting friends invited (active accounts; default)"} onChange={(on) => m.mutate({ mode: on ? "purchased" : "invited" })} disabled={m.isPending} />
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>New referrals only — counting friends who joined since <b>{new Date(ms.startedAt).toLocaleDateString()}</b></span>
+            <Button variant="ghost" onClick={() => { if (confirm("Restart the ladder from today? Only friends who join from now on will count.")) m.mutate({ restartNow: true }); }} disabled={m.isPending}>Restart from today</Button>
+          </div>
           <Toggle on={ms.repeatLast} label="Keep paying the last tier for every further batch" onChange={(on) => m.mutate({ repeatLast: on })} disabled={m.isPending} />
           <ul className="space-y-1 text-sm">
             {ms.tiers.length === 0 && <li className="text-slate-400">No milestones yet.</li>}
