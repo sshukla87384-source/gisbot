@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { plainDescription } from "./tg-html.js";
 import { prisma, type Currency } from "@gis/database";
 import { formatMinor, isCoreError, type CurrencyCode } from "@gis/shared";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -112,7 +113,7 @@ export async function buildMiniAppCatalog(currency: Currency): Promise<MiniAppCa
     const counted = variants.filter((v) => v.units !== UNLIMITED_STOCK);
     const stock = counted.length === 0 ? null : counted.reduce((s, v) => s + v.units, 0);
     out.push({
-      id: p.id, slug: p.slug, name: p.name, description: p.description, imageUrl: publicImageUrl(p.imageUrl), iconEmoji: p.iconEmoji, categoryId: p.categoryId,
+      id: p.id, slug: p.slug, name: p.name, description: plainDescription(p.description, p.descriptionHtml) || null, imageUrl: publicImageUrl(p.imageUrl), iconEmoji: p.iconEmoji, categoryId: p.categoryId,
       fromPriceMinor: cheapest.priceMinor, wasPriceMinor: onSale ? cheapest.basePriceMinor : null, onSale, inStock, stock,
       rating: r && r.count > 0 ? Math.round(r.avg * 10) / 10 : null, ratingCount: r?.count ?? 0,
       variants: variants.map((v) => ({ id: v.id, name: v.name, priceMinor: v.priceMinor, inStock: v.inStock })),

@@ -1,3 +1,4 @@
+import { richDescription } from "./tg-html.js";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { enqueueTelegramMessage, type OutboxButton } from "./queues.js";
@@ -59,8 +60,11 @@ async function buildProductPost(productId: string): Promise<{ caption: string; i
   if (onSale && p.salePercentBp) lines.push(`🔥 <b>FLASH SALE — ${Math.round(p.salePercentBp / 100)}% OFF</b>`, "");
   if (cheapest) lines.push(`💰 <b>Price: ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`, "");
   if (stock !== null) lines.push(`📦 In stock: <b>${stock}</b>`, "");
-  if (p.description) {
-    for (const line of p.description.split("\n").map((l) => l.trim()).filter(Boolean)) lines.push(`✅ ${esc(line)}`);
+  // Cleaned rather than escaped: an imported description's markup used to be
+  // posted to the group as literal <tg-emoji …> text.
+  const desc = richDescription(p.description, p.descriptionHtml, { dropTags: ["blockquote"] });
+  for (const line of desc.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    lines.push(/^(?:<[^>]+>)*\s*[\p{Extended_Pictographic}]/u.test(line) ? line : `✅ ${line}`);
   }
 
   const buttons: OutboxButton[] | undefined = cfg.BOT_USERNAME

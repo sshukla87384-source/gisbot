@@ -1,3 +1,4 @@
+import { plainDescription } from "./tg-html.js";
 import { prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { sendBroadcast } from "./broadcast.service.js";
@@ -50,7 +51,7 @@ export async function promoContext(productId: string): Promise<PromoContext | nu
   const unlimited = (view?.variants ?? []).some((v) => v.stock >= UNLIMITED_STOCK);
   const units = (view?.variants ?? []).reduce((n, v) => n + (v.stock >= UNLIMITED_STOCK ? 0 : v.stock), 0);
   // Bullets from the description: one per line/• so feature lists render cleanly.
-  const bullets = (p.description ?? "")
+  const bullets = plainDescription(p.description, null)
     .split(/\r?\n|•|·/)
     .map((x) => x.replace(/^[\s\-*✅]+/, "").trim())
     .filter((x) => x.length > 2 && x.length < 60)

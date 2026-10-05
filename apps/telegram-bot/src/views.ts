@@ -17,6 +17,8 @@ import {
   getWallet,
   getButtonConfig,
   getMiniAppConfig,
+  plainDescription,
+  richDescription,
   miniAppReachableUrl,
   milestoneProgress,
   referralEarnings,
@@ -252,8 +254,14 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
   const perUnit = p.type === "LICENSE_KEY" ? " / code" : p.type === "DIGITAL_ACCOUNT" ? " / account" : "";
   // Description → one quote block. A line the operator did not mark gets a ✅;
   // lines they marked themselves (✅ ⛔ ❌ ⚠️ …) are left exactly as written.
-  const descRaw = translated ? (p.description ?? "") : (p.descriptionHtml ?? (p.description ? escapeHtml(p.description) : ""));
-  const descLines = (translated ? escapeHtml(descRaw) : descRaw).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  // A description copied from another bot or imported from a supplier often
+  // carries its markup as text (<blockquote><tg-emoji …>); it is cleaned to the
+  // tags Telegram accepts instead of being escaped and printed literally. Our
+  // own quote wraps it, so a quote inside it is dropped (Telegram rejects nesting).
+  const descRaw = translated
+    ? escapeHtml(plainDescription(p.description, null))
+    : richDescription(p.description, p.descriptionHtml, { dropTags: ["blockquote"] });
+  const descLines = descRaw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const marked = /^(?:<[^>]+>)*\s*[\p{Extended_Pictographic}]/u;
   const anyMarked = descLines.some((l) => marked.test(l));
   const descBlock = descLines.length > 0

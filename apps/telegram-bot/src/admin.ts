@@ -135,6 +135,11 @@ import {
   scheduleBroadcast,
   setFlashSale,
   setProductImage,
+  entitiesToTelegramHtml,
+  looksLikeTelegramHtml,
+  plainDescription,
+  sanitizeTelegramHtml,
+  type TgEntity,
   hostImageFromUrl,
   setProductName,
   setProductDescription,
@@ -1234,6 +1239,27 @@ async function customPriceChannelPrompt(ctx: Ctx): Promise<void> {
     .text("🛒🔌 Both", cb("adm", "cpset", "BOTH")).row()
     .text("✖️ Cancel", cb("adm", "home"));
   await show(ctx, `Where should <b>${escapeHtml(ctx.session.priceUserLabel ?? "this customer")}</b>'s price of <b>${((ctx.session.priceAmountMinor ?? 0) / 100).toFixed(2)}</b> apply?`, kb, false);
+}
+
+/**
+ * A description as the admin sent it: plain text + the rich version.
+ *
+ * Copying a description from another bot pastes it WITH its formatting (quote,
+ * bold, premium emoji) — all of it is kept now, not just the emoji. And when the
+ * paste arrives as raw markup TEXT (`<blockquote><tg-emoji …>`), it is cleaned
+ * into real formatting instead of being stored and shown as literal tags.
+ */
+function descriptionFromMessage(ctx: Ctx, text: string): { description: string; descriptionHtml: string | null } {
+  const ents = (ctx.message?.entities ?? []) as TgEntity[];
+  const formatted = ents.some((e) => ["bold", "italic", "underline", "strikethrough", "spoiler", "code", "pre", "text_link", "custom_emoji", "blockquote", "expandable_blockquote"].includes(e.type));
+  if (formatted) {
+    const html = entitiesToTelegramHtml((ctx.message?.text ?? text).slice(0, 4000), ents);
+    return { description: text.slice(0, 4000), descriptionHtml: html };
+  }
+  if (looksLikeTelegramHtml(text)) {
+    return { description: plainDescription(text).slice(0, 4000), descriptionHtml: sanitizeTelegramHtml(text).slice(0, 8000) };
+  }
+  return { description: text.slice(0, 4000), descriptionHtml: null };
 }
 
 function hasCustomEmoji(ctx: Ctx): boolean {
@@ -4726,9 +4752,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
 
   if (awaiting === "admin_p_desc") {
-    const desc = text === "-" ? "" : text.slice(0, 4000);
-    const descriptionHtml = desc && hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : undefined;
-    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), description: desc, descriptionHtml };
+    const d = text === "-" ? { description: "", descriptionHtml: null } : descriptionFromMessage(ctx, text);
+    ctx.session.admDraft = { ...(ctx.session.admDraft ?? {}), description: d.description, descriptionHtml: d.descriptionHtml ?? undefined };
     await wizardTypeStep(ctx); // step 3 is button-driven
     return true;
   }
@@ -4824,8 +4849,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
   if (awaiting === "admin_p_editdesc") {
     const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
-    await setProductDescription(pid, text, hasCustomEmoji(ctx) ? composeBroadcastHtml(ctx) : null);
-    await ctx.reply("✅ Description updated." + (hasCustomEmoji(ctx) ? " (premium emoji kept 🎨)" : ""));
+    const d = descriptionFromMessage(ctx, text);
+    await setProductDescription(pid, d.description, d.descriptionHtml);
+    await ctx.reply("✅ Description updated." + (d.descriptionHtml ? " (formatting & premium emoji kept 🎨)" : ""));
     await productView(ctx, pid);
     return true;
   }

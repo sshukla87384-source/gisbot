@@ -1,3 +1,4 @@
+import { plainDescription } from "../tg-html.js";
 import { prisma, type Currency } from "@gis/database";
 import { sha256Hex } from "@gis/shared";
 import { CoreError, effectiveHours, PAGE_SIZE } from "@gis/shared";
@@ -454,12 +455,15 @@ async function getProductViewUncached(productId: string, currency: Currency, use
       stock: stockMap.get(v.id) ?? 0,
     };
   });
+  // Translation works on the plain text: markup in an imported description
+  // would otherwise come back mangled by the translator.
+  const plainDesc = plainDescription(p.description, null);
   const tr = locale === "en"
     ? [p.name, p.description ?? ""]
     : (await Promise.race([
-        translateMany([p.name, p.description], locale),
+        translateMany([p.name, plainDesc], locale),
         new Promise<null>((res) => setTimeout(() => res(null), 1500)),
-      ]).catch(() => null)) ?? [p.name, p.description ?? ""];
+      ]).catch(() => null)) ?? [p.name, plainDesc];
   const [trName, trDesc] = tr;
   return {
     id: p.id,

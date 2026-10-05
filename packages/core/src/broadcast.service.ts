@@ -1,3 +1,4 @@
+import { richDescription } from "./tg-html.js";
 import { loadConfig } from "@gis/config";
 import { stockMapFor } from "./catalog/catalog.service.js";
 import { prisma } from "@gis/database";
@@ -222,31 +223,34 @@ export async function announceProduct(
   // reached the announcement.
   const iconHtml = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name);
   const icon = iconHtml ? `${iconHtml} ` : "🆕 ";
-  const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
-  const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
-  // Lead with the news rather than the product name. "Just added & in stock"
-  // sat under the title and read as a label; announcing the update first tells
-  // a customer scrolling past what actually happened.
+  const nameDisp = stripLeadingEmoji(p.nameHtml ?? esc(p.name));
+  // The launch post is short on purpose: the news, the product, how many are
+  // in stock — and the price on the button. No description: a copied or
+  // imported description is long, often carries foreign markup, and the
+  // customer reads it on the product card one tap away.
   const stockView = await getProductView(p.id, "USD").catch(() => null);
   const UNLIMITED = 1_000_000;
   const totalStock = stockView
     ? stockView.variants.reduce((sum, v) => sum + (v.stock >= UNLIMITED ? 0 : v.stock), 0)
     : 0;
-  const lines = onSale
-    ? [`📣 <b>New Update!</b>`, "", `We just added a new product — <b>on flash sale</b>:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`]
-    : [`📣 <b>New Update!</b>`, "", `We just added a new product:`, `${icon}${nameDisp}${totalStock > 0 ? ` — Stock: ${totalStock}` : ""}`];
-  // descDisp was computed and then never used, so every launch announcement went
-  // out with no description at all (announceFlashSale below does include it).
-  if (descDisp) lines.push("", descDisp);
-  if (cheapest) lines.push("", `💵 <b>${onSale ? "Sale price " : "Price "}from ${fmtMinor(cheapest.minor, cheapest.currency)}</b>`);
+  const unlimited = stockView ? stockView.variants.some((v) => v.stock >= UNLIMITED) : false;
+  const stockTxt = unlimited ? "Available" : String(totalStock);
+  const lines = [
+    `📣 <b>New Update!</b>`,
+    "",
+    onSale ? `We just added a new product — 🔥 <b>on flash sale</b>:` : `We just added a new product:`,
+    "",
+    `${icon}${nameDisp}${unlimited || totalStock > 0 ? ` — Stock: ${stockTxt}` : ""}`,
+  ];
 
-  // The emoji goes on the button too. It is the thing a customer recognises at
-  // a glance in a busy chat, and the button is often all they look at.
-  // Label keeps the plain glyph (button LABELS are plain text — no entities);
-  // the premium one rides along as the button's icon, which is how the icon
-  // appears on a button at all.
+  // Price rides on the button, in USDT like every other shop post:
+  // "🟧 Replit Pro 1 Months - 15.00 USDT (Stock: 1)". Label keeps the plain
+  // glyph (button LABELS are plain text); the premium one is the button icon.
+  const usdPriced = stockView ? stockView.variants.map((v) => v.priceMinor).filter((n): n is number => n !== null) : [];
+  const usdMinor = usdPriced.length > 0 ? Math.min(...usdPriced) : null;
   const btnEmoji = productEmoji(p.iconEmoji, p.name);
-  const buttonText = `${btnEmoji ? `${btnEmoji} ` : ""}${onSale ? "🛒 Buy now — 🔥 Deal" : "🛒 Buy now"}`.slice(0, 64);
+  const priceTxt = usdMinor !== null ? `${(usdMinor / 100).toFixed(2)} USDT` : cheapest ? fmtMinor(cheapest.minor, cheapest.currency) : "";
+  const buttonText = `${btnEmoji ? `${btnEmoji} ` : ""}${stripLeadingEmoji(p.name)}${priceTxt ? ` - ${priceTxt}` : ""}${unlimited || totalStock > 0 ? ` (Stock: ${stockTxt})` : ""}`.slice(0, 64);
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
 
   const res = await sendBroadcast({
@@ -257,6 +261,7 @@ export async function announceProduct(
     imageUrl: p.imageUrl ?? undefined,
     buttonText: buttonUrl ? buttonText : undefined,
     buttonUrl,
+    buttonStyle: "success",
     buttonIcon: productEmojiId(p.nameHtml),
     pin: opts.pin ?? false,
     createdById: opts.createdById,
@@ -305,7 +310,9 @@ export async function announceFlashSale(
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const icon = (() => { const h = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name); return h ? `${h} ` : ""; })();
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
-  const descDisp = p.descriptionHtml ?? (p.description ? esc(p.description) : "");
+  // Cleaned, not escaped: a copied/imported description keeps its quote and
+  // premium emoji instead of showing the raw tags.
+  const descDisp = richDescription(p.description, p.descriptionHtml);
   const hook = (await nextFlashHeadline().catch(() => "")).trim() || "⚡🔥 <b>HURRY — FLASH SALE IS LIVE!</b> 🔥⚡";
   const lines = [
     hook,
@@ -424,7 +431,7 @@ export async function announceRestock(
   const iconHtml = restockEmojiHtml ? `${restockEmojiHtml} ` : "";
   const iconTxt = restockEmoji ? `${restockEmoji} ` : "";
   const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
-  const usdt = cheapestMinor !== null ? (Number.isInteger(cheapestMinor / 100) ? (cheapestMinor / 100).toFixed(1) : (cheapestMinor / 100).toFixed(2)) : "";
+  const usdt = cheapestMinor !== null ? (cheapestMinor / 100).toFixed(2) : "";
   // A product's FIRST stock is news; every later batch is a restock. Announcing
   // both as "N new stock added" told customers a brand-new product was simply
   // back on the shelf, which reads as old and buries the launch.
@@ -440,6 +447,7 @@ export async function announceRestock(
         `📣 <b>New Update!</b>`,
         "",
         `We just added a new product:`,
+        "",
         `${iconHtml}${nameDisp} — Stock: ${currentStock}`,
       ].join("\n")
     : `📣 <b>${qtyAdded} new stock added for</b> ${iconHtml}${nameDisp}`;
