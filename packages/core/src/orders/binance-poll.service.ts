@@ -32,6 +32,9 @@ export async function fetchPayTransactions(apiKey: string, apiSecret: string): P
   const signature = sign(query, apiSecret);
   const res = await fetch(`${BINANCE_BASE}/sapi/v1/pay/transactions?${query}&signature=${signature}`, {
     headers: { "X-MBX-APIKEY": apiKey },
+    // No timeout meant a stalled Binance call hung the admin's key test (and
+    // the 2-minute poll) for the runtime's 5-minute default.
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Binance Pay history ${res.status}: ${await res.text().catch(() => "")}`);
   const json = (await res.json()) as { code?: string; data?: PayTxn[] };

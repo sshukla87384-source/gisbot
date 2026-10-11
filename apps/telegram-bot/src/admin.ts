@@ -279,6 +279,9 @@ import {
   logCounts,
   type LogChannel,
   autoFetchSupplierDocs,
+  diagnoseSupplier,
+  logError,
+  capTelegramHtml,
   notifyTopupToAdmins,
   listFundedUsers,
   getUserWalletHistory,
@@ -1307,6 +1310,7 @@ async function broadcastProductPicker(ctx: Ctx): Promise<void> {
 }
 
 async function finishBroadcast(ctx: Ctx): Promise<void> {
+  if (ctx.session.awaiting === "admin_bc_photo") ctx.session.awaiting = null;
   const body = ctx.session.bcBody ?? "";
   if (!body.trim()) { await ctx.reply("Nothing to send — start again from 📢 Broadcast."); return sendPanel(ctx, false); }
   const photo = ctx.session.bcPhoto;
@@ -1502,6 +1506,38 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
     "<i>Premium emoji show only if the bot owner's account has Telegram Premium; otherwise Telegram shows the normal emoji — nothing breaks.</i>",
   ].join("\n"), kb, true);
 }
+
+/**
+ * Slow vendor work (probe, sync, docs) runs OUTSIDE the update handler.
+ * Running it inline held this admin's whole update queue for minutes — every
+ * other tap waited behind it and the bot looked frozen. One status message
+ * shows a live timer and is replaced by the result.
+ */
+function inBackground(ctx: Ctx, title: string, work: () => Promise<{ text: string; kb?: InlineKeyboard }>): void {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
+  void (async () => {
+    const started = Date.now();
+    const m = await ctx.api.sendMessage(chatId, `⏳ ${title}\n<i>Running in the background — you can keep using the bot.</i>`, { parse_mode: "HTML" }).catch(() => undefined);
+    const timer = m ? setInterval(() => {
+      const secs = Math.round((Date.now() - started) / 1000);
+      void ctx.api.editMessageText(chatId, m.message_id, `⏳ ${title} · ${secs}s\n<i>Running in the background — you can keep using the bot.</i>`, { parse_mode: "HTML" }).catch(() => undefined);
+    }, 7000) : undefined;
+    let out: { text: string; kb?: InlineKeyboard };
+    try { out = await work(); } catch (e) { out = { text: `❌ ${escapeHtml(String(e instanceof Error ? e.message : e).slice(0, 300))}` }; }
+    if (timer) clearInterval(timer);
+    const text = capTelegramHtml(out.text, 4000);
+    const opts = { parse_mode: "HTML" as const, ...(out.kb ? { reply_markup: out.kb } : {}) };
+    if (m && await ctx.api.editMessageText(chatId, m.message_id, text, opts).then(() => true).catch(() => false)) return;
+    await ctx.api.sendMessage(chatId, text, opts).catch(() => ctx.api.sendMessage(chatId, text.replace(/<[^>]+>/g, "")).catch(() => undefined));
+  })();
+}
+
+/** Buttons offered after a vendor check fails. */
+const supFixKb = (id: string): InlineKeyboard => new InlineKeyboard()
+  .text("🔍 Diagnose", cb("adm", "supdiag", id)).text("🔎 Auto-find docs", cb("adm", "supauto", id)).row()
+  .text("📄 Paste API docs", cb("adm", "supdocs", id)).row()
+  .text("◀️ Suppliers", cb("adm", "sups"));
 
 async function suppliersView(ctx: Ctx): Promise<void> {
   const sups = await listSuppliers();
@@ -2895,47 +2931,52 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return supplierProductsView(ctx, supId);
     }
     case "supsync": {
-      await ctx.reply("🔄 Syncing catalog…");
-      const r = await syncSupplierProducts(id).catch((e) =>
-        ({ added: 0, updated: 0, skipped: 0, failed: 0, err: String(e) }) as SyncResult & { err?: string });
-      if (r.busy) {
-        flash(ctx, "⏳ A sync is already running for this supplier — waiting for it to finish. Tapping 🔄 again won't speed it up.");
-        return suppliersView(ctx);
-      }
-      if ("err" in r && r.err) {
-        // Escaped text needs parse_mode, or the admin reads "&lt;" instead of "<".
-        await ctx.reply(`❌ Sync failed: ${escapeHtml(String(r.err).slice(0, 200))}`, { parse_mode: "HTML" });
-        return suppliersView(ctx);
-      }
-      if (r.added + r.updated + r.skipped === 0) {
-        flash(ctx, "ℹ️ Synced — nothing imported.\n\nUsually the base URL or key is wrong. Tap 🔎 <b>Auto-find docs</b>, or 🔍 <b>Diagnose</b> to see the raw response.");
-        return suppliersView(ctx);
-      }
-      const goLive = await getSupplierNewVisible(id);
-      const kb = new InlineKeyboard()
-        .add(sbtn(`📂 Review ${r.added > 0 ? `${r.added} new ` : ""}product(s)`, cb("adm", "supprods", id), "success")).row()
-        .text("◀️ Suppliers", cb("adm", "sups"));
-      await show(ctx, [
-        "✅ <b>Sync complete</b>",
-        "",
-        `• ➕ ${r.added} added`,
-        `• ♻️ ${r.updated} updated`,
-        r.skipped > 0 ? `• 🗑 ${r.skipped} skipped (you deleted these)` : "",
-        r.failed > 0 ? `• ⚠️ ${r.failed} could not be imported — see 🩺 Logs → Supplier` : "",
-        "",
-        r.added > 0 && !goLive
-          ? "The new products are <b>hidden</b>. Nothing is in your shop until you publish it — open the review list and pick what goes live, one by one or in bulk."
-          : r.added > 0
-            ? "⚠️ This supplier is set to publish new products <b>immediately</b>, so they are already live. Change that in the review list."
-            : "Nothing new this time.",
-      ].filter(Boolean).join("\n"), kb, false);
+      inBackground(ctx, "<b>Syncing catalog…</b>", async () => {
+        const r = await syncSupplierProducts(id);
+        const back = new InlineKeyboard().text("◀️ Suppliers", cb("adm", "sups"));
+        if (r.busy) return { text: "⏳ A sync is already running for this supplier — it will finish on its own. Tapping 🔄 again won't speed it up.", kb: back };
+        if (r.empty) {
+          const t = await testSupplier(id).catch(() => null);
+          return { text: `ℹ️ <b>Nothing imported</b> — the supplier returned no products.\n\n${t ? escapeHtml(t.detail.slice(0, 900)) : "Usually the base URL or key is wrong."}`, kb: supFixKb(id) };
+        }
+        const goLive = await getSupplierNewVisible(id);
+        const kb = new InlineKeyboard()
+          .add(sbtn(`📂 Review ${r.added > 0 ? `${r.added} new ` : ""}product(s)`, cb("adm", "supprods", id), "success")).row()
+          .text("◀️ Suppliers", cb("adm", "sups"));
+        return {
+          text: [
+            "✅ <b>Sync complete</b>",
+            "",
+            `• ➕ ${r.added} added`,
+            `• ♻️ ${r.updated} updated`,
+            r.unchanged ? `• ✔️ ${r.unchanged} already up to date` : "",
+            r.skipped > 0 ? `• 🗑 ${r.skipped} skipped (you deleted these)` : "",
+            r.failed > 0 ? `• ⚠️ ${r.failed} could not be imported — see 🩺 Logs → Supplier` : "",
+            "",
+            r.added > 0 && !goLive
+              ? "The new products are <b>hidden</b>. Nothing is in your shop until you publish it — open the review list and pick what goes live, one by one or in bulk."
+              : r.added > 0
+                ? "⚠️ This supplier is set to publish new products <b>immediately</b>, so they are already live. Change that in the review list."
+                : "Nothing new this time.",
+          ].filter(Boolean).join("\n"),
+          kb,
+        };
+      });
       return;
     }
     case "supauto": {
-      await ctx.reply("🔎 Looking for this supplier's documentation…");
-      const r = await autoFetchSupplierDocs(id);
-      await ctx.reply(r.detail, { parse_mode: "HTML" });
-      return sendPanel(ctx, false);
+      inBackground(ctx, "<b>Looking for this supplier's documentation…</b>", async () => {
+        const r = await autoFetchSupplierDocs(id);
+        return { text: r.detail, kb: new InlineKeyboard().text("🔄 Sync now", cb("adm", "supsync", id)).text("◀️ Suppliers", cb("adm", "sups")) };
+      });
+      return;
+    }
+    case "supdiag": {
+      inBackground(ctx, "<b>Diagnosing the connection…</b>", async () => {
+        const r = await diagnoseSupplier(id);
+        return { text: `${r.ok ? "✅" : "🔍"} ${escapeHtml(r.detail)}`, kb: r.ok ? new InlineKeyboard().text("🔄 Sync now", cb("adm", "supsync", id)).text("◀️ Suppliers", cb("adm", "sups")) : supFixKb(id) };
+      });
+      return;
     }
     case "supdocs": {
       ctx.session.supTarget = id;
@@ -2952,8 +2993,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "suptest": {
-      const r = await testSupplier(id);
-      await ctx.reply(r.ok ? `✅ ${escapeHtml(r.detail)}` : `❌ ${escapeHtml(r.detail)}`, { parse_mode: "HTML" });
+      inBackground(ctx, "<b>Testing the connection…</b>", async () => {
+        const r = await testSupplier(id);
+        return r.ok
+          ? { text: `✅ ${escapeHtml(r.detail)}`, kb: new InlineKeyboard().text("🔄 Sync now", cb("adm", "supsync", id)).text("◀️ Suppliers", cb("adm", "sups")) }
+          : { text: `❌ ${escapeHtml(r.detail)}`, kb: supFixKb(id) };
+      });
       return;
     }
     case "suprm": {
@@ -4401,6 +4446,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "keys": return variantsForKeys(ctx, id);
+    case "kvdone": {
+      ctx.session.awaiting = null;
+      ctx.session.admVariantId = undefined;
+      await ctx.reply("✅ Stock saved.");
+      return sendPanel(ctx, false);
+    }
     case "kv": {
       ctx.session.awaiting = "admin_addkeys";
       ctx.session.admVariantId = id;
@@ -4701,7 +4752,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       if (uname) { ctx.session.bcBtnText = "🏠 Open Store"; ctx.session.bcBtnUrl = `https://t.me/${uname}?start=menu`; }
       return finishBroadcast(ctx);
     }
-    case "bcsend": return finishBroadcast(ctx);
+    case "bcsend": ctx.session.awaiting = null; return finishBroadcast(ctx);
     case "salenophoto": {
       if (ctx.session.saleDraft) ctx.session.saleDraft = { ...ctx.session.saleDraft, photo: undefined };
       flash(ctx, "🗑 Image removed — the sale will send as text.");
@@ -4801,17 +4852,10 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
 
   if (awaiting === "admin_addkeys") {
     const variantId = ctx.session.admVariantId ?? "";
-    ctx.session.admVariantId = undefined;
+    if (!variantId) { await ctx.reply("That product expired — open it again and tap 🔑 Add stock keys."); return true; }
     const keys = text.split("\n").map((k) => k.trim()).filter(Boolean);
-    if (keys.length === 0) { await ctx.reply("❌ Nothing detected."); return true; }
-    const r = await addStock(variantId, keys);
-    const unit = r.type === "DIGITAL_ACCOUNT" ? "account" : "key";
-    const bits = [`✅ Added <b>${r.added}</b> ${unit}(s)`];
-    if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered ${unit}(s) — back on sale, not duplicated`);
-    if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> already in stock (duplicate)`);
-    await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
-    if (r.blocked.length > 0) { await askReAddBlocked(ctx, variantId, r.blocked, unit); return true; }
-    await sendPanel(ctx, false);
+    if (keys.length === 0) { ctx.session.awaiting = "admin_addkeys"; await ctx.reply("❌ Nothing detected — paste one item per line."); return true; }
+    await importStockLines(ctx, variantId, keys, null);
     return true;
   }
 
@@ -4931,10 +4975,24 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   }
   if (awaiting === "admin_p_image") {
     const productId = ctx.session.admProductId ?? "";
+    if (!productId) { await ctx.reply("No product selected. Open the product and tap 🖼 Set image again."); return true; }
+    let url = text.trim();
+    if (/^www\./i.test(url)) url = `https://${url}`;
+    // Stay in this step on a bad answer — the "or send a photo" that followed
+    // used to be ignored because the step had already ended.
+    const again = () => { ctx.session.awaiting = "admin_p_image"; ctx.session.admProductId = productId; };
+    if (!/^https?:\/\/\S+$/i.test(url)) { again(); await ctx.reply("Please paste a valid https image link, or send a photo."); return true; }
+    // Copy it to our own storage: a Drive/imgur PAGE link, or a file Telegram
+    // can't fetch, used to be saved as-is and showed as a broken image.
+    const hosted = await hostImageFromUrl(url, `product-${productId.slice(-6)}`).catch(() => null);
+    if (!hosted && !/\.(jpe?g|png|webp|gif)(\?|$)/i.test(url)) {
+      again();
+      await ctx.reply("⚠️ That link doesn't open an image (it may be a web page). Paste a direct image link (ending in .jpg/.png), or just send the photo.");
+      return true;
+    }
     ctx.session.admProductId = undefined;
-    if (!/^https?:\/\//i.test(text)) { await ctx.reply("Please paste a valid http(s) image URL, or send a photo."); return true; }
-    await setProductImage(productId, text.trim());
-    await ctx.reply("🖼 Image updated.");
+    await setProductImage(productId, hosted ?? url);
+    await ctx.reply(hosted ? "🖼 Image updated — shows in the bot and the Mini App. ✅" : "🖼 Image updated.");
     await sendPanel(ctx, false);
     return true;
   }
@@ -4963,13 +5021,17 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const pct = Number.parseFloat(text.trim().replace(/[^0-9.]/g, ""));
     if (!d.name || !d.url || !d.key) { await ctx.reply("Draft incomplete — start again from 🏭 Suppliers."); await sendPanel(ctx, false); return true; }
     const { id } = await addSupplier(d.name, d.url, d.key, Number.isFinite(pct) ? pct : 20);
-    await ctx.reply("✅ Supplier added. Testing connection…");
-    // A pasted Swagger/docs URL is not an API base — fix it before testing.
-    const norm = await normalizeSupplierBase(id).catch(() => ({ changed: false, detail: "" }));
-    if (norm.changed && norm.detail) await ctx.reply(norm.detail, { parse_mode: "HTML" });
-    const t = await testSupplier(id);
-    await ctx.reply(t.ok ? `✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.` : `⚠️ Saved, but test failed: ${escapeHtml(t.detail)}\nCheck the base URL/key/endpoints.`, { parse_mode: "HTML" });
+    await ctx.reply("✅ Supplier saved.");
     await suppliersView(ctx);
+    inBackground(ctx, "<b>Testing the new supplier…</b>", async () => {
+      // A pasted Swagger/docs URL is not an API base — fix it before testing.
+      const norm = await normalizeSupplierBase(id).catch(() => ({ changed: false, detail: "" }));
+      const t = await testSupplier(id);
+      const head = norm.changed && norm.detail ? `${norm.detail}\n\n` : "";
+      return t.ok
+        ? { text: `${head}✅ ${escapeHtml(t.detail)}\nTap 🔄 Sync to import their catalog.`, kb: new InlineKeyboard().add(sbtn("🔄 Sync now", cb("adm", "supsync", id), "success")).row().text("◀️ Suppliers", cb("adm", "sups")) }
+        : { text: `${head}⚠️ Saved, but the test failed:\n${escapeHtml(t.detail)}`, kb: supFixKb(id) };
+    });
     return true;
   }
   if (awaiting === "admin_renew_days" || awaiting === "admin_renew_pct" || awaiting === "admin_combo_pct" || awaiting === "admin_combo_min" || awaiting === "admin_risk_cap" || awaiting === "admin_risk_hours" || awaiting === "admin_risk_orders") {
@@ -5449,10 +5511,11 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   if (awaiting === "admin_sup_docs") {
     const sid = ctx.session.supTarget ?? ""; ctx.session.supTarget = undefined;
     if (!sid) { await ctx.reply("That supplier expired — open Vendor APIs again."); return true; }
-    await ctx.reply("📄 Reading the docs and running a live check…");
-    const r = await learnSupplierDocs(sid, text.trim());
-    await ctx.reply(r.detail, { parse_mode: "HTML" });
-    await sendPanel(ctx, false);
+    const docsText = text.trim();
+    inBackground(ctx, "<b>Reading the docs and running a live check…</b>", async () => {
+      const r = await learnSupplierDocs(sid, docsText);
+      return { text: r.detail, kb: r.ok ? new InlineKeyboard().add(sbtn("🔄 Sync now", cb("adm", "supsync", sid), "success")).row().text("◀️ Suppliers", cb("adm", "sups")) : supFixKb(sid) };
+    });
     return true;
   }
   if (awaiting === "admin_fup_text") {
@@ -6079,6 +6142,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       .text("🏠 Attach Menu button", cb("adm", "bcmenu")).row()
       .text("📨 Send now (text only)", cb("adm", "bcsend")).row()
       .text("✖️ Cancel", cb("adm", "home"));
+    // Listen for the photo this message invites (the step had already ended,
+    // so the photo the admin sent next was dropped without a reply).
+    if (!ctx.session.bcPhoto) ctx.session.awaiting = "admin_bc_photo";
     await ctx.reply(`📢 <b>Ready to send.</b>${ctx.session.bcPhoto ? " 🖼 Photo attached." : " Send a photo now to attach one."}\n\nAttach a product or the menu, or send now:`, { parse_mode: "HTML", reply_markup: kb });
     return true;
   }
@@ -6086,12 +6152,131 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
   return false;
 }
 
+/**
+ * Add a batch of stock lines and STAY in "add stock" mode. Telegram splits a
+ * long paste into several messages and big files have to be sent in parts;
+ * leaving the mode after the first one silently dropped everything after it.
+ */
+async function importStockLines(ctx: Ctx, variantId: string, lines: string[], fileName: string | null): Promise<void> {
+  const r = await addStock(variantId, lines);
+  const unit = r.type === "DIGITAL_ACCOUNT" ? "account" : "key";
+  const bits = [
+    fileName ? `✅ Imported from <b>${escapeHtml(fileName)}</b>` : `✅ Added <b>${r.added}</b> ${unit}(s)`,
+  ];
+  if (fileName) bits.push(`📥 Read <b>${lines.length}</b> line(s) · ➕ added <b>${r.added}</b> ${unit}(s)`);
+  if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered ${unit}(s) — back on sale, not duplicated`);
+  if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> (already in stock, or unreadable)`);
+  if (r.blocked.length > 0) {
+    await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
+    await askReAddBlocked(ctx, variantId, r.blocked, unit);
+    return;
+  }
+  ctx.session.awaiting = "admin_addkeys";
+  ctx.session.admVariantId = variantId;
+  bits.push("", "➕ Send more lines or another file to keep adding, or tap Done.");
+  await ctx.reply(bits.join("\n"), { parse_mode: "HTML", reply_markup: new InlineKeyboard().add(sbtn("✅ Done", cb("adm", "kvdone"), "success")) });
+}
+
+/** Download a file the admin sent, as text — UTF-8, UTF-8 BOM or UTF-16 (Windows Notepad "Unicode"). */
+async function downloadText(ctx: Ctx, fileId: string): Promise<string | null> {
+  const file = await ctx.api.getFile(fileId);
+  if (!file.file_path) return null;
+  const res = await fetch(`https://api.telegram.org/file/bot${loadConfig().BOT_TOKEN}/${file.file_path}`, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) return null;
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder("utf-16le").decode(buf.subarray(2));
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder("utf-16be").decode(buf.subarray(2));
+  return new TextDecoder("utf-8").decode(buf).replace(/^\uFEFF/, "");
+}
+
+/**
+ * Every file an ADMIN sends. Returns true when handled. Before this only a
+ * stock .txt was understood; an image sent "as file", the testimonials.json the
+ * bot itself asks for, and any second file were ignored without a word.
+ */
+export async function handleAdminDocument(ctx: Ctx): Promise<boolean> {
+  const doc = ctx.message?.document;
+  if (!doc) return false;
+  const aw = ctx.session.awaiting;
+  const name = doc.file_name ?? "file";
+  const mime = doc.mime_type ?? "";
+  const isImage = mime.startsWith("image/") || /\.(jpe?g|png|webp|gif)$/i.test(name);
+
+  if (aw === "admin_p_image") {
+    if (!isImage) { await ctx.reply("🖼 That isn't an image. Send a photo (or a .jpg/.png file), or paste an https image link."); return true; }
+    await setProductImageFromFileId(ctx, doc.file_id, true);
+    return true;
+  }
+  if (aw === "admin_tst_import") {
+    if ((doc.file_size ?? 0) > 2_000_000) { await ctx.reply("⚠️ That file is too large (max 2 MB)."); ctx.session.awaiting = "admin_tst_import"; return true; }
+    const body = await downloadText(ctx, doc.file_id).catch(() => null);
+    if (!body) { ctx.session.awaiting = "admin_tst_import"; await ctx.reply("❌ Couldn't download that file from Telegram. Try again."); return true; }
+    try {
+      const r = await importTestimonials(body, "bot-admin");
+      await ctx.reply(`📥 Imported <b>${r.added}</b>${r.skipped ? `, skipped <b>${r.skipped}</b> (missing name/text/source)` : ""}. They are PENDING until you publish them.`, { parse_mode: "HTML" });
+    } catch {
+      await ctx.reply("⚠️ That file is not valid testimonials JSON. Export one first to see the expected shape.");
+    }
+    ctx.session.awaiting = null;
+    await handleAdminCallback(ctx, "tst", ["1"]);
+    return true;
+  }
+  if (aw === "admin_addkeys") {
+    const variantId = ctx.session.admVariantId ?? "";
+    if (!variantId) { await ctx.reply("That product expired — open it again and tap 🔑 Add stock keys."); return true; }
+    // Stay armed whatever happens, so "split it and send again" actually works.
+    ctx.session.awaiting = "admin_addkeys";
+    if (isImage || !(/^text\//.test(mime) || /\.(txt|csv|tsv|list|keys)$/i.test(name) || mime === "application/octet-stream")) {
+      await ctx.reply("📄 Stock must be a plain <b>.txt</b> (or .csv) file with one item per line — this file type can't be read.", { parse_mode: "HTML" });
+      return true;
+    }
+    if ((doc.file_size ?? 0) > 2_000_000) { await ctx.reply("⚠️ That file is too large (max 2 MB). Split it and send the parts one after another."); return true; }
+    try {
+      await ctx.reply("📄 Reading your file…");
+      const body = await downloadText(ctx, doc.file_id);
+      if (body === null) { await ctx.reply("❌ Couldn't download that file from Telegram. Send it again."); return true; }
+      if (/\u0000|\uFFFD/.test(body)) { await ctx.reply("❌ That file isn't plain text (it looks like a document or spreadsheet). Save it as a .txt and send again."); return true; }
+      let lines = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      // A CSV header ("email,password", "key") is not a stock item.
+      if (lines.length > 1 && /^(e-?mail|user(name)?|login|id|key|code|account)s?\s*[,;|:\t]/i.test(lines[0] ?? "")) lines = lines.slice(1);
+      if (lines.length === 0) { await ctx.reply("❌ That file is empty."); return true; }
+      if (lines.length > 5000) { await ctx.reply(`⚠️ ${lines.length} lines is too many at once — split into files of 5000 or fewer and send them one after another.`); return true; }
+      await importStockLines(ctx, variantId, lines, name);
+    } catch (e) {
+      void logError("stockUpload", e, { variantId });
+      await ctx.reply("❌ Couldn't read that file. Send a plain <b>.txt</b> with one item per line.", { parse_mode: "HTML" });
+    }
+    return true;
+  }
+  if (aw === "admin_broadcast" || aw === "admin_bc_photo") {
+    if (isImage) { await ctx.reply("🖼 Please send the picture as a <b>photo</b> (not as a file) so it can go out with the broadcast.", { parse_mode: "HTML" }); ctx.session.awaiting = aw; return true; }
+  }
+  return false;
+}
+
 /** Store a Telegram photo file_id as the product image (from an admin photo upload). */
-export async function setProductImageFromFileId(ctx: Ctx, fileId: string): Promise<void> {
+export async function setProductImageFromFileId(ctx: Ctx, fileId: string, isDocument = false): Promise<void> {
   const productId = ctx.session.admProductId ?? "";
   ctx.session.admProductId = undefined;
   ctx.session.awaiting = null;
   if (!productId) { await ctx.reply("No product selected. Open the product and tap 🖼 Set image again."); return; }
+  if (isDocument) {
+    // A file's id cannot be re-sent as a photo, so it is only usable once hosted.
+    let hosted: string | null = null;
+    try {
+      const f = await ctx.api.getFile(fileId);
+      if (f.file_path) hosted = await hostImageFromUrl(`https://api.telegram.org/file/bot${loadConfig().BOT_TOKEN}/${f.file_path}`, `product-${productId.slice(-6)}`);
+    } catch { hosted = null; }
+    if (!hosted) {
+      ctx.session.awaiting = "admin_p_image";
+      ctx.session.admProductId = productId;
+      await ctx.reply("⚠️ Couldn't store that file as an image. Send it as a <b>photo</b> instead (tap 📎 → Photo), or paste an https image link.", { parse_mode: "HTML" });
+      return;
+    }
+    await setProductImage(productId, hosted);
+    await ctx.reply("🖼 Image updated — shows in the bot and the Mini App. ✅");
+    return;
+  }
   // Host the photo on our own /media so the Mini App (a web page) can show it
   // too; the Telegram file_id is the fallback the bot alone can still send.
   let stored: string | null = null;

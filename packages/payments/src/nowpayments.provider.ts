@@ -224,6 +224,7 @@ export class NowPaymentsProvider implements PaymentProvider {
       method: "POST",
       headers: { "x-api-key": this.apiKey, "content-type": "application/json" },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

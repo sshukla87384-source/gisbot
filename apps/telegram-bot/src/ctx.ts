@@ -17,6 +17,7 @@ export interface SessionData {
     | "devtopup"
     | "admin_passcode"
     | "admin_broadcast"
+    | "admin_bc_photo"
     | "admin_txnid"
     | "admin_flashsale"
     | "admin_addkeys"

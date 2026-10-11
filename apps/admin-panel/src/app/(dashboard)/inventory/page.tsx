@@ -34,9 +34,13 @@ export default function InventoryPage() {
   const importKeys = useMutation({
     mutationFn: () => {
       const list = importText.split("\n").map((s) => s.trim()).filter(Boolean);
-      return apiData<{ inserted: number; duplicates: number }>("/inventory/keys", { method: "POST", body: { variantId, keys: list } });
+      return apiData<{ inserted: number; duplicates: number; held?: number; type?: string }>("/inventory/keys", { method: "POST", body: { variantId, keys: list } });
     },
-    onSuccess: (r) => { toast(`Imported ${r.inserted} (${r.duplicates} duplicates)`); setImportOpen(false); setImportText(""); void qc.invalidateQueries({ queryKey: ["inv-keys"] }); },
+    onSuccess: (r) => {
+      const unit = r.type === "DIGITAL_ACCOUNT" ? "account(s)" : "key(s)";
+      toast(`Imported ${r.inserted} ${unit} (${r.duplicates} duplicates${r.held ? `, ${r.held} still held by a live order — re-add them from the bot if intended` : ""})`);
+      setImportOpen(false); setImportText(""); void qc.invalidateQueries({ queryKey: ["inv-keys"] });
+    },
     onError: (e) => toast(errorMessage(e), "error"),
   });
 

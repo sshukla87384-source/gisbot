@@ -46,8 +46,40 @@ function withKeyParam(url: string, style: AuthStyle, key: string): string {
 }
 
 const styleOf = (s: SupplierRow): AuthStyle => {
-  const st = (s.docsConfig as DocsConfig | null)?.authStyle;
-  return AUTH_STYLES.includes(st as AuthStyle) ? (st as AuthStyle) : "x-api-key";
+  const cfg = s.docsConfig as DocsConfig | null;
+  const st = cfg?.authStyle;
+  if (AUTH_STYLES.includes(st as AuthStyle)) return st as AuthStyle;
+  // Nothing proven yet: follow what the supplier's docs said (Qamify-style
+  // APIs are Bearer-only, so starting with X-API-Key cost a full re-detect).
+  if (/bearer/i.test(cfg?.authHeader ?? "")) return "bearer";
+  return "x-api-key";
+};
+
+/**
+ * Merge into the supplier's CURRENT docsConfig. Writing a copy read before a
+ * probe erased whatever the probe had just learned (the auth style), so every
+ * later call paid for detection again.
+ */
+async function mergeDocsConfig(id: string, patch: Partial<DocsConfig>): Promise<void> {
+  const cur = await prisma.supplier.findUnique({ where: { id }, select: { docsConfig: true } }).catch(() => null);
+  await prisma.supplier.update({ where: { id }, data: { docsConfig: { ...((cur?.docsConfig as DocsConfig | null) ?? {}), ...patch } as never } }).catch(() => undefined);
+}
+
+/**
+ * One connection attempt's budget. Without it a wrong key or a dead host ran
+ * hundreds of 8-second requests in a row — minutes of "loading" — and hammered
+ * the vendor into rate-limiting us.
+ */
+interface ProbeCtx { deadline: number; authTried: boolean; keyRejected: boolean; rejectedPaths: number }
+const newCtx = (ms: number): ProbeCtx => ({ deadline: Date.now() + ms, authTried: false, keyRejected: false, rejectedPaths: 0 });
+const expired = (c: ProbeCtx): boolean => Date.now() >= c.deadline;
+const reqSignal = (c?: ProbeCtx): AbortSignal => AbortSignal.timeout(c ? Math.max(1000, Math.min(8000, c.deadline - Date.now())) : 8000);
+
+/** A body that is an actual JSON document (not an HTML banner or docs page). */
+const looksJson = (text: string): boolean => {
+  const t = text.trim();
+  if (!(t.startsWith("{") || t.startsWith("["))) return false;
+  try { JSON.parse(t); return true; } catch { return false; }
 };
 
 /** Headers for a supplier, using the style already proven to work (or the default). */
@@ -57,24 +89,33 @@ const authHeaders = (key: string, style: AuthStyle = "x-api-key"): Record<string
  * Find the auth style this supplier accepts, and store it. Called whenever a
  * request comes back 401/403 with the style we assumed.
  */
-export async function detectAuthStyle(s: SupplierRow, path = "/products"): Promise<AuthStyle | null> {
+export async function detectAuthStyle(s: SupplierRow, path = "/products", out?: { allAuthRejected: boolean }): Promise<AuthStyle | null> {
   const key = decKey(s);
-  for (const style of AUTH_STYLES) {
-    for (const url of urlCandidates(s.baseUrl, path)) {
-      try {
-        const res = await fetch(withKeyParam(url, style, key), {
-          headers: headersFor(style, key),
-          signal: AbortSignal.timeout(8000),
-        });
-        if (res.status === 401 || res.status === 403 || res.status === 404) continue;
-        if (!res.ok) continue;
-        const doc = (s.docsConfig ?? {}) as DocsConfig;
-        await prisma.supplier.update({ where: { id: s.id }, data: { docsConfig: { ...doc, authStyle: style } as never } }).catch(() => undefined);
-        return style;
-      } catch { /* next */ }
-    }
+  // The base root is usually a public banner that answers 200 to anything —
+  // "detecting" against it stored a wrong style over a correct one.
+  const probePath = path && path !== "/" ? path : "/products";
+  // All styles × URL variants AT ONCE (one ~8 s round instead of up to 15 in a
+  // row). A style only counts when it returns real JSON, not an HTML page.
+  const tries = AUTH_STYLES.flatMap((style) => urlCandidates(s.baseUrl, probePath).map((url) => ({ style, url })));
+  const statuses: number[] = [];
+  const winner = await Promise.any(tries.map(async ({ style, url }) => {
+    const res = await fetch(withKeyParam(url, style, key), { headers: headersFor(style, key), signal: AbortSignal.timeout(8000) });
+    statuses.push(res.status);
+    if (!res.ok) throw new Error(String(res.status));
+    const text = await res.text();
+    if (!looksJson(text)) throw new Error("not json");
+    return style;
+  })).catch(() => null);
+  if (!winner) {
+    // Only "every single try said 401/403" means the KEY is wrong; a 404 or a
+    // timeout means this path is wrong, and other endpoints may still work.
+    if (out) out.allAuthRejected = statuses.length === tries.length && statuses.every((st) => st === 401 || st === 403);
+    return null;
   }
-  return null;
+  // Mutate the row in hand too, so the rest of THIS probe uses the new style.
+  s.docsConfig = { ...((s.docsConfig as DocsConfig | null) ?? {}), authStyle: winner };
+  await mergeDocsConfig(s.id, { authStyle: winner });
+  return winner;
 }
 
 /** URL candidates: as given, and with an /api/v1 prefix if the base has no version segment. */
@@ -88,19 +129,28 @@ function urlCandidates(baseUrl: string, path: string): string[] {
 }
 
 /** Fetch that tolerates a missing /api/v1 prefix (retries the versioned URL on 404). */
-async function supFetch(s: SupplierRow, path: string, init: RequestInit = {}, retryAuth = true): Promise<Response> {
+async function supFetch(s: SupplierRow, path: string, init: RequestInit = {}, retryAuth = true, ctx?: ProbeCtx): Promise<Response> {
   const key = decKey(s);
   const style = styleOf(s);
   const headers = { ...headersFor(style, key), ...(init.headers as Record<string, string> | undefined) };
   let last: Response | null = null;
   for (const url of urlCandidates(s.baseUrl, path)) {
-    const res = await fetch(withKeyParam(url, style, key), { ...init, headers, signal: AbortSignal.timeout(8000) });
+    if (ctx && expired(ctx) && last) break;
+    const res = await fetch(withKeyParam(url, style, key), { ...init, headers, signal: reqSignal(ctx) });
     if (res.status === 401 || res.status === 403) {
-      // Wrong style, not a wrong key: find the right one once, then retry.
-      if (retryAuth && (await detectAuthStyle(s, path))) {
-        const fresh = await prisma.supplier.findUnique({ where: { id: s.id } });
-        if (fresh) return supFetch(fresh as unknown as SupplierRow, path, init, false);
+      // Wrong style, not a wrong key: find the right one ONCE per attempt, then
+      // retry. If no style works the key itself is wrong — say so and stop,
+      // instead of re-detecting on every path.
+      if (!retryAuth || (ctx && ctx.authTried)) return res;
+      const out = { allAuthRejected: false };
+      if (await detectAuthStyle(s, path, out)) {
+        if (ctx) ctx.authTried = true; // style found — later paths use it directly
+        return supFetch(s, path, init, false, ctx);
       }
+      // No style worked HERE. Only when every style is refused (401/403) on two
+      // different paths is the key itself wrong; a 404 just means a wrong path,
+      // so detection is tried again on the next one.
+      if (ctx && out.allAuthRejected && ++ctx.rejectedPaths >= 2) { ctx.authTried = true; ctx.keyRejected = true; }
       return res;
     }
     if (res.status !== 404) return res;
@@ -120,9 +170,32 @@ function pickNum(o: any, keys: string[]): number | null {
 }
 
 // ── CRUD ──
+/**
+ * Clean up a pasted base URL. People paste "api.x.com", an endpoint
+ * ("…/v1/products"), the docs page ("…/docs#/orders") or add trailing
+ * slashes — each made every request fail or hit "…/products/products".
+ */
+export function normalizeSupplierBaseUrl(raw: string): string {
+  let t = raw.trim().replace(/^<|>$/g, "");
+  if (!/^https?:\/\//i.test(t)) t = `https://${t}`;
+  try {
+    const u = new URL(t);
+    u.hash = "";
+    let path = u.pathname.replace(/\/+$/, "");
+    // A pasted endpoint is not the base. (A docs page is kept: the add flow's
+    // normalizeSupplierBase strips it AND reads the OpenAPI spec beside it.)
+    path = path.replace(/\/(products?|catalog|items|orders?|balance|services)$/i, "");
+    u.pathname = path || "/";
+    const out = `${u.origin}${u.pathname === "/" ? "" : u.pathname}${u.search}`;
+    return out.replace(/\/+$/, "");
+  } catch {
+    return raw.trim().replace(/\/+$/, "");
+  }
+}
+
 export async function addSupplier(name: string, baseUrl: string, apiKey: string, markupPct = 20): Promise<{ id: string }> {
   const enc = encryptSecret(apiKey.trim(), loadConfig().ENCRYPTION_MASTER_KEY);
-  const s = await prisma.supplier.create({ data: { name: name.slice(0, 80), baseUrl: baseUrl.trim().replace(/\/$/, ""), apiKeyEnc: enc, markupBp: Math.max(0, Math.round(markupPct * 100)) } });
+  const s = await prisma.supplier.create({ data: { name: name.slice(0, 80), baseUrl: normalizeSupplierBaseUrl(baseUrl), apiKeyEnc: enc, markupBp: Math.max(0, Math.round(markupPct * 100)) } });
   return { id: s.id };
 }
 export async function listSuppliers(): Promise<Array<{ id: string; name: string; markupBp: number; active: boolean; baseUrl: string }>> {
@@ -208,8 +281,8 @@ export async function removeSupplier(id: string, mode: RemoveSupplierMode = "del
 export async function setSupplierMarkup(id: string, pct: number): Promise<void> { await prisma.supplier.update({ where: { id }, data: { markupBp: Math.max(0, Math.round(pct * 100)) } }); }
 
 // ── HTTP (tolerant to common REST shapes) ──
-async function getJson(s: SupplierRow, path: string): Promise<any> {
-  const res = await supFetch(s, path);
+async function getJson(s: SupplierRow, path: string, ctx?: ProbeCtx): Promise<any> {
+  const res = await supFetch(s, path, {}, true, ctx);
   if (!res.ok) throw new Error(`${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
   return res.json();
 }
@@ -231,8 +304,8 @@ function withQuery(baseUrl: string, params: Record<string, string | number>): st
 }
 
 /** GET the supplier base URL with ?action=… (no path probing). */
-async function actionGet(s: SupplierRow, params: Record<string, string | number>): Promise<Response> {
-  return fetch(withKeyParam(withQuery(s.baseUrl, params), styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)), signal: AbortSignal.timeout(8000) });
+async function actionGet(s: SupplierRow, params: Record<string, string | number>, ctx?: ProbeCtx): Promise<Response> {
+  return fetch(withKeyParam(withQuery(s.baseUrl, params), styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)), signal: reqSignal(ctx) });
 }
 
 /** Some APIs (including ours) quote prices in integer MINOR units. */
@@ -304,20 +377,26 @@ function findProductArray(json: any): any[] {
 }
 
 /** Try common product endpoints; return the parsed products, plus the path used and a raw sample for diagnostics. */
-async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string; trail?: string[] }> {
+async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {}): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string; trail?: string[]; keyRejected?: boolean; timedOut?: boolean }> {
   let lastRaw = "";
   let lastNote = "";
   const trail: string[] = [];
   const note = (t: string): void => { lastNote = t; if (trail.length < 24) trail.push(t); };
+  const ctx = newCtx(opts.deadlineMs ?? 25_000);
+  const stop = (): boolean => expired(ctx) || ctx.keyRejected;
+  const base = s.baseUrl.replace(/\/+$/, "");
   // Strategy: whatever we learned from the supplier's own documentation wins.
   const doc = (s.docsConfig ?? null) as DocsConfig | null;
   if (doc?.productsPath) {
-    for (const attempt of [doc.productsPath, `${doc.productsPath}?all=true`]) {
+    for (const attempt of [doc.productsPath, `${doc.productsPath}${doc.productsPath.includes("?") ? "&" : "?"}all=true`]) {
+      if (stop()) break;
       try {
-        const url = `${(doc.baseUrl ?? s.baseUrl).replace(/\/$/, "")}${attempt}`;
-        const res = await fetch(withKeyParam(url, styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)) });
+        const url = `${(doc.baseUrl ?? s.baseUrl).replace(/\/+$/, "")}${attempt}`;
+        // A timeout here too: this fetch had none, so a stalled supplier hung
+        // for the runtime's 5-minute default — "loading forever".
+        const res = await fetch(withKeyParam(url, styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)), signal: reqSignal(ctx) });
         const text = await res.text().catch(() => "");
-        if (!res.ok) { note(`docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
+        if (!res.ok) { note(`docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`); if (res.status === 404) break; continue; }
         let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
         const listed = atPath(json, doc.listField);
         const arr: any[] = Array.isArray(listed) ? listed : findProductArray(json);
@@ -329,8 +408,9 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
     }
   }
   for (const path of PRODUCT_PATHS) {
+    if (stop()) break;
     try {
-      const res = await supFetch(s, path);
+      const res = await supFetch(s, path, {}, true, ctx);
       const text = await res.text().catch(() => "");
       if (!res.ok) { note(`${path || "/"} → HTTP ${res.status} ${text.slice(0, 120)}`); continue; }
       let json: any;
@@ -338,8 +418,17 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       const arr: any[] = findProductArray(json);
       const products = parseProductArray(arr);
       if (products.length > 0) {
-        void prisma.supplier.update({ where: { id: s.id }, data: { docsConfig: { ...(doc ?? {}), productsPath: path } as never } }).catch(() => undefined);
-        return { products, path: path || "/", raw: text.slice(0, 400), note: "ok" };
+        // Remember the path that ACTUALLY answered, version prefix included
+        // (/v1/products, not /products), so the next sync goes straight there.
+        let worked = path;
+        try {
+          const u = new URL(res.url);
+          u.searchParams.delete("api_key");
+          const full = `${u.origin}${u.pathname}${u.search}`;
+          if (full.startsWith(base)) worked = full.slice(base.length) || path;
+        } catch { /* keep the probed path */ }
+        void mergeDocsConfig(s.id, { productsPath: worked, baseUrl: base }); // the path is relative to THIS base
+        return { products, path: worked || "/", raw: text.slice(0, 400), note: "ok" };
       }
       lastRaw = text.slice(0, 400);
       note(`${path || "/"} → parsed 0 products`);
@@ -347,14 +436,18 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
   }
   // Action-style APIs: GET <base>?action=products
   for (const action of PRODUCT_ACTIONS) {
+    if (stop()) break;
     try {
-      const res = await actionGet(s, { action });
+      const res = await actionGet(s, { action }, ctx);
       const text = await res.text().catch(() => "");
       if (!res.ok) { note(`?action=${action} → HTTP ${res.status} ${text.slice(0, 120)}`); continue; }
       let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); note(`?action=${action} → non-JSON`); continue; }
       const arr: any[] = findProductArray(json);
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
-      if (products.length > 0) return { products, path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
+      if (products.length > 0) {
+        void mergeDocsConfig(s.id, { productsPath: `?action=${action}`, baseUrl: base });
+        return { products, path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
+      }
       lastRaw = text.slice(0, 400);
       note(`?action=${action} → parsed 0 products`);
     } catch (e) { note(`?action=${action} → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
@@ -365,8 +458,9 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
     { action: "get_products" }, { action: "list" }, { action: "stock" },
     { type: "products" }, { method: "products" },
   ]) {
+    if (stop()) break;
     try {
-      const res = await supFetch(s, "", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const res = await supFetch(s, "", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, true, ctx);
       const text = await res.text().catch(() => "");
       if (!res.ok) { note(`POST ${JSON.stringify(body)} → HTTP ${res.status} ${text.slice(0, 100)}`); continue; }
       let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
@@ -376,7 +470,9 @@ async function probeProducts(s: SupplierRow): Promise<{ products: SupplierProduc
       lastRaw = text.slice(0, 400);
     } catch (e) { note(`POST → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
   }
-  return { products: [], path: "", raw: lastRaw, note: lastNote, trail };
+  if (ctx.keyRejected) note("🔑 The supplier rejected this API key (HTTP 401/403) with every auth style — the key is wrong, expired or lacks permission.");
+  else if (expired(ctx)) note(`⏱ Stopped after ${Math.round((opts.deadlineMs ?? 25_000) / 1000)} s — the supplier is too slow or unreachable. Check the base URL.`);
+  return { products: [], path: "", raw: lastRaw, note: lastNote, trail, keyRejected: ctx.keyRejected, timedOut: !ctx.keyRejected && expired(ctx) };
 }
 
 export async function fetchSupplierProducts(s: SupplierRow): Promise<SupplierProduct[]> {
@@ -406,22 +502,27 @@ export async function diagnoseSupplier(id: string): Promise<{ ok: boolean; detai
   };
 }
 
-export async function getSupplierBalance(s: SupplierRow): Promise<number | null> {
+export async function getSupplierBalance(s: SupplierRow, budgetMs = 12_000): Promise<number | null> {
+  // Bounded like the product probe: 10 paths × 8 s each, plus auth
+  // re-detection on every one, used to add a minute to every Test.
+  const ctx = newCtx(budgetMs);
   const fields = ["balance", "amount", "credit", "wallet", "funds", "balance_usd", "balance_usdt", "credits"];
   // The documented path first, then the spellings seen in the wild — a shop
   // that reports the balance from GET /api/v1/me had no chance under "/balance".
   const docCfg = (s.docsConfig ?? null) as DocsConfig | null;
   const paths = [...new Set([docCfg?.balancePath, "/balance", "/me", "/account", "/user", "/wallet", "/profile"].filter((x): x is string => !!x).map((x) => (x.startsWith("/") ? x : `/${x}`)))];
   for (const path of paths) {
+    if (expired(ctx) || ctx.keyRejected) return null;
     try {
-      const j = await getJson(s, path);
+      const j = await getJson(s, path, ctx);
       const v = pickNum(j, fields) ?? pickNum(j.data ?? {}, fields) ?? pickNum(j.user ?? {}, fields) ?? pickNum(j.wallet ?? {}, fields) ?? pickNum(j.data?.wallet ?? {}, fields);
       if (v !== null) return v;
     } catch { /* next path */ }
   }
   for (const action of ["balance", "get_balance", "wallet"]) {
+    if (expired(ctx) || ctx.keyRejected) return null;
     try {
-      const res = await actionGet(s, { action });
+      const res = await actionGet(s, { action }, ctx);
       if (!res.ok) continue;
       const j: any = await res.json();
       const v = pickNum(j, fields) ?? pickNum(j.data ?? {}, fields) ?? pickNum(j.wallet ?? {}, fields);
@@ -435,8 +536,9 @@ export async function testSupplier(id: string): Promise<{ ok: boolean; detail: s
   const s = await prisma.supplier.findUnique({ where: { id } });
   if (!s) return { ok: false, detail: "Supplier not found." };
   const probe = await probeProducts(s);
-  const bal = await getSupplierBalance(s).catch(() => null);
   if (probe.products.length > 0) {
+    // Balance only once the connection is proven, with a short budget of its own.
+    const bal = await getSupplierBalance(s, 8_000).catch(() => null);
     return { ok: true, detail: `OK ✅ — endpoint ${probe.path}, ${probe.products.length} product(s)${bal !== null ? ` · balance ${bal}` : ""}.` };
   }
   return { ok: false, detail: `No products read. ${probe.note}\nRaw sample:\n${(probe.raw || "(empty)").slice(0, 300)}` };
@@ -784,7 +886,7 @@ async function lookupSupplierOrder(s: SupplierRow, extId: string, excl: string[]
 /** Import/refresh a supplier's catalog into our products (with markup). */
 
 /** Docs/UI suffixes that are NOT an API base. */
-const DOCS_SUFFIX_RE = /\/(swagger(-ui)?|api-docs|apidocs|docs|documentation|redoc|openapi|scalar)(\.html?|\/)?$/i;
+const DOCS_SUFFIX_RE = /\/(swagger(-ui)?|api-docs|apidocs|docs|documentation|redoc|openapi|scalar)(\.html?|\/index\.html?|\/)?$/i;
 
 /**
  * People paste the Swagger/docs page as the "API base URL" — the connector then
@@ -830,12 +932,19 @@ export interface SyncResult {
   /** Threw while importing. One bad row must not abort the whole catalogue. */
   failed: number;
   busy?: boolean;
+  /** The supplier returned no products at all (key/URL problem or outage). */
+  empty?: boolean;
+  /** Already up to date — nothing written. */
+  unchanged?: number;
 }
 
 /** One sync at a time per supplier — repeated 🔄 taps used to stack probe storms. */
 export async function syncSupplierProducts(supplierId: string): Promise<SyncResult> {
   const lockKey = `suplock:${supplierId}`;
-  const got = await getRedis().set(lockKey, "1", "EX", 120, "NX").catch(() => "OK");
+  // Longer than the slowest sync (probe budget + a large catalogue): a 120 s
+  // lock expired mid-sync, a second sync started, and both created the same
+  // products (duplicates with "-1" slugs).
+  const got = await getRedis().set(lockKey, "1", "EX", 900, "NX").catch(() => "OK");
   if (got !== "OK") return { added: 0, updated: 0, skipped: 0, failed: 0, busy: true };
   try {
     return await syncSupplierProductsInner(supplierId);
@@ -859,6 +968,9 @@ export async function syncAllSuppliers(): Promise<{ suppliers: number; updated: 
   const rows = await prisma.supplier.findMany({ where: { active: true }, select: { id: true } });
   let updated = 0, added = 0, failed = 0, suppliers = 0;
   for (const r of rows) {
+    // Failing suppliers wait 30 min before the sweep probes them again; a
+    // manual 🔄 Sync still runs at once.
+    if (await getRedis().exists(`supfail:${r.id}`).catch(() => 0)) continue;
     try {
       const res = await syncSupplierProducts(r.id);
       if (res.busy) continue;
@@ -877,7 +989,25 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { added: 0, updated: 0, skipped: 0, failed: 0 };
   const prods = await fetchSupplierProducts(s);
+  // A supplier that answers nothing (wrong key, down) is not re-probed by the
+  // 5-minute sweep for a while — see syncAllSuppliers.
+  if (prods.length === 0) {
+    await getRedis().set(`supfail:${supplierId}`, "1", "EX", 1800).catch(() => undefined);
+    return { added: 0, updated: 0, skipped: 0, failed: 0, empty: true };
+  }
+  await getRedis().del(`supfail:${supplierId}`).catch(() => undefined);
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
+  // Everything this supplier already has, in ONE query. The old loop did a
+  // findFirst + update + two upserts per product, every 5 minutes, even when
+  // nothing had changed — thousands of queries for a big catalogue.
+  const known = await prisma.product.findMany({
+    where: { supplierId: s.id },
+    include: { variants: { orderBy: { sortOrder: "asc" }, include: { prices: { where: { tierId: retail.id } } } } },
+  });
+  const byRef = new Map<string, (typeof known)[number]>();
+  for (const k of known) if (k.supplierRef) byRef.set(k.supplierRef, k);
+  const seenNew = new Set<string>();
+  let unchanged = 0;
   const rate = usdtRate("INR");
   let cat = await prisma.category.findFirst({ where: { slug: "uncategorized" } });
   if (!cat) cat = await prisma.category.create({ data: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 } });
@@ -894,10 +1024,8 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
     const refKey = p.variantRef ? `${p.ref}|${p.variantRef}` : p.ref;
     // Soft-deleted rows are included on purpose: finding one tells us the operator
     // already rejected this product, so we skip it instead of re-creating it.
-    const existing = await prisma.product.findFirst({
-      where: { supplierId: s.id, OR: [{ supplierRef: refKey }, { supplierRef: p.ref }] },
-      include: { variants: true },
-    });
+    if (seenNew.has(refKey)) { unchanged++; continue; }
+    const existing = byRef.get(refKey) ?? byRef.get(p.ref) ?? null;
     if (existing?.deletedAt) {
       // The operator deleted this one. Leave it dead — do not touch its price,
       // its status, or resurrect it. "Restore" in the picker is the way back.
@@ -913,22 +1041,28 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
         : existing.status === "PAUSED" && !existing.supplierStockDrivenPause
           ? "PAUSED"
           : inStock ? "ACTIVE" : "PAUSED";
-      await prisma.product.update({
-        where: { id: existing.id },
-        data: {
-          name: p.name.slice(0, 200),
-          description: p.description.slice(0, 4000) || null,
-          activationGuide: p.note.slice(0, 2000) || null,
-          supplierStock: p.stock,
-          status: nextStatus,
-          // Remember WHY it is paused, so the rule above can tell an out-of-stock
-          // pause (sync may unpause) from a manual hide (sync must not).
-          supplierStockDrivenPause: nextStatus === "PAUSED" ? !inStock : false,
-        },
-      });
+      const data = {
+        name: p.name.slice(0, 200),
+        description: p.description.slice(0, 4000) || null,
+        activationGuide: p.note.slice(0, 2000) || null,
+        supplierStock: p.stock,
+        status: nextStatus,
+        // Remember WHY it is paused, so the rule above can tell an out-of-stock
+        // pause (sync may unpause) from a manual hide (sync must not).
+        supplierStockDrivenPause: nextStatus === "PAUSED" ? !inStock : false,
+      };
       const v = existing.variants[0];
-      if (v && !existing.priceLocked) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
-        await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
+      const priceOf = (cur: "USD" | "INR") => v?.prices.find((x) => x.currency === cur)?.amountMinor;
+      const pricesSame = !v || existing.priceLocked || (priceOf("USD") === priceMinor && priceOf("INR") === inrMinor);
+      const rowSame = existing.name === data.name && existing.description === data.description && existing.activationGuide === data.activationGuide
+        && existing.supplierStock === data.supplierStock && existing.status === data.status && existing.supplierStockDrivenPause === data.supplierStockDrivenPause;
+      if (rowSame && pricesSame) { unchanged++; continue; } // nothing changed — no writes
+      if (!rowSame) { await prisma.product.update({ where: { id: existing.id }, data }); Object.assign(existing, data); }
+      if (v && !pricesSame) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
+        const row = await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
+        // Keep the preloaded copy current: two catalogue rows can map to one product.
+        const i = v.prices.findIndex((x) => x.currency === currency);
+        if (i >= 0) v.prices[i] = row; else v.prices.push(row);
       }
       updated++;
     } else {
@@ -964,6 +1098,8 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
         }
       }
       if (!created) throw new Error(`could not allocate a unique slug for ${p.ref}`);
+      // The same ref twice in one catalogue must not create two products.
+      seenNew.add(refKey);
       // Only ACTIVE products are worth announcing.
       if (status === "ACTIVE") newIds.push(created.id);
       added++;
@@ -993,7 +1129,7 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
       }).catch(() => undefined);
     }
   }
-  return { added, updated, skipped, failed };
+  return { added, updated, skipped, failed, unchanged };
 }
 
 export interface SupplierProductRow {
@@ -1370,6 +1506,12 @@ export async function learnSupplierDocs(supplierId: string, input: string): Prom
   cfg.idField = /variant_?id/i.test(text) ? "variantId" : /product_?id/i.test(text) ? "product_id" : "id";
   if (/price_?minor|amount_?minor/i.test(text)) cfg.priceField = "priceMinor";
 
+  // Keep the auth style already proven against this supplier; otherwise take
+  // the one the docs name — replacing the config wholesale used to lose it.
+  const prevStyle = (sup.docsConfig as DocsConfig | null)?.authStyle;
+  if (prevStyle) cfg.authStyle = prevStyle;
+  else if (/bearer/i.test(cfg.authHeader ?? "")) cfg.authStyle = "bearer";
+  else if (/x-api-key/i.test(cfg.authHeader ?? "")) cfg.authStyle = "x-api-key";
   await prisma.supplier.update({ where: { id: supplierId }, data: { docsConfig: cfg as never } });
 
   // Live check: does the products endpoint actually return items?

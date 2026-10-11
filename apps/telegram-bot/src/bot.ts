@@ -84,6 +84,7 @@ import {
   stashUpiTopupClaim,
   enqueueAdminAlert,
   capTelegramHtml,
+  entitiesToTelegramHtml,
   getAdminOrder,
   stripTelegramHtml,
   removeItem,
@@ -141,7 +142,7 @@ import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
 import { flowEnd, flowRemember, flowSetCard, flowStart, flowStep } from "./flow.js";
-import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
+import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminDocument, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { sbtn } from "./keyboard.js";
 import { LOCALES, t } from "./i18n.js";
@@ -357,9 +358,21 @@ export function createBot(): Bot<Ctx> {
   });
 
   // ── Group registration commands (work in groups/channels; admin-gated) ──
+  // A channel post has no `from`, and an anonymous group admin posts as the
+  // group — so "is this a logged-in bot admin?" used to be false and channel
+  // registration could never succeed. Fall back to the chat's own admin list.
+  const chatRunByBotAdmin = async (ctx: Ctx): Promise<boolean> => {
+    if (ctx.from && ctx.from.id !== 1087968824) return isBotAdmin(ctx.from.id);
+    // Only a channel post (no sender) or an anonymous group admin falls back
+    // to the chat's admin list — never an ordinary group member.
+    if (!ctx.chat || ctx.chat.type === "private") return false;
+    const admins = await ctx.api.getChatAdministrators(ctx.chat.id).catch(() => []);
+    for (const a of admins) if (!a.user.is_bot && (await isBotAdmin(a.user.id))) return true;
+    return false;
+  };
   bot.command("registergroup", async (ctx) => {
-    if (!(await isBotAdmin(ctx.from?.id))) {
-      await ctx.reply("Only a logged-in admin can register a group. DM me and use /admin first.").catch(() => undefined);
+    if (!(await chatRunByBotAdmin(ctx))) {
+      await ctx.reply("Only a logged-in admin can register a group. DM me and use /admin first (in a channel, the logged-in admin must also be an admin of this channel).").catch(() => undefined);
       return;
     }
     if (!ctx.chat || ctx.chat.type === "private") {
@@ -371,7 +384,7 @@ export function createBot(): Bot<Ctx> {
     await ctx.reply("✅ Registered! Product posts from the admin panel will appear here.").catch(() => undefined);
   });
   bot.command("unregistergroup", async (ctx) => {
-    if (!(await isBotAdmin(ctx.from?.id))) return;
+    if (!(await chatRunByBotAdmin(ctx))) return;
     if (!ctx.chat || ctx.chat.type === "private") return;
     await removePostTargetByChat(String(ctx.chat.id));
     await ctx.reply("✅ Unregistered — no more product posts here.").catch(() => undefined);
@@ -781,36 +794,27 @@ export function createBot(): Bot<Ctx> {
   // ── Admin sends a photo to set a product image ──
   // ── Admin uploads stock as a .txt file (bulk keys / accounts) ──
   bot.on("message:document", async (ctx) => {
-    if (ctx.session.awaiting !== "admin_addkeys") return;
-    if (!(await isBotAdmin(ctx.from?.id))) return;
+    // Admin files (stock .txt, product image sent as a file, testimonials.json).
+    if (ctx.session.awaiting && (await isBotAdmin(ctx.from?.id)) && (await handleAdminDocument(ctx))) return;
+    // Customers: a screenshot sent "as file" used to vanish without a reply.
+    const aw = ctx.session.awaiting;
     const doc = ctx.message.document;
-    const variantId = ctx.session.admVariantId ?? "";
-    ctx.session.awaiting = null;
-    ctx.session.admVariantId = undefined;
-    if (!variantId) { await ctx.reply("That product expired — open it again and tap 🔑 Add stock keys."); return; }
-    if ((doc.file_size ?? 0) > 2_000_000) { await ctx.reply("⚠️ That file is too large (max 2 MB). Split it and upload again."); return; }
-    try {
-      await ctx.reply("📄 Reading your file…");
-      const file = await ctx.api.getFile(doc.file_id);
-      const url = `https://api.telegram.org/file/bot${loadConfig().BOT_TOKEN}/${file.file_path}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-      if (!res.ok) { await ctx.reply("❌ Couldn't download that file from Telegram. Try again."); return; }
-      const body = await res.text();
-      const lines = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-      if (lines.length === 0) { await ctx.reply("❌ That file is empty."); return; }
-      if (lines.length > 5000) { await ctx.reply(`⚠️ ${lines.length} lines is too many at once — split into files of 5000 or fewer.`); return; }
-      const r = await addStock(variantId, lines);
-      const unit = r.type === "DIGITAL_ACCOUNT" ? "account" : "key";
-      const bits = [`✅ Imported from <b>${escapeHtml(doc.file_name ?? "file")}</b>`, "", `📥 Read <b>${lines.length}</b> line(s)`, `➕ Added <b>${r.added}</b> ${unit}(s)`];
-      if (r.relisted > 0) bits.push(`♻️ Re-listed <b>${r.relisted}</b> previously delivered`);
-      if (r.skipped > 0) bits.push(`⏭ Skipped <b>${r.skipped}</b> (duplicate or unreadable)`);
-      await ctx.reply(bits.join("\n"), { parse_mode: "HTML" });
-      // Same decision as a pasted batch: values a live order still holds are
-      // offered back rather than dropped into the "skipped" count.
-      if (r.blocked.length > 0) await askReAddBlocked(ctx, variantId, r.blocked, unit);
-    } catch (e) {
-      void logError("stockUpload", e, { variantId });
-      await ctx.reply("❌ Couldn't read that file. Send a plain <b>.txt</b> with one item per line.", { parse_mode: "HTML" });
+    const isImage = (doc.mime_type ?? "").startsWith("image/") || /\.(jpe?g|png|webp|gif|heic)$/i.test(doc.file_name ?? "");
+    if (aw === "replace_proof" || aw === "ticket_reply" || aw === "ticket" || aw === "support_chat") {
+      ctx.session.awaiting = aw; // keep the step open for the photo
+      await ctx.reply(isImage
+        ? "📸 Please send the screenshot as a <b>photo</b> (tap 📎 → Photo / Gallery), not as a file — then our team can see it."
+        : "📎 Files can't be attached here. Please send a <b>screenshot as a photo</b>, or describe the problem in text.", { parse_mode: "HTML" });
+      return;
+    }
+    if (aw === "upi_ref" || aw === "wallet_inr_utr") {
+      ctx.session.awaiting = aw;
+      await ctx.reply("📄 Please <b>type the 12-digit UTR / reference number</b> from your UPI app instead of sending a file.", { parse_mode: "HTML" });
+      return;
+    }
+    if (aw === "binance_txnid" || aw === "wallet_free_txn") {
+      ctx.session.awaiting = aw;
+      await ctx.reply("📄 Please <b>paste the Binance Order ID</b> as text instead of sending a file.", { parse_mode: "HTML" });
     }
   });
 
@@ -828,7 +832,7 @@ export function createBot(): Bot<Ctx> {
       if (fileId) {
         ctx.session.saleDraft = { ...ctx.session.saleDraft, photo: fileId };
         const cap = (ctx.message.caption ?? "").trim();
-        if (cap) ctx.session.saleDraft = { ...ctx.session.saleDraft, body: cap };
+        if (cap) ctx.session.saleDraft = { ...ctx.session.saleDraft, body: entitiesToTelegramHtml(ctx.message.caption ?? "", ctx.message.caption_entities).trim() };
         await ctx.reply(
           "🖼 <b>Image attached to the sale.</b> Carry on with the next step — it will be sent with the announcement, including scheduled ones.",
           { parse_mode: "HTML" },
@@ -836,13 +840,16 @@ export function createBot(): Bot<Ctx> {
         return;
       }
     }
-    if (ctx.session.awaiting === "admin_broadcast" && (await isBotAdmin(ctx.from?.id))) {
+    if ((ctx.session.awaiting === "admin_broadcast" || ctx.session.awaiting === "admin_bc_photo") && (await isBotAdmin(ctx.from?.id))) {
       const photos = ctx.message.photo;
       const fileId = photos[photos.length - 1]?.file_id; // largest rendition
       if (fileId) {
         ctx.session.bcPhoto = fileId;
+        // Sent with parse_mode HTML: a raw caption with "&" or "<" made every
+        // send fail and the broadcast went out WITHOUT the photo. Keep its
+        // formatting and premium emoji the same way text steps do.
         const cap = (ctx.message.caption ?? "").trim();
-        if (cap) ctx.session.bcBody = cap;
+        if (cap) ctx.session.bcBody = entitiesToTelegramHtml(ctx.message.caption ?? "", ctx.message.caption_entities).trim();
         // Telegram caps a photo caption at 1024 characters; a longer body would
         // make sendPhoto fail for every recipient.
         const body = ctx.session.bcBody ?? "";
@@ -884,6 +891,22 @@ export function createBot(): Bot<Ctx> {
     // A payment screenshot while we wait for a reference number used to be
     // ignored without a word, so the customer thought it was being checked.
     const aw = ctx.session.awaiting;
+    // Live support chat / a new ticket: the screenshot reaches the team.
+    if (aw === "support_chat" || aw === "ticket") {
+      const photos = ctx.message.photo;
+      const fileId = photos[photos.length - 1]?.file_id;
+      const who = ctx.user.telegramHandle ? `@${ctx.user.telegramHandle}` : (ctx.user.firstName ?? String(ctx.from?.id ?? ""));
+      const caption = escapeHtml((ctx.message.caption ?? "").slice(0, 700));
+      if (aw === "ticket") {
+        ctx.session.awaiting = null; // one ticket — the next message must not open another
+        const ticket = await createTicket(ctx.user.id, "OTHER", ctx.message.caption?.slice(0, 2000) || "(screenshot)").catch(() => null);
+        await enqueueAdminAlert(`🎫 <b>New ticket${ticket ? ` #${ticket.ticketNumber}` : ""}</b> — ${escapeHtml(who)} (id <code>${ctx.from?.id}</code>)${caption ? `\n${caption}` : ""}`, [{ text: "↩️ Reply", callbackData: `adm:dm:${ctx.user.id}` }], fileId).catch(() => undefined);
+        return ctx.reply(ticket ? `🎫 Ticket <b>#${ticket.ticketNumber}</b> created with your screenshot. Support will reply here.` : "📨 Screenshot sent to our team. They'll reply here.", { parse_mode: "HTML" });
+      }
+      await enqueueAdminAlert(`💬 <b>Support chat</b> — screenshot from ${escapeHtml(who)} (id <code>${ctx.from?.id}</code>)${caption ? `\n${caption}` : ""}`, [{ text: "↩️ Reply", callbackData: `adm:dm:${ctx.user.id}` }], fileId).catch(() => undefined);
+      ctx.session.awaiting = "support_chat";
+      return ctx.reply("✅ Screenshot sent to our team — we'll reply here shortly. (🔚 tap End chat to exit)", { reply_markup: new InlineKeyboard().text("🔚 End chat", "sup:endchat") });
+    }
     if (aw === "upi_ref" || aw === "wallet_inr_utr") {
       await ctx.reply("📸 Thanks! Screenshots can't be verified automatically — please <b>type the 12-digit UTR / reference number</b> from your UPI app (open the payment → transaction details) and send it here.", { parse_mode: "HTML" });
       return;
@@ -1587,6 +1610,12 @@ export function createBot(): Bot<Ctx> {
     // Payment-reference prompts stay armed: people often check the menu
     // before pasting their UTR / Order ID.
     const aw = ctx.session.awaiting;
+    // "Add stock" mode stays open for several pastes/files, but ANY other tap
+    // ends it — otherwise a search typed later would be saved as a sellable key.
+    if (aw === "admin_addkeys" && !["adm:kv", "adm:kvdone", "adm:stockyes", "adm:stockno"].includes(route)) {
+      ctx.session.awaiting = null;
+      ctx.session.admVariantId = undefined;
+    }
     if (aw && (ns === "mnu" || ns === "shp" || ns === "crt" || route === "ord:list")
       && !aw.startsWith("admin_") && !aw.startsWith("sale_")
       && !["binance_txnid", "upi_ref", "wallet_inr_utr", "wallet_free_txn", "support_chat"].includes(aw)) {

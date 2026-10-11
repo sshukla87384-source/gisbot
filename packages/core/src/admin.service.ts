@@ -456,7 +456,11 @@ export async function hostImageFromUrl(sourceUrl: string, fileName = "photo"): P
     await writeFile(join(cfg.MEDIA_DIR, name), buf);
     await prisma.media.create({ data: { kind: "IMAGE", s3Key: name, fileName: `${fileName}.${ext}`, contentType: mime, sizeBytes: BigInt(buf.length) } }).catch(() => undefined);
     return `${base}/media/${name}`;
-  } catch {
+  } catch (e) {
+    // Was swallowed silently: a full disk or wrong MEDIA_DIR permission looked
+    // exactly like "this link isn't an image".
+    // eslint-disable-next-line no-console
+    console.error("hostImageFromUrl failed", { error: String(e instanceof Error ? e.message : e).slice(0, 200) });
     return null;
   }
 }

@@ -26,6 +26,7 @@ interface UploadedImage {
 function normalizeProduct<T extends Record<string, unknown>>(data: T): T {
   const d = { ...data } as Record<string, unknown>;
   if (d.imageUrl === "") d.imageUrl = null;
+  else if (typeof d.imageUrl === "string" && !/^https?:\/\/\S+$/i.test(d.imageUrl.trim())) delete d.imageUrl;
   if (d.iconEmoji === "") d.iconEmoji = null;
   for (const k of ["saleStartsAt", "saleEndsAt"] as const) {
     if (!(k in d)) continue; // absent → leave unchanged
@@ -49,7 +50,11 @@ const createProduct = z.object({
   activationGuide: z.string().max(4000).optional(),
   sourcingNote: z.string().max(1000).optional(),
   isFeatured: z.boolean().optional(),
-  imageUrl: z.string().url().max(2000).optional().or(z.literal("")),
+  // A photo uploaded in the bot can be stored as a Telegram file id (when it
+  // could not be hosted). The panel echoes the field back on every save, and a
+  // strict .url() then rejected EVERY edit of that product. Anything that is
+  // not an http(s) link is treated as "unchanged" (see normalizeProduct).
+  imageUrl: z.string().max(2000).optional().or(z.literal("")),
   iconEmoji: z.string().max(16).optional().or(z.literal("")),
   salePercentBp: z.number().int().min(0).max(9000).optional(),
   saleStartsAt: z.string().datetime().optional().or(z.literal("")),

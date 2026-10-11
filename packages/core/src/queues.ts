@@ -272,9 +272,10 @@ export const BOT_ADMIN_MEMBERS_KEY = "botadmin:members";
  * Alert admins (best-effort): the configured ADMIN_ALERT_CHAT_ID plus every
  * admin currently logged in to the in-bot panel, each de-duplicated.
  */
-export async function enqueueAdminAlert(text: string, buttons?: OutboxButton[]): Promise<void> {
+export async function enqueueAdminAlert(text: string, buttons?: OutboxButton[], photo?: string): Promise<void> {
   const sent = new Set<string>();
-  const opts = buttons && buttons.length > 0 ? { buttons } : {};
+  // `photo`: a Telegram file_id (e.g. a customer's screenshot) sent with the alert as its caption.
+  const opts = { ...(buttons && buttons.length > 0 ? { buttons } : {}), ...(photo ? { photo } : {}) };
   const cfg = loadConfig();
   const chatId = cfg.ADMIN_ALERT_CHAT_ID;
   if (chatId) { await enqueueTelegramMessage(chatId, text, opts); sent.add(String(chatId)); }

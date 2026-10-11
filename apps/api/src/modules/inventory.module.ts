@@ -7,7 +7,7 @@ import { z } from "zod";
 import { writeAudit } from "../common/audit.js";
 import { notFound } from "../common/errors.js";
 import { filterValue, paginated, parseList } from "../common/pagination.js";
-import { announceRestock } from "@gis/core";
+import { addStock, announceRestock } from "@gis/core";
 import { RequirePermission } from "../common/permissions.decorator.js";
 import { validate } from "../common/zod-body.pipe.js";
 import type { ApiRequest } from "../common/types.js";
@@ -78,6 +78,17 @@ export class InventoryController {
   @Post("keys")
   async addKeys(@Body() body: unknown, @Req() req: ApiRequest) {
     const { variantId, keys, supplier, expiresAt } = validate(keysBody, body);
+    // The common case goes through the same core path as the bot: it detects
+    // ACCOUNT products (user|pass lines → DigitalAccount rows — the panel used
+    // to write them as license keys, so account stock stayed at 0), inserts in
+    // one batch (5000 one-by-one inserts timed the panel out), re-lists
+    // previously delivered values, clears the catalogue cache and sends
+    // restock alerts.
+    if (!supplier && !expiresAt) {
+      const r = await addStock(variantId, keys, { actorLabel: req.user?.id ?? "admin-panel" });
+      await writeAudit(req, "inventory.keys.import", "ProductVariant", variantId, undefined, { inserted: r.added, relisted: r.relisted, duplicates: r.skipped, type: r.type });
+      return { inserted: r.added + r.relisted, duplicates: r.skipped, held: r.blocked.length, type: r.type };
+    }
     const master = loadConfig().ENCRYPTION_MASTER_KEY;
     let inserted = 0;
     let duplicates = 0;
