@@ -1046,7 +1046,7 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
         description: p.description.slice(0, 4000) || null,
         activationGuide: p.note.slice(0, 2000) || null,
         supplierStock: p.stock,
-        status: nextStatus,
+        status: nextStatus as typeof existing.status,
         // Remember WHY it is paused, so the rule above can tell an out-of-stock
         // pause (sync may unpause) from a manual hide (sync must not).
         supplierStockDrivenPause: nextStatus === "PAUSED" ? !inStock : false,
