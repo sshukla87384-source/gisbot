@@ -82,6 +82,12 @@ export function convertMinor(amountMinor: number, from: Currency, to: Currency):
   return out;
 }
 
+/** The unrounded conversion — callers choose the rounding direction (balances round down). */
+export function convertMinorExact(amountMinor: number, from: Currency, to: Currency): number {
+  if (from === to) return amountMinor;
+  return (amountMinor / usdtRate(from)) * usdtRate(to);
+}
+
 /** The USDT value of a minor-unit amount, as a 2dp string. */
 export function toUsdt(amountMinor: number, currency: Currency): string {
   return (amountMinor / 100 / usdtRate(currency)).toFixed(2);

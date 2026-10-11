@@ -197,7 +197,9 @@ const MARKUP_METHODS = new Set([...TEXT_METHODS, ...CAPTION_METHODS, "editMessag
  * call is repeated exactly as the caller made it — never worse than before.
  */
 /** A 400 the premium additions can cause — and only those trigger the plain retry. */
-const PREMIUM_CAUSE = /custom.?emoji|CUSTOM_EMOJI|DOCUMENT_INVALID|ENTITY|entities|icon|EMOJI/i;
+const PREMIUM_CAUSE = /custom.?emoji|CUSTOM_EMOJI|DOCUMENT_INVALID|icon|EMOJI/i;
+/** A markup error: may come from our additions OR from the caller's own HTML. */
+const MARKUP_CAUSE = /can't parse entities|ENTITY|entities/i;
 
 export function premiumEmojiTransformer(opts: { buttons: boolean }) {
   // When Telegram refuses premium emoji (bot owner without Premium), stop
@@ -221,9 +223,15 @@ export function premiumEmojiTransformer(opts: { buttons: boolean }) {
     // Retry plain only for a premium-caused rejection. "message is not
     // modified", "chat not found" and the like are returned as they are — a
     // retry would flip an unchanged message between premium and plain.
-    if (!res.ok && res.error_code === 400 && PREMIUM_CAUSE.test(res.description ?? "") && !/not modified/i.test(res.description ?? "")) {
-      refusedUntil = Date.now() + 10 * 60_000;
-      return prev(method, payload, signal);
+    const desc = res.ok ? "" : (res.description ?? "");
+    if (!res.ok && res.error_code === 400 && !/not modified/i.test(desc)) {
+      if (PREMIUM_CAUSE.test(desc)) {
+        refusedUntil = Date.now() + 10 * 60_000;
+        return prev(method, payload, signal);
+      }
+      // One message with broken HTML must not switch premium emoji off for
+      // EVERY message for ten minutes — retry this one as sent, nothing more.
+      if (MARKUP_CAUSE.test(desc)) return prev(method, payload, signal);
     }
     return res;
   };

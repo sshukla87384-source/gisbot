@@ -89,15 +89,24 @@ export async function releaseMaturedReferralRewards(opts: { referrerId?: string;
   const now = new Date();
   const rewards = await prisma.referralReward.findMany({
     where: { status: "PENDING_HOLD", holdUntil: { lt: now }, ...(opts.referrerId ? { referrerId: opts.referrerId } : {}) },
-    take: opts.limit ?? 200,
+    // Oldest first, and a wider window than the batch: rewards whose orders are
+    // still being delivered are skipped (not marked), so a fixed 200 could fill
+    // up with them on every run and starve the payable ones behind.
+    orderBy: { holdUntil: "asc" },
+    take: (opts.limit ?? 200) * 5,
   });
+  let handled = 0;
   let credited = 0;
   let creditedMinor = 0;
   let currency: Currency | null = null;
   for (const reward of rewards) {
+    if (handled >= (opts.limit ?? 200)) break;
     const order = await prisma.order.findUnique({ where: { id: reward.orderId }, select: { status: true } });
     // Anti-fraud: withhold if the qualifying order was refunded.
-    if (!order || ["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED"].includes(order.status)) {
+    // Not finished yet (awaiting stock / manual delivery): keep holding.
+    if (order && ["PAID", "PENDING_FULFILLMENT", "AWAITING_STOCK", "PENDING_PAYMENT"].includes(order.status)) continue;
+    handled++;
+    if (!order || ["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED", "EXPIRED", "MANUAL_REVIEW"].includes(order.status)) {
       await prisma.referralReward.update({ where: { id: reward.id }, data: { status: "WITHHELD", withheldReason: "qualifying order refunded/cancelled" } });
       continue;
     }

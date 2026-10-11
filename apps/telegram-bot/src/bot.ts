@@ -1,6 +1,7 @@
 import { isDev, loadConfig } from "@gis/config";
 import {
   premiumEmojiTransformer,
+  noteFreeTopupIntent,
   addToCart,
   adjustWallet,
   releaseMaturedReferralRewards,
@@ -82,6 +83,9 @@ import {
   markUpiUtrPending,
   stashUpiTopupClaim,
   enqueueAdminAlert,
+  capTelegramHtml,
+  getAdminOrder,
+  stripTelegramHtml,
   removeItem,
   resolveTelegramUser,
   revealDelivery,
@@ -103,6 +107,8 @@ import {
   setUserLocale,
   createUpiManualCheckout,
   createStarsCheckout,
+  validateStarsPreCheckout,
+  creditFailedStarsPayment,
   confirmStarsPayment,
   getVariantAvailable,
   rememberPaymentPrompt,
@@ -323,6 +329,8 @@ export function createBot(): Bot<Ctx> {
       if (/^\/(?:un)?registergroup(?:@\S+)?(?:\s|$)/i.test(chanText)) return next();
       return;
     }
+    // A completed payment is never rate-limited away — the money is already taken.
+    if (ctx.message?.successful_payment || ctx.preCheckoutQuery) return next();
     const redis = getRedis();
     const key = `bot:flood:${uid}`;
     const count = await redis.incr(key);
@@ -337,7 +345,16 @@ export function createBot(): Bot<Ctx> {
   });
 
   // ── Telegram Stars: pre-checkout must be answered within 10s (no chat on this update) ──
-  bot.on("pre_checkout_query", (ctx) => ctx.answerPreCheckoutQuery(true).catch(() => undefined));
+  bot.on("pre_checkout_query", async (ctx) => {
+    const q = ctx.preCheckoutQuery;
+    try {
+      const v = await validateStarsPreCheckout(q.invoice_payload, q.from.id, q.total_amount, q.currency);
+      await (v.ok ? ctx.answerPreCheckoutQuery(true) : ctx.answerPreCheckoutQuery(false, v.message));
+    } catch {
+      // A DB hiccup must not block a real payment — successful_payment has a safety net.
+      await ctx.answerPreCheckoutQuery(true).catch(() => undefined);
+    }
+  });
 
   // ── Group registration commands (work in groups/channels; admin-gated) ──
   bot.command("registergroup", async (ctx) => {
@@ -381,7 +398,7 @@ export function createBot(): Bot<Ctx> {
     ctx.user = user;
     ctx.session.isNewUser = isNew;
     // Banned users can't use the bot.
-    if ((user as { status?: string }).status === "BANNED") {
+    if ((user as { status?: string }).status === "BANNED" && !ctx.message?.successful_payment) {
       await ctx.reply("🚫 Your access has been suspended. Contact support if you think this is a mistake.").catch(() => undefined);
       return;
     }
@@ -393,7 +410,7 @@ export function createBot(): Bot<Ctx> {
     const cmd = ctx.message?.text ?? "";
     // Both lookups at once: this runs on every single update.
     const [isAdminHere, maint] = await Promise.all([isBotAdmin(ctx.from.id), getMaintenance()]);
-    if (!isAdminHere && !cmd.startsWith("/admin")) {
+    if (!isAdminHere && !cmd.startsWith("/admin") && !ctx.message?.successful_payment) {
       if (maint.enabled) {
         await ctx.reply(maint.message, { parse_mode: "HTML" }).catch(() => undefined);
         return;
@@ -409,7 +426,10 @@ export function createBot(): Bot<Ctx> {
   const render = async (ctx: Ctx, view: View, edit: boolean): Promise<number | undefined> => {
     const opts = { parse_mode: "HTML" as const, reply_markup: view.kb };
     let sentId: number | undefined;
-    const cap = (t: string) => (t.length > 1024 ? `${t.slice(0, 1021)}…` : t);
+    // Tag-aware: slicing raw HTML cut through <a>/<tg-emoji>, Telegram refused
+    // the caption and the fallbacks below lost the photo and the buttons.
+    const cap = (t: string) => capTelegramHtml(t, 1024);
+    const plainOf = (t: string) => stripTelegramHtml(t);
 
     // Telegram cannot turn a photo message into a text one or the reverse, and
     // this branch ignored `edit` completely whenever a view had a photo. So
@@ -436,7 +456,9 @@ export function createBot(): Bot<Ctx> {
         if (e instanceof GrammyError && e.description.includes("CUSTOM_EMOJI")) {
           try { const m = await ctx.replyWithPhoto(view.photo, { caption: cap(stripEmoji(view.text)), parse_mode: "HTML", reply_markup: view.kb }); return m.message_id; } catch { /* fall through */ }
         }
-        const m = await ctx.reply(cap(stripEmoji(view.text)), opts).catch(() => ctx.reply(cap(view.text.replace(/<[^>]+>/g, ""))).catch(() => undefined));
+        // Keep the buttons on every fallback — a card without them strands the user.
+        const m = await ctx.reply(capTelegramHtml(stripEmoji(view.text), 4096), opts)
+          .catch(() => ctx.reply(plainOf(view.text).slice(0, 4096), { reply_markup: view.kb }).catch(() => undefined));
         return m?.message_id;
       }
     }
@@ -444,7 +466,7 @@ export function createBot(): Bot<Ctx> {
     // delivered unit could exceed it, and the failure mode was the user getting
     // NOTHING at all — the last fallback below had no catch either.
     const TG_MAX = 4096;
-    const fit = (t: string) => (t.length > TG_MAX ? `${t.slice(0, TG_MAX - 40)}\n\n<i>…truncated</i>` : t);
+    const fit = (t: string) => capTelegramHtml(t, TG_MAX, "\n\n<i>…truncated</i>");
     const send = async (text: string): Promise<void> => {
       if (edit && ctx.callbackQuery?.message) {
         await ctx.editMessageText(fit(text), opts);
@@ -460,7 +482,8 @@ export function createBot(): Bot<Ctx> {
       // Most likely an unowned custom emoji — retry with tg-emoji stripped.
       try { await send(stripEmoji(view.text)); }
       catch {
-        const m = await ctx.reply(stripEmoji(view.text), opts).catch(() => ctx.reply(view.text.replace(/<[^>]+>/g, "")).catch(() => undefined));
+        const m = await ctx.reply(fit(stripEmoji(view.text)), opts)
+          .catch(() => ctx.reply(plainOf(view.text).slice(0, TG_MAX), { reply_markup: view.kb }).catch(() => undefined));
         sentId = m?.message_id;
       }
     }
@@ -571,8 +594,8 @@ export function createBot(): Bot<Ctx> {
       .copyText(`📋 Copy amount — ${card.payAmount}`, card.payAmount).row();
     if (card.payinExtraId) kb.copyText(`📋 Copy memo — ${card.payinExtraId}`, card.payinExtraId).row();
     kb.text("🔄 Check payment", isTopup ? cb("wal", "cryptochk", card.refId) : cb("ord", "cryptochk", card.refId)).row();
-    if (isTopup) kb.text("✖️ Cancel", cb("wal", "view")).text("🏠 Menu", "mnu:home");
-    else kb.text("✖️ Cancel", cb("ord", "cryptocancel", card.refId)).text("🏠 Menu", "mnu:home");
+    if (isTopup) kb.text("✖️ Cancel", cb("wal", "view")).text("🏠 Menu", "mnu:homenew");
+    else kb.text("✖️ Cancel", cb("ord", "cryptocancel", card.refId)).text("🏠 Menu", "mnu:homenew");
     try {
       const png = await QRCode.toBuffer(card.payAddress, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
       return await ctx.replyWithPhoto(new InputFile(png, "crypto-pay.png"), { caption, parse_mode: "HTML", reply_markup: kb });
@@ -858,7 +881,18 @@ export function createBot(): Bot<Ctx> {
       await ctx.reply(r.ok ? `📨 Sent to support on ticket <b>${r.ticketNumber}</b>. We'll reply here.` : "⚠️ That ticket is no longer open.", { parse_mode: "HTML" });
       return;
     }
-    if (ctx.session.awaiting !== "admin_p_image") return;
+    // A payment screenshot while we wait for a reference number used to be
+    // ignored without a word, so the customer thought it was being checked.
+    const aw = ctx.session.awaiting;
+    if (aw === "upi_ref" || aw === "wallet_inr_utr") {
+      await ctx.reply("📸 Thanks! Screenshots can't be verified automatically — please <b>type the 12-digit UTR / reference number</b> from your UPI app (open the payment → transaction details) and send it here.", { parse_mode: "HTML" });
+      return;
+    }
+    if (aw === "binance_txnid" || aw === "wallet_free_txn") {
+      await ctx.reply("📸 Thanks! Screenshots can't be verified automatically — please <b>copy the Order ID</b> from the Binance payment receipt and paste it here as text.", { parse_mode: "HTML" });
+      return;
+    }
+    if (aw !== "admin_p_image") return;
     if (!(await isBotAdmin(ctx.from?.id))) return;
     const photos = ctx.message.photo;
     const fileId = photos[photos.length - 1]?.file_id;
@@ -867,15 +901,34 @@ export function createBot(): Bot<Ctx> {
 
   // ── Telegram Stars: payment succeeded → fulfil the order ──
   bot.on("message:successful_payment", async (ctx) => {
-    const orderId = ctx.message.successful_payment.invoice_payload;
+    const sp = ctx.message.successful_payment;
+    const orderId = sp.invoice_payload;
     try {
       const r = await confirmStarsPayment(orderId);
       await ctx.reply(
         successCard("Payment Received", [`✅ Paid with ⭐ Telegram Stars`, `📦 Delivered ${num(r.delivered)} item(s)`, `🙏 Thank you so much, ${greetName(ctx.user)} — it is an honour to serve you!`]),
         { parse_mode: "HTML" },
       );
-    } catch {
-      await ctx.reply("⭐ Payment received — our team will deliver your order shortly.");
+    } catch (e) {
+      // The Stars are already taken. Never leave that silent: credit the order
+      // value to the wallet when the order was closed meanwhile, and always
+      // tell the admins with the charge id so it can be traced or refunded.
+      const credit = await creditFailedStarsPayment(orderId, sp.telegram_payment_charge_id).catch(() => null);
+      await enqueueAdminAlert(
+        [
+          "⭐ <b>Stars payment needs attention</b>",
+          `👤 ${greetName(ctx.user)} · <code>${ctx.from?.id ?? "?"}</code>`,
+          `🧾 Order <code>${escapeHtml(orderId)}</code> · ${num(sp.total_amount)} ⭐`,
+          `🔖 Charge <code>${escapeHtml(sp.telegram_payment_charge_id)}</code>`,
+          credit?.credited ? `💳 Credited ${fmt(credit.amountMinor, credit.currency)} to the customer's wallet.` : `⚠️ ${escapeHtml(String((e as Error)?.message ?? e).slice(0, 200))}`,
+        ].join("\n"),
+      ).catch(() => undefined);
+      await ctx.reply(
+        credit?.credited
+          ? `⭐ Payment received, but that order had already closed — so <b>${fmt(credit.amountMinor, credit.currency)}</b> was added to your wallet instead. Use it on your next order anytime. 💳`
+          : "⭐ Payment received — our team will deliver your order shortly.",
+        { parse_mode: "HTML" },
+      ).catch(() => undefined);
     }
   });
 
@@ -993,7 +1046,9 @@ export function createBot(): Bot<Ctx> {
         "📷 <b>Scan the QR</b> in GPay / PhonePe / Paytm — the amount is pre-filled.",
         "📋 No QR? Use the copy buttons below.",
         "",
-        `💰 Your wallet will be credited <b>$${(Math.round(minor / fxRate) / 100).toFixed(2)}</b>  <i>(${fxRate} INR = 1 USD)</i>`,
+        (await getWallet(ctx.user.id).catch(() => null))?.currency === "INR"
+          ? `💰 Your wallet will be credited <b>₹${rupees}</b>`
+          : `💰 Your wallet will be credited <b>$${(Math.round(minor / fxRate) / 100).toFixed(2)}</b>  <i>(${fxRate} INR = 1 USD)</i>`,
         "",
         "✅ After paying, paste your <b>UTR number</b> here.",
         "",
@@ -1023,6 +1078,9 @@ export function createBot(): Bot<Ctx> {
       const minor = ctx.session.inrTopupMinor ?? 0;
       const rate = await getInrPerUsdt();
       const usdMinor = Math.max(1, Math.round(minor / rate));
+      // What the customer actually receives: the wallet's own currency.
+      const topupWalletCur = (await getWallet(ctx.user.id).catch(() => null))?.currency ?? "USD";
+      const creditLabel = topupWalletCur === "INR" ? `₹${(minor / 100).toFixed(2)}` : `$${(usdMinor / 100).toFixed(2)}`;
       // A UPI UTR/RRN is exactly 12 digits. The old check accepted any 6+
       // characters, so "abcdef" passed straight through to an admin alert.
       const digits = utr.replace(/\D/g, "");
@@ -1056,13 +1114,13 @@ export function createBot(): Bot<Ctx> {
           `👤 ${escapeHtml(who)}`,
           `🆔 <code>${ctx.user.telegramId ?? "—"}</code>`,
           `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
-          `💰 Credit: <b>$${(usdMinor / 100).toFixed(2)}</b>  <i>(${rate} INR = 1 USD)</i>`,
+          `💰 Credit: <b>${creditLabel}</b>${topupWalletCur === "INR" ? " <i>(INR wallet)</i>" : `  <i>(${rate} INR = 1 USD)</i>`}`,
           `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
           "",
-          "Check the UTR in your UPI app, then approve to credit their wallet in USD.",
+          `Check the UTR in your UPI app, then approve to credit their wallet (${topupWalletCur}).`,
         ].join("\n"),
         [
-          { text: `✅ Approve — credit $${(usdMinor / 100).toFixed(2)}`, callbackData: `adm:wdok:${claimId}`, style: "success" },
+          { text: `✅ Approve — credit ${creditLabel}`, callbackData: `adm:wdok:${claimId}`, style: "success" },
           { text: "❌ Reject", callbackData: `adm:wdno:${claimId}`, style: "danger" },
         ],
       ).catch(() => undefined);
@@ -1073,7 +1131,7 @@ export function createBot(): Bot<Ctx> {
           "🧾 <b>Thanks — payment submitted!</b>",
           "",
           `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
-          `💰 You'll receive: <b>$${(usdMinor / 100).toFixed(2)}</b> <i>(${rate} INR = 1 USD)</i>`,
+          `💰 You'll receive: <b>${creditLabel}</b>`,
           `🧾 UTR: <code>${escapeHtml(digits)}</code>`,
           "",
           "🧑‍💼 Our team is verifying it now — UPI is approved by hand, so please allow a little time. Your wallet is credited as soon as it clears and you'll get a message here. 🙏",
@@ -1127,6 +1185,25 @@ export function createBot(): Bot<Ctx> {
           },
         ));
       }
+      if (r.reason === "ORDER_NOT_PENDING") {
+        // Either it was already confirmed (auto-poll beat the paste) or the
+        // checkout closed. Neither needs an approve card; say which, and stop
+        // treating the next messages as transaction IDs.
+        ctx.session.binanceOrderId = undefined;
+        ctx.session.payRetries = undefined;
+        const st = (await getAdminOrder(orderId).catch(() => null))?.status ?? "";
+        if (["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK"].includes(st)) {
+          return flowEnd(ctx, () => ctx.reply("✅ <b>This payment is already confirmed</b> — your order is delivered (or on its way). Find it in 📦 My Orders.", {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home"),
+          }));
+        }
+        await createTicket(ctx.user.id, "PAYMENT_ISSUE", `Binance Order ID ${txn} pasted for order ${orderId}, which is ${st || "closed"} (not awaiting payment). Check and credit the wallet if it was paid.`).catch(() => undefined);
+        return flowEnd(ctx, () => ctx.reply(
+          "⌛ <b>That checkout had already closed.</b> If you did pay, don't worry — we've opened a support ticket with your Order ID and our team will credit it to your wallet after checking.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🛒 Cart", cb("crt", "view")).text("🏠 Menu", "mnu:home") },
+        ));
+      }
       // Not auto-verified → send admins an instant approve/reject card (fallback: ticket).
       const notified = await notifyAdminsForApproval(ctx, orderId, "Binance", txn);
       if (notified === 0) {
@@ -1171,9 +1248,18 @@ export function createBot(): Bot<Ctx> {
     if (awaiting === "buy_qty") {
       const variantId = ctx.session.buyVariantId ?? "";
       const maxQty = ctx.session.buyMaxQty ?? 99;
+      if (!variantId) return ctx.reply("That item expired — open the product again.");
+      // A word instead of a number ("hi", a product name) used to become
+      // quantity 1 and REPLACE the cart. Ask again instead.
+      if (!/\d/.test(ctx.message.text)) {
+        ctx.session.awaiting = "buy_qty";
+        return ctx.reply("🔢 Please send just a number — how many would you like? (e.g. <b>2</b>)", {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("✖️ Cancel", "mnu:home"),
+        });
+      }
       ctx.session.buyVariantId = undefined;
       ctx.session.buyMaxQty = undefined;
-      if (!variantId) return ctx.reply("That item expired — open the product again.");
       // It sold out while they were typing. The clamp below would otherwise pin
       // the quantity to 0 and put a zero-quantity line into the cart.
       if (maxQty < 1) return ctx.reply("❌ That just went out of stock — nothing has been added to your cart.");
@@ -1328,6 +1414,8 @@ export function createBot(): Bot<Ctx> {
         AMOUNT_MISMATCH: "❌ Could not read the amount.",
         NOT_PENDING: "❌ Could not process.",
         WRONG_USER: "❌ That deposit isn't yours.",
+        TOO_OLD: "❌ That payment was made before you opened the deposit screen, so it can't be used as a deposit. If you paid just now, open 💳 Wallet → Binance again and paste the Order ID of the NEW transfer — or open 🎫 Support.",
+        DAILY_LIMIT: "⏳ Daily deposit-claim limit reached — please try again tomorrow or open 🎫 Support.",
       };
       await createTicket(ctx.user.id, "PAYMENT_ISSUE", `Wallet deposit — Order ID ${txn} (${r.ok ? "ok" : r.reason}).`).catch(() => undefined);
       // The deposit card stays (they may need the UID again); the verdict
@@ -1463,6 +1551,12 @@ export function createBot(): Bot<Ctx> {
       if (opt.text && opt.show_alert && ctx.chat) {
         const note = await ctx.reply(opt.text).catch(() => undefined);
         if (note) setTimeout(() => { void ctx.api.deleteMessage(ctx.chat!.id, note.message_id).catch(() => undefined); }, 8000);
+      } else if (opt.text && ctx.chat && !/^[⏳🔎⚡]/u.test(opt.text) && !/(?:…|\.\.\.)\s*$/.test(opt.text)) {
+        // A late plain toast ("✅ Added to cart", "Copied") was dropped silently
+        // once the auto-answer had fired; show it briefly instead. Progress
+        // hints (⏳…) are skipped — the result itself follows right away.
+        const note = await ctx.reply(opt.text).catch(() => undefined);
+        if (note) setTimeout(() => { void ctx.api.deleteMessage(ctx.chat!.id, note.message_id).catch(() => undefined); }, 4000);
       }
       return true;
     };
@@ -1487,9 +1581,29 @@ export function createBot(): Bot<Ctx> {
     const route = `${ns}:${action}`;
     const user = ctx.user;
 
+    // Leaving a prompt by tapping a menu button abandons it. Otherwise the
+    // next thing typed (a search, a message to support) was still read as the
+    // old answer — a quantity that replaced the cart, a coupon, a ticket.
+    // Payment-reference prompts stay armed: people often check the menu
+    // before pasting their UTR / Order ID.
+    const aw = ctx.session.awaiting;
+    if (aw && (ns === "mnu" || ns === "shp" || ns === "crt" || route === "ord:list")
+      && !aw.startsWith("admin_") && !aw.startsWith("sale_")
+      && !["binance_txnid", "upi_ref", "wallet_inr_utr", "wallet_free_txn", "support_chat"].includes(aw)) {
+      ctx.session.awaiting = null;
+    }
+
     // Prevent double-submits on payment actions (rapid taps / concurrent webhooks).
-    const isPay = route.startsWith("ord:pay");
+    const isPay = route.startsWith("ord:pay") || route === "ord:cryptonet";
     if (isPay) {
+      // Updates are serialized per user, so the lock below is free again by the
+      // time a rapid second tap runs — it then created a SECOND order/address
+      // and silently closed the first. Remember the tapped message briefly too.
+      const tapMsg = ctx.callbackQuery?.message?.message_id;
+      if (tapMsg) {
+        const fresh = await getRedis().set(`paytap:${user.id}:${tapMsg}:${route}`, "1", "EX", 8, "NX").catch(() => "OK");
+        if (!fresh) { await ctx.answerCallbackQuery({ text: "⏳ Already processing your order…" }).catch(() => undefined); return; }
+      }
       const locked = await getRedis().set(`paylock:${user.id}`, "1", "EX", 60, "NX");
       if (!locked) { await ctx.answerCallbackQuery({ text: "⏳ Already processing your order…" }); return; }
       await ctx.editMessageReplyMarkup().catch(() => undefined); // remove buttons so it can't be tapped again
@@ -1524,6 +1638,10 @@ export function createBot(): Bot<Ctx> {
       switch (route) {
         case "mnu:home":
           await render(ctx, await views.menuView(user), true);
+          break;
+        // From a payment card: keep the card (amount, Pay ID, QR) on screen.
+        case "mnu:homenew":
+          await render(ctx, await views.menuView(user), false);
           break;
         case "mnu:help":
           await render(ctx, await views.helpView(), true);
@@ -1692,7 +1810,7 @@ export function createBot(): Bot<Ctx> {
               reply_markup: after < 0
                 ? new InlineKeyboard().text("➕ Add balance", cb("wal", "crypto")).row().text("✖️ Cancel", cb("crt", "view"))
                 : new InlineKeyboard()
-                    .add(sbtn(`✅ Confirm & pay ${fmt(charge, walletCur)}`, cb("ord", "paywalletok"), "success")).row()
+                    .add(sbtn(`✅ Confirm & pay ${fmt(charge, walletCur)}`, cb("ord", "paywalletok", String(charge)), "success")).row()
                     .text("✖️ Cancel", cb("crt", "view")),
             },
           );
@@ -1700,8 +1818,25 @@ export function createBot(): Bot<Ctx> {
         }
         case "ord:paywalletok": {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
-          // The animation runs while the order is processed, not before it.
-          const result = await withPurchaseAnimation(ctx, () => checkoutWithWallet(user.id));
+          // Never take more than the confirm screen quoted: the cart can change
+          // in the Mini App (or a price can move) between the two taps. A little
+          // slack covers rounding between the quote and the wallet-currency price.
+          const quoted = Number(args[0]);
+          const maxTotalMinor = Number.isFinite(quoted) && quoted > 0 ? Math.ceil(quoted * 1.01) + 1 : undefined;
+          let result: Awaited<ReturnType<typeof checkoutWithWallet>>;
+          try {
+            // The animation runs while the order is processed, not before it.
+            result = await withPurchaseAnimation(ctx, () => checkoutWithWallet(user.id, "DIRECT", maxTotalMinor !== undefined ? { maxTotalMinor } : {}));
+          } catch (e) {
+            if (isCoreError(e) && e.message === "PRICE_CHANGED") {
+              await ctx.reply("🔄 <b>Your total changed</b> since the confirm screen (cart or price update). Nothing was charged — please review and confirm again.", {
+                parse_mode: "HTML",
+                reply_markup: new InlineKeyboard().text("🧾 Review again", cb("ord", "paywallet")).text("🛒 Cart", cb("crt", "view")),
+              });
+              break;
+            }
+            throw e;
+          }
           await ctx.reply(
             successCard("Order Success", [
               `✅ Payment confirmed`,
@@ -1828,8 +1963,17 @@ export function createBot(): Bot<Ctx> {
                   .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
               }).catch(() => undefined);
             }
-          } catch {
-            await ctx.reply("❌ Couldn't place on Pay Later — your BNPL limit may be exceeded. Try another payment method.");
+          } catch (e) {
+            // Only a limit problem is a limit problem: out of stock, an empty
+            // cart or a price change used to be reported as "limit exceeded".
+            const limit = isCoreError(e) && e.code === "INSUFFICIENT_BALANCE";
+            const why = limit
+              ? "your Pay Later limit isn't enough for this order"
+              : isCoreError(e) ? (ERROR_COPY[e.code] ?? "something went wrong") : "something went wrong";
+            await ctx.reply(`❌ Couldn't place this on Pay Later — ${why}. Nothing was charged; try another payment method.`, {
+              reply_markup: new InlineKeyboard().text("🛒 Cart", cb("crt", "view")).text("🏠 Menu", "mnu:home"),
+            });
+            if (!isCoreError(e)) void logError("bnplCheckout", e, { userId: user.id });
           }
           break;
         }
@@ -1871,8 +2015,9 @@ export function createBot(): Bot<Ctx> {
             break;
           }
           await ctx.answerCallbackQuery({ text: "⏳ Creating order…" });
-          if (user.currency !== "USD") { await setUserCurrency(user.id, "USD"); user.currency = "USD"; }
-          const bz = await createBinanceManualCheckout(user.id, { useWallet: args[0] === "w" });
+          // Priced in USD for this order only — the customer's currency and
+          // wallet are left exactly as they were.
+          const bz = await createBinanceManualCheckout(user.id, { useWallet: args[0] === "w", currency: "USD" });
           ctx.session.binanceOrderId = bz.orderId;
           ctx.session.payRetries = 0;
           // Arm the paste right away: the next message they send is treated as the Order ID.
@@ -1910,7 +2055,10 @@ export function createBot(): Bot<Ctx> {
               .row()
               .text("⚠️ I have paid — need help", `ord:binancehelp:${bz.orderId}`)
               .row()
-              .text("🏠 Menu", "mnu:home"),
+              // Menu opens in a NEW message: editing it in place wiped the
+              // amount and Pay ID the customer still needed.
+              .text("✖️ Cancel", cb("ord", "cryptocancel", bz.orderId))
+              .text("🏠 Menu", "mnu:homenew"),
           );
           // Remember whatever message the card ENDED UP in, so whatever finishes
           // the order can take it out of the chat. Remembering the tapped message
@@ -2051,6 +2199,7 @@ export function createBot(): Bot<Ctx> {
           try {
             up = await createUpiManualCheckout(user.id, { useWallet: args[0] === "w" });
           } catch (e) {
+            if (isCoreError(e) && e.message === "WALLET_COVERS_ORDER") throw e; // the outer handler offers the wallet button
             const msg = isCoreError(e) ? (ERROR_COPY[e.code] ?? e.message) : "Something went wrong creating your UPI order.";
             await ctx.reply(`⚠️ ${msg}\n\nPlease try again, or pay with 🪙 Binance.`, {
               parse_mode: "HTML",
@@ -2107,7 +2256,7 @@ export function createBot(): Bot<Ctx> {
             .text("⚠️ I have paid — need help", "ord:upipaid")
             .row()
             .text("✖️ Cancel", "ord:upicancel")
-            .text("🏠 Menu", "mnu:home");
+            .text("🏠 Menu", "mnu:homenew");
           try {
             const png = await QRCode.toBuffer(upiUri, { width: 512, margin: 2, color: { dark: "#000000", light: "#FFFFFF" } });
             const qrMsg = await ctx.replyWithPhoto(new InputFile(png, "upi-qr.png"), {
@@ -2149,6 +2298,11 @@ export function createBot(): Bot<Ctx> {
           const cancelledOrder = ctx.session.upiOrderId;
           ctx.session.upiOrderId = undefined;
           ctx.session.awaiting = undefined;
+          // Actually close it: the wallet part it holds goes back right away
+          // (it used to stay locked until the order timed out), and a late UTR
+          // can no longer settle an order the customer walked away from.
+          // Refused automatically when a UTR was already submitted.
+          if (cancelledOrder) await cancelCryptoOrder(cancelledOrder, user.id).catch(() => false);
           // The payment card and the whole UTR conversation are dead weight now.
           if (cancelledOrder) await clearPaymentPrompts(cancelledOrder).catch(() => undefined);
           await flowEnd(ctx, () => ctx.reply(comeBackMessage(user), {
@@ -2177,6 +2331,7 @@ export function createBot(): Bot<Ctx> {
           try {
             co = await createCryptoCheckout(user.id, { network: net.code, useWallet });
           } catch (e) {
+            if (isCoreError(e) && e.message === "WALLET_COVERS_ORDER") throw e; // handled below: offers the wallet button
             const msg = isCoreError(e) ? (ERROR_COPY[e.code] ?? e.message) : "Could not create the crypto payment.";
             await ctx.reply(`⚠️ ${escapeHtml(msg)}`, {
               parse_mode: "HTML",
@@ -2213,7 +2368,25 @@ export function createBot(): Bot<Ctx> {
         case "ord:cryptocancel": {
           await ctx.answerCallbackQuery();
           const oid = args[0] ?? "";
-          await cancelCryptoOrder(oid, user.id).catch(() => false);
+          const cancelled = await cancelCryptoOrder(oid, user.id).catch(() => false);
+          if (!cancelled) {
+            // Already paid, already closed, or a reference was submitted — say so
+            // rather than showing "cancelled" for an order that is still alive.
+            const st = (await getAdminOrder(oid).catch(() => null))?.status ?? "";
+            if (st === "PENDING_PAYMENT") {
+              await ctx.reply("🧾 Your payment reference was already submitted, so this order stays open while our team checks it. You'll get a message here once it's confirmed.", {
+                reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:homenew"),
+              });
+              break;
+            }
+            if (["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK"].includes(st)) {
+              await ctx.reply("✅ This order is already paid — it can't be cancelled. Find it in 📦 My Orders.", {
+                reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)),
+              });
+              break;
+            }
+          }
+          if (ctx.session.binanceOrderId === oid) { ctx.session.binanceOrderId = undefined; ctx.session.payRetries = undefined; }
           ctx.session.awaiting = undefined;
           await flowEnd(ctx, () => ctx.reply(comeBackMessage(user), {
             parse_mode: "HTML",
@@ -2328,11 +2501,11 @@ export function createBot(): Bot<Ctx> {
           // the customer sees their keys, so a retired one must never be handed
           // back silently among the live ones.
           const ds = all.map((r) => ({
-            orderItemId: "",
+            orderItemId: r.orderItemId ?? "",
             productName: r.replaced ? `${r.productName} — ⚠️ REPLACED, no longer works` : r.productName,
             variantName: r.variantName,
             kind: (r.payload.kind === "DIGITAL_ACCOUNT" ? "DIGITAL_ACCOUNT" : "LICENSE_KEY") as "LICENSE_KEY" | "DIGITAL_ACCOUNT",
-            secret: { key: r.payload.key, username: r.payload.username, password: r.payload.password, expiresAt: r.payload.expiresAt },
+            secret: { key: r.payload.key, username: r.payload.username, password: r.payload.password, ...(r.payload.twofa ? { twofa: r.payload.twofa } : {}), expiresAt: r.payload.expiresAt },
             activationGuide: null,
           }));
           if (ds.length === 0) { await ctx.reply("No delivered keys found for this order."); break; }
@@ -2422,6 +2595,8 @@ export function createBot(): Bot<Ctx> {
           // The deposit card is the anchor of this conversation until the
           // Order ID is verified.
           await flowStart(ctx, depositCard);
+          // Only transfers made from now on can be claimed as a deposit.
+          await noteFreeTopupIntent(user.id).catch(() => undefined);
           break;
         }
         case "wal:bnplrepay": {
@@ -2482,6 +2657,9 @@ export function createBot(): Bot<Ctx> {
           const card = await sendCryptoCard(ctx, tp, tp.networkInfo);
           // Cleared when the credit lands (creditCryptoTopup → clearChatClutter).
           if (ctx.chat && card) await rememberChatClutter(ctx.chat.id, card.message_id);
+          // Also keyed to the top-up, so the paths that clear by reference
+          // (own-terminal credit, expiry) take the card away too.
+          if (ctx.chat && card) await rememberPaymentPrompt(tp.refId, ctx.chat.id, card.message_id).catch(() => undefined);
           await flowStart(ctx, card);
           break;
         }
@@ -3082,7 +3260,18 @@ export function createBot(): Bot<Ctx> {
       // Ensure the spinner always stops.
       await ctx.answerCallbackQuery().catch(() => undefined);
     } catch (e) {
-      const copy = isCoreError(e) ? (ERROR_COPY[e.code] ?? "Something went wrong.") : "Something went wrong.";
+      if (isCoreError(e) && e.message === "WALLET_COVERS_ORDER") {
+        await ctx.reply("💳 <b>Your wallet balance covers this whole order</b> — no need for another payment method. Pay from your wallet in one tap:", {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().add(sbtn("💳 Pay with wallet", cb("ord", "paywallet"), "success")).row().text("🛒 Cart", cb("crt", "view")),
+        }).catch(() => undefined);
+        return;
+      }
+      const copy = isCoreError(e)
+        ? (e.code === "OUT_OF_STOCK" && e.message && e.message !== e.code ? `❌ ${e.message}` : (ERROR_COPY[e.code] ?? "Something went wrong."))
+        : "Something went wrong.";
+      // A late alert (the callback was already answered) becomes a short chat
+      // note — see the answer patch above — so it is never lost.
       await ctx.answerCallbackQuery({ text: copy, show_alert: true }).catch(() => undefined);
       if (!isCoreError(e)) throw e;
     } finally {

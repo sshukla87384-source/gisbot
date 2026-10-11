@@ -2,6 +2,7 @@ import { convertMinor } from "../fx.js";
 import { prisma, type Currency } from "@gis/database";
 import { CoreError } from "@gis/shared";
 import { effectivePriceMinor } from "../pricing.js";
+import { stockMapFor, UNLIMITED_STOCK } from "../catalog/catalog.service.js";
 
 export interface CartLine {
   itemId: string;
@@ -30,6 +31,22 @@ async function getOrCreateCart(userId: string) {
   return prisma.cart.upsert({ where: { userId }, create: { userId }, update: {} });
 }
 
+/** Units a customer can actually buy of one variant right now (UNLIMITED_STOCK when not counted). */
+async function unitsAvailable(variantId: string): Promise<number> {
+  const v = await prisma.productVariant.findUnique({
+    where: { id: variantId },
+    select: { product: { select: { id: true, type: true, supplierId: true, supplierStock: true, reusableSecretEnc: true, reusableStock: true, fulfillmentMode: true, manualStock: true } } },
+  });
+  if (!v) return 0;
+  const p = v.product;
+  const map = await stockMapFor([{
+    id: p.id, type: p.type, supplierId: p.supplierId, supplierStock: p.supplierStock,
+    reusable: p.reusableSecretEnc !== null, reusableStock: p.reusableStock,
+    manual: p.fulfillmentMode === "MANUAL", manualStock: p.manualStock, variantIds: [variantId],
+  }]);
+  return map.get(variantId) ?? UNLIMITED_STOCK;
+}
+
 export async function addToCart(userId: string, variantId: string, quantity = 1): Promise<void> {
   const variant = await prisma.productVariant.findFirst({
     where: { id: variantId, isActive: true, deletedAt: null },
@@ -39,10 +56,17 @@ export async function addToCart(userId: string, variantId: string, quantity = 1)
     throw new CoreError("VARIANT_NOT_FOUND");
   }
   const cart = await getOrCreateCart(userId);
+  // Never more in the cart than can be delivered: a cart of 10 when 3 keys
+  // were left took the money for 10 and parked 7 as "awaiting stock".
+  const units = await unitsAvailable(variantId);
+  if (units <= 0) throw new CoreError("OUT_OF_STOCK");
+  const existing = await prisma.cartItem.findUnique({ where: { cartId_variantId: { cartId: cart.id, variantId } }, select: { quantity: true } });
+  const target = Math.min((existing?.quantity ?? 0) + Math.max(1, quantity), units);
+  if (existing && target <= existing.quantity) throw new CoreError("OUT_OF_STOCK", `Only ${units} available — all of them are already in your cart.`);
   await prisma.cartItem.upsert({
     where: { cartId_variantId: { cartId: cart.id, variantId } },
-    create: { cartId: cart.id, variantId, quantity },
-    update: { quantity: { increment: quantity } },
+    create: { cartId: cart.id, variantId, quantity: target },
+    update: { quantity: target },
   });
 }
 
@@ -52,6 +76,10 @@ export async function changeQty(userId: string, itemId: string, delta: number): 
   });
   if (!item) return;
   const next = item.quantity + delta;
+  if (delta > 0) {
+    const units = await unitsAvailable(item.variantId);
+    if (next > units) throw new CoreError("OUT_OF_STOCK", `Only ${Math.max(0, units)} available.`);
+  }
   if (next <= 0) {
     await prisma.cartItem.delete({ where: { id: item.id } });
   } else {

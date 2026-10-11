@@ -421,8 +421,9 @@ export class DeveloperController {
         : null,
       ledger: ledger.entries.map((e) => ({
         type: e.type,
-        amountUsdt: toUsdt(Number(e.amountMinor), w.currency),
-        balanceAfterUsdt: toUsdt(Number(e.balanceAfterMinor), w.currency),
+        amountUsdt: toUsdt(Number(e.amountMinor), e.currency),
+        balanceAfterUsdt: toUsdt(Number(e.balanceAfterMinor), e.currency),
+        currency: e.currency,
         amountMinor: Number(e.amountMinor),
         balanceAfterMinor: Number(e.balanceAfterMinor),
         note: e.note,

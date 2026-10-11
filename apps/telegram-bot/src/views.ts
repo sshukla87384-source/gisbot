@@ -70,6 +70,16 @@ import { iconId, networkIconId } from "./emoji.js";
 import { sbtn } from "./keyboard.js";
 
 /**
+ * Shorten by characters, not UTF-16 units: `.slice()` could cut an emoji in
+ * half and leave a broken glyph (or an invalid string Telegram rejects) at the
+ * end of a button label.
+ */
+const clip = (text: string, max: number): string => {
+  const chars = Array.from(text);
+  return chars.length <= max ? text : chars.slice(0, max).join("");
+};
+
+/**
  * A product label with its emoji shown exactly ONCE.
  *
  * The emoji can live in two places — the icon field and the front of the name —
@@ -322,7 +332,7 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
     ...(quotes.length > 0
       ? ["", `💬 <b>What customers say</b>`,
           ...quotes.flatMap((q) => [
-            `<blockquote>${"⭐".repeat(q.rating)} <i>${escapeHtml(q.body).slice(0, 220)}</i>\n— <b>${escapeHtml(q.customerName)}</b>${q.company ? `, ${escapeHtml(q.company)}` : ""}${q.verified ? " · ✅ verified purchase" : ""}</blockquote>`,
+            `<blockquote>${"⭐".repeat(q.rating)} <i>${escapeHtml(clip(q.body, 220))}</i>\n— <b>${escapeHtml(q.customerName)}</b>${q.company ? `, ${escapeHtml(q.company)}` : ""}${q.verified ? " · ✅ verified purchase" : ""}</blockquote>`,
           ])]
       : []),
   ].filter((l) => l !== "");
@@ -370,7 +380,7 @@ export async function cartViewKb(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   for (const l of view.lines) {
     kb.text("➖", cb("crt", "dec", l.itemId))
-      .text(`${l.quantity} × ${l.productName.slice(0, 18)}`, cb("mnu", "noop"))
+      .text(`${l.quantity} × ${clip(l.productName, 18)}`, cb("mnu", "noop"))
       .text("➕", cb("crt", "inc", l.itemId))
       .text("🗑", cb("crt", "del", l.itemId))
       .row();
@@ -515,7 +525,7 @@ export async function checkoutSummaryView(user: BotUser): Promise<View> {
   }
   if (suggest.length > 0) {
     lines.push("", `🛍 <i>Buy together: ${suggest.map((sgt) => `${escapeHtml(sgt.name)} (${fmt(sgt.priceMinor, sgt.currency)})`).join(" · ")}${!combo.applied && combo.need > 0 && combo.pct > 0 ? ` — unlocks ${combo.pct}% combo off` : ""}</i>`);
-    for (const sgt of suggest) kb.text(`🛍 + ${sgt.name.slice(0, 26)} · ${fmt(sgt.priceMinor, sgt.currency)}`, cb("crt", "addco", sgt.variantId)).row();
+    for (const sgt of suggest) kb.text(`🛍 + ${clip(sgt.name, 26)} · ${fmt(sgt.priceMinor, sgt.currency)}`, cb("crt", "addco", sgt.variantId)).row();
   }
   navRow(kb, cb("crt", "view"));
   return { text: lines.join("\n"), kb };
@@ -631,11 +641,13 @@ export async function walletView(user: BotUser): Promise<View> {
 
 export async function walletHistoryView(user: BotUser, page: number): Promise<View> {
   const ledger = await getLedger(user.id, page);
-  const wallet = await getWallet(user.id);
   const sign = (n: bigint) => (n >= 0n ? "+" : "−");
   const lines = ledger.entries.map((e) => {
     const amt = e.amountMinor < 0n ? -e.amountMinor : e.amountMinor;
-    return `${sign(e.amountMinor)}${fmt(amt, wallet.currency)} · ${e.type}${e.note ? ` · ${escapeHtml(e.note)}` : ""}`;
+    // Each row in the currency it was written in (a wallet that switched
+    // INR↔USD has both) — formatting all of them in today's currency showed
+    // ₹500 top-ups as $500.
+    return `${sign(e.amountMinor)}${fmt(amt, e.currency)} · ${e.type}${e.note ? ` · ${escapeHtml(e.note)}` : ""}`;
   });
   const kb = new InlineKeyboard();
   paginationRow(kb, "wal", "hist", ledger.page, ledger.pages);
@@ -725,11 +737,11 @@ export async function supportHomeView(user: BotUser): Promise<View> {
   const [tickets, faq] = await Promise.all([listTickets(user.id, 1), listFaq().catch(() => [])]);
   const kb = new InlineKeyboard();
   // Quick answers first: most "tickets" are the same three questions.
-  for (const f of faq.slice(0, 4)) kb.text(`💡 ${f.q.slice(0, 48)}`, cb("faq", "q", f.id)).row();
+  for (const f of faq.slice(0, 4)) kb.text(`💡 ${clip(f.q, 48)}`, cb("faq", "q", f.id)).row();
   kb.add(sbtn("💬 Chat with Support", cb("sup", "chat"), "success")).row().text("🆕 New Ticket", cb("sup", "new")).row();
   for (const t of tickets.items.slice(0, 5)) {
     const dot = t.status === "WAITING_CUSTOMER" ? "💬" : t.status === "RESOLVED" ? "✅" : t.status === "CLOSED" ? "🔒" : "⌛";
-    kb.text(`${dot} ${t.ticketNumber} · ${t.subject.slice(0, 22)}`, cb("tkt", "open", t.id)).row();
+    kb.text(`${dot} ${t.ticketNumber} · ${clip(t.subject, 22)}`, cb("tkt", "open", t.id)).row();
   }
   backToMenuRow(kb);
   return {
@@ -770,7 +782,7 @@ export async function categoryGridView(user: BotUser): Promise<View> {
   // Three per row, matching the tile layout.
   for (let i = 0; i < tiles.length; i += 3) {
     for (const t of tiles.slice(i, i + 3)) {
-      const label = `${t.hot ? "🔥 " : ""}${t.emoji ? `${t.emoji} ` : ""}${t.name}`.slice(0, 24);
+      const label = clip(`${t.hot ? "🔥 " : ""}${t.emoji ? `${t.emoji} ` : ""}${t.name}`, 24);
       // Sold-out tiles are styled danger so they read differently at a glance.
       kb.add(sbtn(label, cb("cat", "open", t.id), t.inStock ? "success" : "danger"));
     }
@@ -820,8 +832,8 @@ export async function categoryProductsView(user: BotUser, categoryId: string, pa
   const title = `${tile?.emoji ? `${tile.emoji} ` : "🗂 "}${tile?.name ?? "Category"}`;
   return {
     text: result.items.length > 0
-      ? `${header(bold(title))}\n<i>Tap a product → choose quantity → pay from your 💰 wallet.</i>`
-      : `${header(bold(title))}\n\nNothing available here right now — it's being restocked. Tap 🔔 Notify me on a product to hear first.`,
+      ? `${header(escapeHtml(bold(title)))}\n<i>Tap a product → choose quantity → pay from your 💰 wallet.</i>`
+      : `${header(escapeHtml(bold(title)))}\n\nNothing available here right now — it's being restocked. Tap 🔔 Notify me on a product to hear first.`,
     kb,
   };
 }
@@ -895,7 +907,7 @@ export function settingsView(user: BotUser): View {
 export async function helpView(): Promise<View> {
   const faq = await listFaq().catch(() => []);
   const kb = new InlineKeyboard();
-  for (const f of faq.slice(0, 8)) kb.text(`❓ ${f.q.slice(0, 48)}`, cb("faq", "q", f.id)).row();
+  for (const f of faq.slice(0, 8)) kb.text(`❓ ${clip(f.q, 48)}`, cb("faq", "q", f.id)).row();
   kb
     .add(sbtn("🛍 Shop", cb("shp", "home", 1), "success")).row()
     .text("💰 Wallet", cb("wal", "view")).text("📦 My Orders", cb("ord", "list", 1)).row()
@@ -988,7 +1000,7 @@ export async function apiKeysListView(user: BotUser): Promise<View> {
   if (active.length === 0) lines.push("You have no active keys yet.");
   for (const k of active.slice(0, 15)) {
     lines.push(`• <b>${escapeHtml(k.name)}</b> — <code>${k.prefix}…</code> · ${num(k.callCount)} calls`);
-    kb.add(sbtn(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("api", "revoke", k.id), "danger")).row();
+    kb.add(sbtn(`🗑 Revoke ${clip(k.name, 16)}`, cb("api", "revoke", k.id), "danger")).row();
   }
   navRow(kb, cb("api", "home"));
   return { text: lines.join("\n"), kb };
@@ -1011,7 +1023,7 @@ export async function resellerPricesView(user: BotUser): Promise<View> {
   for (const r of rows) {
     const shown = r.myPriceMinor ?? r.basePriceMinor;
     kb.text(
-      `${r.myPriceMinor !== null ? "⭐ " : ""}${withIcon(r.iconEmoji, r.name).slice(0, 28)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
+      `${r.myPriceMinor !== null ? "⭐ " : ""}${clip(withIcon(r.iconEmoji, r.name), 28)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
       cb("api", "setprice", r.productId),
     ).row();
   }
@@ -1226,7 +1238,7 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
       const unit = (it.unitTotal ?? 1) > 1 ? ` ${it.unitNumber}/${it.unitTotal}` : "";
       const tail = it.tail ? ` …${it.tail}` : "";
       const mark = it.replaced ? "🔄" : "🔑";
-      kb.text(`${mark} View${unit}${tail || ` ${it.productName.slice(0, 14)}`}`, cb("lic", "view", it.orderItemId)).row();
+      kb.text(`${mark} View${unit}${tail || ` ${clip(it.productName, 14)}`}`, cb("lic", "view", it.orderItemId)).row();
     }
     if (items.length > 1) kb.add(sbtn("📄 Get all keys", cb("ord", "reveal", orderId), "success")).row();
   }
@@ -1280,7 +1292,7 @@ export async function replaceSelectView(user: BotUser, orderId: string, selected
       kb.text(`${box} ${cover} Unit${unit}${tail}`, cb("rep", "tog", u.orderItemId)).row();
     } else {
       // Not selectable, but still shown — silence would look like a missing key.
-      kb.text(`🚫 Unit${unit}${tail} — ${(u.reason ?? "not eligible").slice(0, 22)}`, cb("mnu", "noop")).row();
+      kb.text(`🚫 Unit${unit}${tail} — ${clip(u.reason ?? "not eligible", 22)}`, cb("mnu", "noop")).row();
     }
   }
   if (pages > 1) {
@@ -1350,7 +1362,7 @@ export async function replaceListView(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   for (const i of items) {
     const tag = i.route === "claim" ? "🔄" : i.route === "blocked" ? "⌛" : (i.warranty ? "⏳" : "🚫");
-    kb.text(`${tag} ${i.label.slice(0, 28)} · ${i.orderNumber}`, cb("rep", "pick", i.orderItemId)).row();
+    kb.text(`${tag} ${clip(i.label, 28)} · ${i.orderNumber}`, cb("rep", "pick", i.orderItemId)).row();
   }
   backToMenuRow(kb);
   return {
@@ -1656,7 +1668,7 @@ export async function watchlistView(user: BotUser): Promise<View> {
   const rows = await listWatches(user.id);
   const kb = new InlineKeyboard();
   for (const w of rows) {
-    kb.text(`${w.type === "RESTOCK" ? "🔔" : "📉"} ${w.name.slice(0, 22)}`, cb("shp", "prod", w.productId)).row();
+    kb.text(`${w.type === "RESTOCK" ? "🔔" : "📉"} ${clip(w.name, 22)}`, cb("shp", "prod", w.productId)).row();
   }
   if (rows.length > 0) kb.add(sbtn("🧹 Clear all", cb("wch", "clear"), "danger")).row();
   navRow(kb, cb("prf", "view"));
@@ -1687,7 +1699,7 @@ export async function dealsView(user: BotUser): Promise<View> {
   for (const d of items) {
     const tag = d.tag === "SALE" ? "🔥" : d.tag === "NEW" ? "🆕" : "🔔";
     const price = d.fromPriceMinor === null ? "—" : fmt(d.fromPriceMinor, user.currency);
-    kb.add(sbtn(`${tag} ${withIcon(d.iconEmoji, d.name).slice(0, 24)} — ${price}`, cb("shp", "prod", d.id), d.tag === "SALE" ? "danger" : "success")).row();
+    kb.add(sbtn(`${tag} ${clip(withIcon(d.iconEmoji, d.name), 24)} — ${price}`, cb("shp", "prod", d.id), d.tag === "SALE" ? "danger" : "success")).row();
   }
   kb.add(sbtn("🛍 All products", cb("shp", "home", 1), "primary")).row();
   navRow(kb, cb("mnu", "home"));

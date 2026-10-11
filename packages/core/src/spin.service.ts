@@ -1,4 +1,5 @@
 import { prisma } from "@gis/database";
+import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { invalidate } from "./redis.js";
 import { adjustWallet } from "./wallet/wallet.service.js";
 import { enqueueTelegramMessage } from "./queues.js";
@@ -157,7 +158,9 @@ export async function claimChallenge(userId: string, challengeId: string): Promi
   const capped = Math.min(c.rewardMinor, rewardFor(c.targetMinor, REWARD_CAP_BP));
   const credit = walletCur === (c.currency as Currency) ? capped : convertMinor(capped, c.currency as Currency, walletCur);
 
-  await prisma.spinChallenge.update({ where: { id: c.id }, data: { status: "COMPLETED", claimedAt: new Date() } });
+  // Claim atomically: two taps used to both pass the ACTIVE check above.
+  const claimed = await prisma.spinChallenge.updateMany({ where: { id: c.id, status: "ACTIVE" }, data: { status: "COMPLETED", claimedAt: new Date() } });
+  if (claimed.count === 0) return { ok: false, reason: "ALREADY_CLAIMED" };
   await adjustWallet({
     userId,
     amountMinor: BigInt(credit),
@@ -170,7 +173,7 @@ export async function claimChallenge(userId: string, challengeId: string): Promi
   if (u?.telegramId) {
     await enqueueTelegramMessage(
       u.telegramId,
-      `🎉 <b>Challenge complete!</b>\n\n💰 <b>${(credit / 100).toFixed(2)}</b> has been added to your wallet.\n\nSpin again for a new challenge. 🎡`,
+      `🎉 <b>Challenge complete!</b>\n\n💰 <b>${formatMinor(credit, walletCur as CurrencyCode)}</b> has been added to your wallet.\n\nSpin again for a new challenge. 🎡`,
     ).catch(() => undefined);
   }
   return { ok: true, creditedMinor: credit };

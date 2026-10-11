@@ -170,6 +170,7 @@ export interface RevealedDelivery {
   payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string };
   /** True when this unit has been superseded — the value no longer works. */
   replaced?: boolean;
+  orderItemId?: string;
 }
 
 /**
@@ -210,6 +211,7 @@ export async function revealOrderDeliveries(userId: string, orderId: string): Pr
     variantName: i.variantNameSnap,
     payload: JSON.parse(decryptSecret(i.deliveryPayloadEncrypted as string, key)) as RevealedDelivery["payload"],
     replaced: i.replacedAt !== null,
+    orderItemId: i.id,
   }));
 }
 

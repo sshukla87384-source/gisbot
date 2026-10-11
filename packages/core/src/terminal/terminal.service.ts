@@ -2,7 +2,7 @@ import { prisma, type Currency } from "@gis/database";
 import { CoreError, formatMinor, isCoreError, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
 import { usdtToMinor } from "../fx.js";
-import { adjustWallet } from "../wallet/wallet.service.js";
+import { creditWalletTx, adjustWallet } from "../wallet/wallet.service.js";
 import { confirmManualPayment } from "../orders/manual-pay.service.js";
 import { clearChatClutter, clearPaymentPrompts } from "../orders/pay-prompt.service.js";
 import { EvmUsdtAdapter } from "./chains/evm.js";
@@ -283,9 +283,18 @@ async function settle(id: string): Promise<void> {
       // The order is gone (expired / cancelled) but the money is real: credit
       // the wallet with the USD value so nothing is lost, and tell both sides.
       const usd = Number(row.expectedUsd);
-      const cur = (user?.currency ?? "USD") as Currency;
+      // The WALLET's currency — crediting in the display currency mis-scaled it.
+      const lateWallet = await prisma.wallet.findUnique({ where: { userId: row.userId }, select: { currency: true } });
+      const cur = (lateWallet?.currency ?? user?.currency ?? "USD") as Currency;
       const minor = usdtToMinor(usd.toFixed(2), cur);
-      await adjustWallet({ userId: row.userId, amountMinor: BigInt(minor), type: "DEPOSIT", note: `Terminal payment after order closed (${label})`, idempotencyKey: `terminal-late:${row.id}` }).catch(() => undefined);
+      try {
+        await adjustWallet({ userId: row.userId, amountMinor: BigInt(minor), type: "DEPOSIT", note: `Terminal payment after order closed (${label})`, idempotencyKey: `terminal-late:${row.id}` });
+      } catch (err) {
+        if ((err as { code?: string })?.code !== "P2002") {
+          await enqueueAdminAlert(`🚨 Terminal payment ${label} arrived late for a closed order but the wallet credit FAILED: ${String(err instanceof Error ? err.message : err).slice(0, 120)}. Credit the customer by hand.`).catch(() => undefined);
+          return;
+        }
+      }
       if (user?.telegramId != null) {
         await enqueueTelegramMessage(
           user.telegramId,
@@ -298,12 +307,19 @@ async function settle(id: string): Promise<void> {
   } else {
     const topup = await prisma.walletTopup.findUnique({ where: { id: row.refId } });
     if (topup) {
-      const flipped = await prisma.walletTopup.updateMany({ where: { id: topup.id, status: "PENDING" }, data: { status: "CREDITED", creditedAt: new Date() } });
-      if (flipped.count > 0) {
-        const wallet = await prisma.wallet.findUnique({ where: { userId: topup.userId }, select: { currency: true } });
+      // Flip and credit in ONE transaction: a failed credit used to leave the
+      // top-up CREDITED with no money and nothing to retry it.
+      const done = await prisma.$transaction(async (tx) => {
+        const flipped = await tx.walletTopup.updateMany({ where: { id: topup.id, status: { in: ["PENDING", "EXPIRED"] } }, data: { status: "CREDITED", creditedAt: new Date() } });
+        if (flipped.count === 0) return null;
+        const wallet = await tx.wallet.findUnique({ where: { userId: topup.userId }, select: { currency: true } });
         const walletCur = (wallet?.currency ?? topup.currency) as Currency;
         const credit = walletCur === topup.currency ? topup.amountMinor : usdtToMinor(row.expectedUsd, walletCur);
-        const bal = await adjustWallet({ userId: topup.userId, amountMinor: BigInt(credit), type: "DEPOSIT", note: `Crypto deposit (${label})`, idempotencyKey: `terminal-topup:${row.id}` });
+        const r = await creditWalletTx(tx, { userId: topup.userId, amountMinor: BigInt(credit), type: "DEPOSIT", note: `Crypto deposit (${label})`, idempotencyKey: `terminal-topup:${row.id}` });
+        return { credit, walletCur, bal: r.balance };
+      });
+      if (done) {
+        const { credit, walletCur, bal } = done;
         if (user?.telegramId != null) {
           await enqueueTelegramMessage(
             user.telegramId,
@@ -353,6 +369,34 @@ export async function pollTerminalPayments(): Promise<number> {
   return advanced;
 }
 
+// ── Stranded partial payments ────────────────────────────────────────────────
+
+/** Credit the USD value of what landed on a slot that was never fully paid. Once per slot. */
+async function creditStrandedPayment(r: { id: string; chain: string; userId: string; receivedAmount: string | null; kind: string; refId: string }): Promise<void> {
+  const chain = terminalChain(r.chain);
+  if (!chain || !r.receivedAmount) return;
+  const amount = Number(r.receivedAmount);
+  if (!(amount > 0)) return;
+  const price = chain.stable ? 1 : await usdPrice(chain.priceId ?? "").catch(() => 0);
+  if (!(price > 0)) return; // no price → try again on the next pass
+  const usd = Math.floor(amount * price * 100) / 100;
+  if (usd < 0.01) return;
+  const wallet = await prisma.wallet.findUnique({ where: { userId: r.userId }, select: { currency: true } });
+  const cur = (wallet?.currency ?? "USD") as Currency;
+  const minor = usdtToMinor(usd.toFixed(2), cur);
+  try {
+    await adjustWallet({ userId: r.userId, amountMinor: BigInt(minor), type: "DEPOSIT", note: `Short crypto payment kept (${r.receivedAmount} ${chain.asset})`, idempotencyKey: `terminal-partial:${r.id}` });
+  } catch (e) {
+    if ((e as { code?: string })?.code === "P2002") return; // already credited on an earlier pass
+    throw e;
+  }
+  const u = await prisma.user.findUnique({ where: { id: r.userId }, select: { telegramId: true } });
+  if (u?.telegramId != null) {
+    await enqueueTelegramMessage(u.telegramId, `ℹ️ Your earlier ${chain.asset} payment arrived short and was never completed, so its value — <b>${formatMinor(minor, cur as CurrencyCode)}</b> — has been added to your 💳 Wallet. Nothing is lost. 🙏`).catch(() => undefined);
+  }
+  await enqueueAdminAlert(`ℹ️ Short terminal payment (${r.receivedAmount} ${chain.asset}, ${r.kind} ${r.refId.slice(-6)}) was never completed — credited ${formatMinor(minor, cur as CurrencyCode)} to the customer's wallet before sweeping.`).catch(() => undefined);
+}
+
 // ── Sweeping ─────────────────────────────────────────────────────────────────
 
 /**
@@ -387,6 +431,12 @@ export async function sweepTerminalPayments(limit = 10): Promise<number> {
   });
   let swept = 0;
   for (const r of rows) {
+    // A short payment that was never completed: the money is the customer's.
+    // Credit its value to their wallet BEFORE the funds leave the address
+    // (before, it was swept to the payout wallet and never credited at all).
+    if ((r.status === "PARTIAL" || r.status === "EXPIRED") && r.receivedAmount && r.receivedAmount !== "0") {
+      await creditStrandedPayment(r).catch(() => undefined);
+    }
     // Claim the row first: the worker's tick and an admin's "Sweep now" in
     // the bot process can overlap, and two full-balance transfers from one
     // address means the second one fails with the gas already spent.

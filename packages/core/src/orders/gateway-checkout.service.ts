@@ -1,3 +1,4 @@
+import { cancelStalePendingTx } from "./manual-pay.service.js";
 import { nextOrderNumber, prisma, type Currency, type PaymentProvider as PaymentProviderEnum } from "@gis/database";
 import { getProvider, type PaymentProviderId } from "@gis/payments";
 import { CoreError } from "@gis/shared";
@@ -49,56 +50,10 @@ export async function createGatewayCheckout(
       // the previous attempt (its reservations expire via TTL sweep).
       // Refund any wallet money on the order we are replacing.
       {
-        const stale = await tx.order.findMany({
-          where: { userId, status: "PENDING_PAYMENT", walletUsedMinor: { gt: 0 } },
-          select: { id: true, orderNumber: true, walletUsedMinor: true, currency: true },
-        });
-        for (const so of stale) {
-          // SELECT ... FOR UPDATE, not findUnique. This writes an ABSOLUTE
-          // balance; without the row lock a concurrent checkout or top-up reads
-          // the same figure and one of the two movements is silently lost.
-          const swRows = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
-            SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
-          const sw = swRows[0];
-          if (!sw) continue;
-          // walletUsedMinor is in the ORDER's currency; the wallet has its own.
-          // Refunding the raw number returned the wrong amount of money.
-          const backMinor = sw.currency === so.currency
-            ? so.walletUsedMinor
-            : convertMinor(so.walletUsedMinor, so.currency as Currency, sw.currency as Currency);
-          // The expiry cron may have refunded this same order already. The unique
-          // idempotency key would then throw and abort the customer's new
-          // checkout, so check first — the same guard cancelStalePendingTx has.
-          const done = await tx.walletTransaction.findUnique({
-            where: { idempotencyKey: `refund-cancel:${so.id}` },
-            select: { id: true },
-          });
-          if (!done) {
-            const back = sw.balanceMinor + BigInt(backMinor);
-            await tx.walletTransaction.create({
-              data: {
-                walletId: sw.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
-                currency: sw.currency, orderId: so.id, referenceNote: `cancelled ${so.orderNumber}`,
-                idempotencyKey: `refund-cancel:${so.id}`,
-              },
-            });
-            await tx.wallet.update({ where: { id: sw.id }, data: { balanceMinor: back } });
-          }
-          await tx.order.update({ where: { id: so.id }, data: { walletUsedMinor: 0 } });
-        }
+        // Closes every other unpaid order (status-guarded, under a row lock),
+        // refunding its wallet part and coupon. Paid-but-awaiting-approval ones stay.
+        await cancelStalePendingTx(tx, userId);
       }
-      // Collect the ids before the sweep: a coupon burned on the attempt we are
-      // cancelling has to be given back, and updateMany does not say which rows
-      // it touched.
-      const cancelling = await tx.order.findMany({
-        where: { userId, status: "PENDING_PAYMENT" },
-        select: { id: true },
-      });
-      await tx.order.updateMany({
-        where: { userId, status: "PENDING_PAYMENT" },
-        data: { status: "CANCELLED", cancelledAt: new Date() },
-      });
-      for (const co of cancelling) await releaseCouponForOrderTx(tx, co.id);
 
       const lines = await priceCart(tx, userId, user.currency);
       const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);

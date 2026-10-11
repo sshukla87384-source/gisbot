@@ -11,6 +11,7 @@ import {
   getPromoFlags,
   enqueueTelegramDelete,
   splitTelegramHtml,
+  capTelegramHtml,
   stripTelegramHtml,
   TELEGRAM_TEXT_MAX,
   ensureCryptoProvider,
@@ -118,7 +119,7 @@ async function main(): Promise<void> {
         // deleteAfterSec that only cleaned up the last one would leave the rest.
         const sentIds: number[] = [];
         if (job.data.document) {
-          const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
+          const caption = capTelegramHtml(job.data.text, 1024);
           const file = new InputFile(Buffer.from(job.data.document.content, "utf8"), job.data.document.filename);
           msg = await telegram.sendDocument(job.data.telegramId, file, { caption, parse_mode: "HTML", reply_markup });
         } else if (job.data.photo) {

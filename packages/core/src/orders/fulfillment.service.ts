@@ -1,5 +1,7 @@
 import { loadConfig } from "@gis/config";
-import { prisma } from "@gis/database";
+import { prisma, type Currency } from "@gis/database";
+import { convertMinor } from "../fx.js";
+import { adjustWallet } from "../wallet/wallet.service.js";
 import type { NormalizedPaymentEvent } from "@gis/payments";
 import { effectiveHours, encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
@@ -75,7 +77,7 @@ async function handleTopupEvent(eventId: string, topupId: string, normalized: No
       if (r.credited && owner?.telegramId != null) {
         await enqueueTelegramMessage(
           owner.telegramId,
-          `ℹ️ Your ${net?.asset ?? "crypto"} deposit arrived short (${normalized.crypto?.actuallyPaid ?? "?"} of ${normalized.crypto?.payAmount ?? "?"} ${(normalized.crypto?.payCurrency ?? "").toUpperCase()}), so that part has been credited. Nothing is lost — start a new deposit for the rest.`,
+          `ℹ️ Your ${net?.asset ?? "crypto"} deposit arrived short (${normalized.crypto?.actuallyPaid ?? "?"} of ${normalized.crypto?.payAmount ?? "?"} ${(normalized.crypto?.payCurrency ?? "").toUpperCase()}), so that part has been credited now. Send the rest to the <b>same address</b> and it is added automatically when it lands.`,
         ).catch(() => undefined);
       }
     }
@@ -161,6 +163,9 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
 
   const outcome = await prisma.$transaction(
     async (tx) => {
+      // Same lock expiry/cancel takes (closeUnpaidOrderTx): a payment and an
+      // expiry can never interleave on one order.
+      await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
       const order = await tx.order.findUnique({
         where: { id: orderId },
         include: {
@@ -171,6 +176,25 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       if (!order) return { kind: "skip" as const, note: "order missing" };
       if (["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK"].includes(order.status)) {
         return { kind: "skip" as const, note: "already processed" };
+      }
+      // Paid AFTER the order closed. Its wallet part (if any) was refunded at
+      // expiry/cancel, so delivering now would hand over the wallet part free.
+      // The money that arrived is credited to the wallet instead (below).
+      // REFUNDED was paid once already and refunded — a redelivered success
+      // event for it must not credit the money a second time.
+      if (order.status === "REFUNDED" || order.paidAt !== null) return { kind: "skip" as const, note: "already paid once" };
+      if (["EXPIRED", "CANCELLED"].includes(order.status)) {
+        const asked = normalized.providerRef
+          ? await tx.payment.findFirst({ where: { orderId: order.id, providerRef: normalized.providerRef }, select: { amountMinor: true, currency: true } })
+          : await tx.payment.findFirst({ where: { orderId: order.id }, orderBy: { createdAt: "desc" }, select: { amountMinor: true, currency: true } });
+        return {
+          kind: "late" as const,
+          userId: order.userId,
+          telegramId: order.user.telegramId,
+          orderNumber: order.orderNumber,
+          amountMinor: normalized.amountMinor ?? asked?.amountMinor ?? 0,
+          currency: (normalized.currency ?? asked?.currency ?? order.currency) as Currency,
+        };
       }
 
       // Amount + currency verification — mismatch never auto-fulfills. The
@@ -295,6 +319,9 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               kind: "DIGITAL_ACCOUNT",
               username: creds.username,
               password: creds.password,
+              // The 2FA secret was dropped here (and on the UPI/Binance rail),
+              // so accounts that need it arrived unusable.
+              ...(creds.twofa ? { twofa: creds.twofa } : {}),
               expiresAt: expiresAt?.toISOString(),
             };
             await tx.orderItem.update({
@@ -350,8 +377,11 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         where: { id: order.userId, firstPurchaseAt: null },
         data: { firstPurchaseAt: new Date() },
       });
+      // Only what THIS order bought. Payment can land minutes later (approval,
+      // on-chain confirmations), and wiping the whole cart threw away items the
+      // customer had added since.
       const cart = await tx.cart.findUnique({ where: { userId: order.userId } });
-      if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id, variantId: { in: [...new Set(order.items.map((i) => i.variantId))] } } });
 
       const finalStatus =
         awaitingStock > 0 ? "AWAITING_STOCK" : pendingManual > 0 ? "PENDING_FULFILLMENT" : "COMPLETED";
@@ -396,8 +426,29 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
     await clearPaymentPrompts(orderId).catch(() => undefined);
     await clearChatClutter(outcome.telegramId).catch(() => undefined);
   }
-  if (outcome.kind === "fulfilled" && before?.status === "EXPIRED") {
-    await enqueueAdminAlert(`ℹ️ ${before.orderNumber} was paid AFTER it expired and has been delivered. If part of it had been paid from the wallet, that part was refunded at expiry — check the customer's wallet.`).catch(() => undefined);
+  if (outcome.kind === "late") {
+    // Credit what arrived, in the wallet's own currency, exactly once per event.
+    const wallet = await prisma.wallet.findUnique({ where: { userId: outcome.userId }, select: { currency: true } });
+    const walletCur = (wallet?.currency ?? outcome.currency) as Currency;
+    const minor = outcome.currency === walletCur ? outcome.amountMinor : convertMinor(outcome.amountMinor, outcome.currency, walletCur);
+    if (minor > 0) {
+      await adjustWallet({
+        userId: outcome.userId,
+        amountMinor: BigInt(minor),
+        type: "DEPOSIT",
+        note: `payment after ${outcome.orderNumber} closed`,
+        idempotencyKey: `late:${orderId}:${normalized.providerRef ?? normalized.eventId}`,
+      }).catch((e) => { if (!(e && typeof e === "object" && (e as { code?: string }).code === "P2002")) throw e; });
+      if (outcome.telegramId !== null) {
+        await enqueueTelegramMessage(
+          outcome.telegramId,
+          `ℹ️ Your payment for order <b>${outcome.orderNumber}</b> arrived after the order had closed, so <b>${formatMinor(minor, walletCur as CurrencyCode)}</b> has been added to your 💳 Wallet. Place the order again and pay from the wallet instantly. 🙏`,
+        ).catch(() => undefined);
+      }
+      await enqueueAdminAlert(`ℹ️ Late payment on ${outcome.orderNumber} (order was already closed) — credited ${formatMinor(minor, walletCur as CurrencyCode)} to the customer's wallet instead of delivering.`).catch(() => undefined);
+    }
+    await markProcessed(eventId, "late payment credited to wallet").catch(() => undefined);
+    return;
   }
   if (outcome.kind === "mismatch") {
     await enqueueAdminAlert(`🚨 Amount mismatch on ${outcome.orderNumber} — order set to MANUAL_REVIEW`);

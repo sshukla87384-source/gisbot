@@ -254,10 +254,10 @@ export async function searchOrders(query: string, limit = 10): Promise<OrderSear
 }
 
 export async function adminCancelOrder(orderId: string): Promise<void> {
-  await prisma.order.updateMany({
-    where: { id: orderId, status: { in: ["PENDING_PAYMENT"] } },
-    data: { status: "CANCELLED", cancelledAt: new Date() },
-  });
+  // Refunds the wallet part and releases the coupon too — cancelling used to
+  // keep the customer's wallet money with the dead order forever.
+  const { closeUnpaidOrderTx } = await import("./orders/manual-pay.service.js");
+  await prisma.$transaction((tx) => closeUnpaidOrderTx(tx, orderId, "CANCELLED", "cancelled by admin"));
   // Nothing left to pay — take the instruction card out of the customer's chat.
   await clearPaymentPrompts(orderId).catch(() => undefined);
 }
@@ -269,12 +269,14 @@ export async function rejectManualOrder(orderId: string): Promise<{ ok: boolean;
     include: { user: { select: { telegramId: true } } },
   });
   if (!order || order.status !== "PENDING_PAYMENT") return { ok: false };
-  await prisma.order.update({ where: { id: orderId }, data: { status: "CANCELLED", cancelledAt: new Date() } });
+  const { closeUnpaidOrderTx } = await import("./orders/manual-pay.service.js");
+  const closed = await prisma.$transaction((tx) => closeUnpaidOrderTx(tx, orderId, "CANCELLED", "rejected"));
+  if (!closed) return { ok: false };
   await clearPaymentPrompts(orderId).catch(() => undefined);
   if (order.user.telegramId !== null) {
     await enqueueTelegramMessage(
       order.user.telegramId,
-      `❌ Payment for order <b>${order.orderNumber}</b> could not be verified and was rejected. If you did pay, contact 🎫 Support with your reference.`,
+      `❌ Payment for order <b>${order.orderNumber}</b> could not be verified and was rejected.${order.walletUsedMinor > 0 ? " The part paid from your wallet has been refunded." : ""} If you did pay, contact 🎫 Support with your reference.`,
     );
   }
   return { ok: true, orderNumber: order.orderNumber };
@@ -291,13 +293,20 @@ export async function adjustUserWallet(
     ? await prisma.user.findUnique({ where: { telegramId: BigInt(id) } })
     : await prisma.user.findFirst({ where: { telegramHandle: id } });
   if (!user) return { ok: false, reason: "USER_NOT_FOUND" };
-  const newBalanceMinor = await adjustWallet({
-    userId: user.id,
-    amountMinor: BigInt(amountMinor),
-    type: "ADJUSTMENT",
-    note: "admin adjustment (bot)",
-    actorId,
-  });
+  let newBalanceMinor: bigint;
+  try {
+    newBalanceMinor = await adjustWallet({
+      userId: user.id,
+      amountMinor: BigInt(amountMinor),
+      type: "ADJUSTMENT",
+      note: "admin adjustment (bot)",
+      actorId,
+      floorZero: true,
+    });
+  } catch (e) {
+    if ((e as { code?: string })?.code === "INSUFFICIENT_BALANCE") return { ok: false, reason: "INSUFFICIENT_BALANCE" };
+    throw e;
+  }
   const w = await prisma.wallet.findUnique({ where: { userId: user.id } });
   const currency = w?.currency ?? user.currency;
   if (user.telegramId !== null) {
@@ -1440,7 +1449,7 @@ export async function adjustUserWalletById(
   amountMinor: number,
   actorId?: string,
   opts: { note?: string; idempotencyKey?: string } = {},
-): Promise<{ ok: boolean; newBalanceMinor?: bigint; currency?: string; duplicate?: boolean }> {
+): Promise<{ ok: boolean; newBalanceMinor?: bigint; currency?: string; duplicate?: boolean; reason?: string }> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return { ok: false };
   // idempotencyKey is @unique on WalletTransaction, so passing "upi:<utr>" makes
@@ -1456,11 +1465,12 @@ export async function adjustUserWalletById(
   try {
     newBalanceMinor = await adjustWallet({
       userId, amountMinor: BigInt(amountMinor), type: "ADJUSTMENT",
-      note: opts.note ?? "admin adjustment (bot)", actorId, idempotencyKey: opts.idempotencyKey,
+      note: opts.note ?? "admin adjustment (bot)", actorId, idempotencyKey: opts.idempotencyKey, floorZero: true,
     });
   } catch (e) {
     // Lost the race to a concurrent approval of the same reference.
     if ((e as { code?: string })?.code === "P2002") return { ok: false, duplicate: true };
+    if ((e as { code?: string })?.code === "INSUFFICIENT_BALANCE") return { ok: false, reason: "INSUFFICIENT_BALANCE" };
     throw e;
   }
   const w = await prisma.wallet.findUnique({ where: { userId } });
@@ -1615,6 +1625,7 @@ export interface WalletHistoryRow {
   type: string;
   amountMinor: number;
   balanceAfterMinor: number;
+  currency: string;
   note: string | null;
   at: Date;
 }
@@ -1634,6 +1645,7 @@ export async function getUserWalletHistory(userId: string, limit = 12): Promise<
       type: t.type,
       amountMinor: Number(t.amountMinor),
       balanceAfterMinor: Number(t.balanceAfterMinor),
+      currency: t.currency,
       note: t.referenceNote,
       at: t.createdAt,
     })),

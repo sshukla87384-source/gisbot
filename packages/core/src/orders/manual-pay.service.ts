@@ -64,50 +64,64 @@ export interface UpiCheckoutResult {
 export type TxM = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 /**
- * Cancel any stale PENDING_PAYMENT orders, REFUNDING wallet money already
- * applied to them. Never silently keep a customer's balance for a dead order.
+ * Close ONE unpaid order — refund its wallet part, release its coupon, set the
+ * final status — under a lock on the order row, and only if it is STILL
+ * PENDING_PAYMENT when the lock is held. Every path that expires or cancels an
+ * order goes through here. Before, each read the order, then refunded and
+ * stamped the status without re-checking: a payment landing in between gave
+ * the customer the goods AND the wallet part back, with the paid order
+ * overwritten as EXPIRED.
+ */
+export async function closeUnpaidOrderTx(tx: TxM, orderId: string, status: "EXPIRED" | "CANCELLED", note: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<Array<{ id: string; userId: string; status: string; walletUsedMinor: number; currency: Currency; orderNumber: string }>>`
+    SELECT "id", "userId", "status", "walletUsedMinor", "currency", "orderNumber" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
+  const o = rows[0];
+  if (!o || o.status !== "PENDING_PAYMENT") return false;
+  if (o.walletUsedMinor > 0) {
+    const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+      SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${o.userId} FOR UPDATE`;
+    const w = locked[0];
+    const done = await tx.walletTransaction.findUnique({ where: { idempotencyKey: `refund-cancel:${o.id}` }, select: { id: true } });
+    if (w && !done) {
+      // walletUsedMinor is in the ORDER's currency; the wallet has its own.
+      const backMinor = w.currency === o.currency ? o.walletUsedMinor : convertMinor(o.walletUsedMinor, o.currency, w.currency);
+      const back = w.balanceMinor + BigInt(backMinor);
+      await tx.walletTransaction.create({
+        data: {
+          walletId: w.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
+          currency: w.currency, orderId: o.id, referenceNote: `${note} ${o.orderNumber}`, idempotencyKey: `refund-cancel:${o.id}`,
+        },
+      });
+      await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
+    }
+  }
+  const r = await tx.order.updateMany({
+    where: { id: o.id, status: "PENDING_PAYMENT" },
+    data: { status, walletUsedMinor: 0, ...(status === "CANCELLED" ? { cancelledAt: new Date() } : {}) },
+  });
+  // The coupon was spent when this order was created; an unpaid order gives it back.
+  if (r.count > 0) await releaseCouponForOrderTx(tx, o.id);
+  return r.count > 0;
+}
+
+/**
+ * Cancel the customer's other unpaid orders before a new checkout, refunding
+ * wallet money already applied to them. An order whose payment reference
+ * (UPI UTR / Binance txn) was already submitted is left alone: the customer
+ * has paid it and it is waiting for approval.
  */
 export async function cancelStalePendingTx(tx: TxM, userId: string): Promise<void> {
   const stale = await tx.order.findMany({
-    where: { userId, status: "PENDING_PAYMENT" },
-    select: { id: true, orderNumber: true, walletUsedMinor: true, currency: true },
+    // Crypto orders carry their gateway payment id ("np:"/"tm:") from the
+    // start — that is not a submitted reference, so they are replaced as before.
+    where: {
+      userId,
+      status: "PENDING_PAYMENT",
+      OR: [{ binanceTxnId: null }, { binanceTxnId: { startsWith: "np:" } }, { binanceTxnId: { startsWith: "tm:" } }],
+    },
+    select: { id: true },
   });
-  for (const o of stale) {
-    if (o.walletUsedMinor && o.walletUsedMinor > 0) {
-      // Locked read: this writes an absolute balance (see applyWalletTx).
-      const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
-        SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
-      const w = locked[0];
-      if (w) {
-        // walletUsedMinor is in the ORDER's currency; the wallet has its own.
-        // Refunding the raw number returned the wrong amount of money.
-        const backMinor = w.currency === o.currency
-          ? o.walletUsedMinor
-          : convertMinor(o.walletUsedMinor, o.currency as Currency, w.currency as Currency);
-        // The expiry cron may have refunded this same order already. The unique
-        // key would throw and abort the customer's new checkout, so check first.
-        const done = await tx.walletTransaction.findUnique({
-          where: { idempotencyKey: `refund-cancel:${o.id}` },
-          select: { id: true },
-        });
-        if (!done) {
-          const back = w.balanceMinor + BigInt(backMinor);
-          await tx.walletTransaction.create({
-            data: {
-              walletId: w.id, type: "REFUND", amountMinor: BigInt(backMinor),
-              balanceAfterMinor: back, currency: w.currency, orderId: o.id,
-              referenceNote: `cancelled ${o.orderNumber}`, idempotencyKey: `refund-cancel:${o.id}`,
-            },
-          });
-          await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
-        }
-      }
-    }
-    await tx.order.update({ where: { id: o.id }, data: { status: "CANCELLED", cancelledAt: new Date(), walletUsedMinor: 0 } });
-    // The coupon was spent when this dead order was created. Wallet money is
-    // refunded above; the coupon is money too, and it was never given back.
-    await releaseCouponForOrderTx(tx, o.id);
-  }
+  for (const o of stale) await closeUnpaidOrderTx(tx, o.id, "CANCELLED", "cancelled");
 }
 
 /**
@@ -165,6 +179,10 @@ export async function applyWalletTx(
     }
   }
   if (use <= 0) return { walletUsed: 0, owed: totalMinor };
+  // The wallet covers everything: there is nothing left for UPI/Binance/crypto
+  // to collect, and a "pay ₹0" card could never be settled. The whole
+  // transaction (order included) rolls back; the bot offers the wallet button.
+  if (use >= totalMinor) throw new CoreError("VALIDATION_FAILED", "WALLET_COVERS_ORDER");
   // Debit amount expressed in the WALLET's currency.
   const debitWalletCur = w.currency === orderCur ? use : convertMinor(use, orderCur, w.currency as Currency);
   const debit = Math.min(debitWalletCur, Number(w.balanceMinor));
@@ -231,12 +249,16 @@ export async function createUpiManualCheckout(userId: string, opts: { useWallet?
   return { ...created, currency: user.currency, upiId, payeeName: cfg.UPI_PAYEE_NAME ?? null };
 }
 
-export async function createBinanceManualCheckout(userId: string, opts: { useWallet?: boolean } = {}): Promise<BinanceCheckoutResult> {
+export async function createBinanceManualCheckout(userId: string, opts: { useWallet?: boolean; currency?: Currency } = {}): Promise<BinanceCheckoutResult> {
   const cfg = loadConfig();
   const uid = cfg.BINANCE_PAY_UID;
   if (!uid) throw new CoreError("VALIDATION_FAILED", "Binance Pay is not configured");
 
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  // Binance is priced in USD. The bot used to switch the CUSTOMER to USD for
+  // this — which also converted their whole wallet (and its rounding) behind
+  // their back. Price this one order in the requested currency instead.
+  const cur: Currency = opts.currency ?? (user.currency as Currency);
   // Binance sessions are short on purpose: the shorter the window, the smaller
   // the pool of live orders a stray credit could ever be matched against.
   // UPI keeps its longer window because it is verified by hand.
@@ -244,19 +266,19 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
 
   const created = await prisma.$transaction(async (tx) => {
     await cancelStalePendingTx(tx, userId);
-    const lines = await priceCart(tx, userId, user.currency);
+    const lines = await priceCart(tx, userId, cur);
     const subtotalMinor = lines.reduce((s, l) => s + l.unitPriceMinor * l.quantity, 0);
-    const coupon = await resolveCartCouponTx(tx, userId, user.currency, subtotalMinor, couponLines(lines));
+    const coupon = await resolveCartCouponTx(tx, userId, cur, subtotalMinor, couponLines(lines));
     const discountMinor = coupon?.discountMinor ?? 0;
     const totalMinor = Math.max(0, subtotalMinor - discountMinor);
-    const usdt = toUsdtAmount(totalMinor, user.currency);
+    const usdt = toUsdtAmount(totalMinor, cur);
     const orderNumber = await nextOrderNumber(tx);
     const order = await tx.order.create({
       data: {
         orderNumber,
         userId,
         status: "PENDING_PAYMENT",
-        currency: user.currency,
+        currency: cur,
         subtotalMinor,
         discountMinor,
         couponId: coupon?.couponId ?? null,
@@ -292,18 +314,18 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
         action: "order.checkout.binance_manual",
         entityType: "Order",
         entityId: order.id,
-        after: { orderNumber, totalMinor, currency: user.currency },
+        after: { orderNumber, totalMinor, currency: cur },
       },
     });
     if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
     // Wallet first when asked; the USDT amount must reflect only what is owed.
     const applied = opts.useWallet
-      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor, { alignToUsdtCent: user.currency, orderCurrency: user.currency })
+      ? await applyWalletTx(tx, userId, order.id, orderNumber, totalMinor, { alignToUsdtCent: cur, orderCurrency: cur })
       : { walletUsed: 0, owed: totalMinor };
-    const owedUsdt = applied.walletUsed > 0 ? toUsdtAmount(applied.owed, user.currency) : usdt;
+    const owedUsdt = applied.walletUsed > 0 ? toUsdtAmount(applied.owed, cur) : usdt;
     // The 2dp USDT quote is what the customer actually sends and what the
     // verifier compares against, so record that exact value as the amount owed.
-    const owedRecorded = usdtToMinor(owedUsdt, user.currency);
+    const owedRecorded = usdtToMinor(owedUsdt, cur);
     await tx.order.update({
       where: { id: order.id },
       data: { binanceAmount: owedUsdt, totalMinor: owedRecorded },
@@ -315,9 +337,9 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
   });
 
   await enqueueAdminAlert(
-    `🟡 New Binance order ${created.orderNumber} — ${formatMinor(created.totalMinor, user.currency as CurrencyCode)} (= ${created.binanceAmount} USDT). Auto-confirms when payment arrives; otherwise verify UID ${uid} and confirm in the panel.`,
+    `🟡 New Binance order ${created.orderNumber} — ${formatMinor(created.totalMinor, cur as CurrencyCode)} (= ${created.binanceAmount} USDT). Auto-confirms when payment arrives; otherwise verify UID ${uid} and confirm in the panel.`,
   );
-  return { ...created, currency: user.currency, binanceUid: uid, binanceAsset: "USDT" };
+  return { ...created, currency: cur, binanceUid: uid, binanceAsset: "USDT" };
 }
 
 /**
@@ -329,6 +351,9 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
 
   const outcome = await prisma.$transaction(
     async (tx) => {
+      // Lock first: expiry/cancel takes the same lock, so an order can never be
+      // refunded-and-expired while it is being confirmed, or the reverse.
+      await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
       const order = await tx.order.findUnique({
         where: { id: orderId },
         include: { user: true, items: { include: { variant: { include: { product: true } } } } },
@@ -398,7 +423,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
             const expiresAt = deliveryExpiry(creds.expiresAt, effectiveHours(item.variant.durationHours, item.variant.durationDays));
-            const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, expiresAt: expiresAt?.toISOString() };
+            const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, ...(creds.twofa ? { twofa: creds.twofa } : {}), expiresAt: expiresAt?.toISOString() };
             await tx.orderItem.update({
               where: { id: item.id },
               data: {
@@ -442,8 +467,11 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         isFirst: order.user.firstPurchaseAt === null,
       });
       await tx.user.updateMany({ where: { id: order.userId, firstPurchaseAt: null }, data: { firstPurchaseAt: new Date() } });
+      // Only what THIS order bought. Payment can land minutes later (approval,
+      // on-chain confirmations), and wiping the whole cart threw away items the
+      // customer had added since.
       const cart = await tx.cart.findUnique({ where: { userId: order.userId } });
-      if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      if (cart) await tx.cartItem.deleteMany({ where: { cartId: cart.id, variantId: { in: [...new Set(order.items.map((i) => i.variantId))] } } });
 
       const finalStatus = awaitingStock > 0 ? "AWAITING_STOCK" : pendingManual > 0 ? "PENDING_FULFILLMENT" : "COMPLETED";
       await tx.order.update({ where: { id: order.id }, data: { status: finalStatus, ...(finalStatus === "COMPLETED" ? { completedAt: new Date() } : {}) } });

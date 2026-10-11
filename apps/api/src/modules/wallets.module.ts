@@ -1,4 +1,4 @@
-import { adjustWallet } from "@gis/core";
+import { adjustWallet, convertMinorExact } from "@gis/core";
 import { prisma } from "@gis/database";
 import { Body, Controller, Get, Module, Param, Post, Query, Req } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
@@ -39,6 +39,7 @@ export class WalletsController {
       type: t.type,
       amountMinor: t.amountMinor.toString(),
       balanceAfterMinor: t.balanceAfterMinor.toString(),
+      currency: t.currency,
       note: t.referenceNote,
       createdAt: t.createdAt,
     }));
@@ -87,16 +88,29 @@ export class WalletsController {
     const w = await prisma.withdrawalRequest.findUnique({ where: { id }, include: { wallet: true } });
     if (!w) throw notFound("Withdrawal");
     if (w.status !== "PENDING") throw conflict("BAD_STATE", "Only pending withdrawals can be approved.");
-    // Debit the wallet ledger, idempotent by request id.
-    await adjustWallet({
-      userId: w.wallet.userId,
-      amountMinor: -w.amountMinor,
-      type: "WITHDRAWAL",
-      note: `withdrawal ${id}`,
-      actorId: req.user!.id,
-      idempotencyKey: `wd:${id}`,
-    });
-    await prisma.withdrawalRequest.update({ where: { id }, data: { status: "APPROVED", reviewedById: req.user!.id } });
+    // Claim it first, so two reviewers clicking at once cannot both debit.
+    const claimed = await prisma.withdrawalRequest.updateMany({ where: { id, status: "PENDING" }, data: { status: "APPROVED", reviewedById: req.user!.id } });
+    if (claimed.count === 0) throw conflict("BAD_STATE", "Only pending withdrawals can be approved.");
+    // The request is in the currency it was made in; the wallet may have
+    // switched INR↔USD since — debit the equivalent in the wallet's currency.
+    const debit = w.currency === w.wallet.currency
+      ? w.amountMinor
+      : BigInt(Math.ceil(convertMinorExact(Number(w.amountMinor), w.currency, w.wallet.currency)));
+    try {
+      await adjustWallet({
+        userId: w.wallet.userId,
+        amountMinor: -debit,
+        type: "WITHDRAWAL",
+        note: `withdrawal ${id}`,
+        actorId: req.user!.id,
+        idempotencyKey: `wd:${id}`,
+      });
+    } catch (e) {
+      if ((e as { code?: string })?.code === "P2002") return { ok: true }; // already debited
+      await prisma.withdrawalRequest.updateMany({ where: { id, status: "APPROVED" }, data: { status: "PENDING", reviewedById: null } });
+      if ((e as { code?: string })?.code === "INSUFFICIENT_BALANCE") throw conflict("INSUFFICIENT_BALANCE", "The wallet no longer holds enough for this withdrawal.");
+      throw e;
+    }
     await writeAudit(req, "withdrawal.approve", "WithdrawalRequest", id);
     return { ok: true };
   }

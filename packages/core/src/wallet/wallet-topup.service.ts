@@ -49,7 +49,7 @@ export async function createWalletTopup(userId: string, amountMinor: number): Pr
 
 export type TopupVerify =
   | { ok: true; newBalanceMinor: bigint; amountMinor: number; currency: string }
-  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "NOT_PENDING" | "WRONG_USER" | "DAILY_LIMIT" };
+  | { ok: false; reason: "NOT_FOUND" | "AMOUNT_MISMATCH" | "ALREADY_USED" | "NO_API" | "NOT_PENDING" | "WRONG_USER" | "DAILY_LIMIT" | "TOO_OLD" };
 
 /**
  * Free-amount deposits have no ownership guard by design — whoever quotes a
@@ -164,6 +164,24 @@ export async function verifyTopupByTxn(topupId: string, txnId: string, expectedU
  * submits their Binance Order ID. We look it up, read the ACTUAL amount paid,
  * convert to the user's wallet currency, and credit it. Dedup by transaction.
  */
+const FREE_INTENT_KEY = (userId: string) => `freedep:intent:${userId}`;
+const FREE_INTENT_TTL_SEC = 6 * 3600;
+const NOT_A_PAYMENT_RE = /refund|reversal|revoke|cancel|payout|withdraw/i;
+
+/**
+ * Record that the customer opened the Binance deposit instructions. Only a
+ * transfer made AFTER this moment can fund their wallet — without it, any old
+ * incoming payment (one that already paid an order an admin approved by hand)
+ * could be pasted in and credited a second time.
+ */
+export async function noteFreeTopupIntent(userId: string): Promise<void> {
+  try {
+    const r = getRedis();
+    // Keep the EARLIEST open intent, so re-opening the screen does not shorten it.
+    await r.set(FREE_INTENT_KEY(userId), String(Date.now()), "EX", FREE_INTENT_TTL_SEC, "NX");
+  } catch { /* best effort — no intent simply means no claim */ }
+}
+
 export async function creditFreeTopup(userId: string, txnId: string): Promise<TopupVerify> {
   const cfg = loadConfig();
   const creds = await getBinanceCreds();
@@ -186,6 +204,16 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
   }
   const txn = txns.find((t) => String(t.transactionId) === clean || String(t.orderId ?? "") === clean);
   if (!txn || txn.currency !== "USDT" || Math.abs(parseFloat(txn.amount)) <= 0) return { ok: false, reason: "NOT_FOUND" };
+  // Refunds / reversals / payouts are never deposits.
+  if (NOT_A_PAYMENT_RE.test(String((txn as { orderType?: string }).orderType ?? ""))) return { ok: false, reason: "NOT_FOUND" };
+  // Fresh transfers only: made after the customer opened the deposit screen
+  // (2 min clock skew) and within the intent's lifetime.
+  const txnTime = Number((txn as { transactionTime?: number | string }).transactionTime);
+  let intentAt = 0;
+  try { intentAt = Number(await getRedis().get(FREE_INTENT_KEY(userId))) || 0; } catch { intentAt = 0; }
+  if (!Number.isFinite(txnTime) || txnTime <= 0 || !intentAt || txnTime < intentAt - 2 * 60_000 || Date.now() - txnTime > FREE_INTENT_TTL_SEC * 1000) {
+    return { ok: false, reason: "TOO_OLD" };
+  }
 
   // Only INCOMING credits may fund a wallet. Math.abs() previously let a
   // customer paste an OUTGOING payout id and get credited for it.
@@ -214,13 +242,19 @@ export async function creditFreeTopup(userId: string, txnId: string): Promise<To
     ? Math.round(usdt * 100)
     : Math.round(usdt * usdtRate("INR") * 100);
 
-  const topup = await prisma.walletTopup.create({
-    data: {
-      userId, amountMinor: creditMinor, currency: walletCur, binanceAsset: "USDT",
-      binanceAmount: usdt.toFixed(2), binanceTxnId: ref, status: "CREDITED",
-      creditedAt: new Date(), expiresAt: new Date(),
-    },
-  });
+  try {
+    await prisma.walletTopup.create({
+      data: {
+        userId, amountMinor: creditMinor, currency: walletCur, binanceAsset: "USDT",
+        binanceAmount: usdt.toFixed(2), binanceTxnId: ref, status: "CREDITED",
+        creditedAt: new Date(), expiresAt: new Date(),
+      },
+    });
+  } catch (e) {
+    // Two submissions of the same id at once: the unique txn id decides.
+    if ((e as { code?: string })?.code === "P2002") return { ok: false, reason: "ALREADY_USED" };
+    throw e;
+  }
   const newBalanceMinor = await adjustWallet({
     userId, amountMinor: BigInt(creditMinor), type: "DEPOSIT",
     // Key on the TRANSACTION, so two concurrent submissions of the same

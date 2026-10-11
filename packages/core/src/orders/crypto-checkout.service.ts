@@ -5,10 +5,10 @@ import { CoreError, decryptSecret, encryptSecret, formatMinor, type CurrencyCode
 import { enqueueAdminAlert, enqueueFulfillment, enqueueTelegramMessage } from "../queues.js";
 import { getRedis } from "../redis.js";
 import { toUsdtCharge, usdtToMinor } from "../fx.js";
-import { adjustWallet } from "../wallet/wallet.service.js";
+import { creditWalletTx, adjustWallet } from "../wallet/wallet.service.js";
 import { couponLines, priceCart } from "./assign.js";
 import { recordCouponUseTx, releaseCouponForOrderTx, resolveCartCouponTx } from "./coupon.service.js";
-import { applyWalletTx, cancelStalePendingTx } from "./manual-pay.service.js";
+import { applyWalletTx, cancelStalePendingTx, closeUnpaidOrderTx } from "./manual-pay.service.js";
 import { clearChatClutter, clearPaymentPrompts } from "./pay-prompt.service.js";
 import { allocateTerminalPayment, checkTerminalPayment, terminalActiveChains, terminalChain, terminalHandles, terminalPaymentFor } from "../terminal/terminal.service.js";
 
@@ -512,39 +512,63 @@ export async function createCryptoTopup(userId: string, amountMinor: number, net
 }
 
 /**
- * Credit a crypto top-up exactly once. `creditMinor` overrides the amount for
- * a partial payment (what actually arrived, in the user's currency).
+ * Credit a crypto top-up, incrementally and exactly once per amount.
+ *
+ * `creditMinor` is the share that has arrived so far (a partial payment), in
+ * the top-up's currency; omitted = the whole quoted amount (finished). Each
+ * call credits only the DIFFERENCE from what was already credited, so a short
+ * payment is credited now and the remainder when it lands. Before, the first
+ * partial flipped the top-up to CREDITED and everything sent after it was lost.
+ * The flip and the wallet credit happen in ONE transaction, under a lock on
+ * the top-up row — never a CREDITED row without the money.
  */
 export async function creditCryptoTopup(topupId: string, creditMinor?: number): Promise<{ credited: boolean; amountMinor: number; newBalanceMinor: bigint | null }> {
-  const topup = await prisma.walletTopup.findUnique({ where: { id: topupId } });
-  if (!topup) return { credited: false, amountMinor: 0, newBalanceMinor: null };
-  const amount = Math.max(1, Math.round(creditMinor ?? topup.amountMinor));
-  // The status flip is the lock: whichever of the IPN and the poll gets here
-  // first credits, the other sees 0 rows and stops.
-  const flipped = await prisma.walletTopup.updateMany({
-    where: { id: topupId, status: "PENDING" },
-    data: { status: "CREDITED", creditedAt: new Date(), amountMinor: amount },
+  const final = creditMinor === undefined;
+  const res = await prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ id: string; userId: string; status: string; amountMinor: number; currency: Currency; binanceAsset: string }>>`
+      SELECT "id", "userId", "status", "amountMinor", "currency", "binanceAsset" FROM "WalletTopup" WHERE "id" = ${topupId} FOR UPDATE`;
+    const t = rows[0];
+    // A late "finished" after the window closed still counts; CREDITED is final.
+    if (!t || (t.status !== "PENDING" && t.status !== "EXPIRED")) return null;
+    const quoted = t.amountMinor;
+    const target = Math.min(quoted, Math.max(1, Math.round(creditMinor ?? quoted)));
+    // How much (in the top-up's currency) earlier partials already credited.
+    const prior = await tx.walletTransaction.findMany({ where: { idempotencyKey: { startsWith: `cryptotopup:${topupId}:p` } }, select: { idempotencyKey: true } });
+    const soFar = prior.reduce((m, r) => Math.max(m, Number((r.idempotencyKey ?? "").split(":p")[1] ?? 0) || 0), 0);
+    const delta = target - soFar;
+    let credited = 0;
+    let balance: bigint | null = null;
+    let walletCur = t.currency;
+    if (delta > 0) {
+      const w = await tx.wallet.findUnique({ where: { userId: t.userId }, select: { currency: true } });
+      walletCur = (w?.currency ?? t.currency) as Currency;
+      // The top-up was quoted in the USER's currency; the wallet may hold another.
+      credited = walletCur === t.currency ? delta : usdtToMinor(toUsdtCharge(delta, t.currency), walletCur);
+      const net = cryptoNetwork(t.binanceAsset.replace(/^np:/, ""));
+      const r = await creditWalletTx(tx, {
+        userId: t.userId, amountMinor: BigInt(credited), type: "DEPOSIT",
+        note: `Crypto deposit (${net?.label ?? t.binanceAsset})${final ? "" : " — partial"}`,
+        idempotencyKey: final ? `cryptotopup:${topupId}` : `cryptotopup:${topupId}:p${target}`,
+      });
+      balance = r.balance;
+    }
+    if (final || target >= quoted) {
+      await tx.walletTopup.update({ where: { id: topupId }, data: { status: "CREDITED", creditedAt: new Date() } });
+    }
+    return { userId: t.userId, credited, balance, walletCur, asset: t.binanceAsset };
   });
-  if (flipped.count === 0) return { credited: false, amountMinor: 0, newBalanceMinor: null };
-  const user = await prisma.user.findUnique({ where: { id: topup.userId }, select: { telegramId: true, currency: true } });
-  const wallet = await prisma.wallet.findUnique({ where: { userId: topup.userId }, select: { currency: true } });
-  // The top-up was quoted in the USER's currency; the wallet may hold another.
-  const walletCur = (wallet?.currency ?? topup.currency) as Currency;
-  const credit = walletCur === topup.currency ? amount : usdtToMinor(toUsdtCharge(amount, topup.currency as Currency), walletCur);
-  const net = cryptoNetwork(topup.binanceAsset.replace(/^np:/, ""));
-  const newBalance = await adjustWallet({
-    userId: topup.userId, amountMinor: BigInt(credit), type: "DEPOSIT",
-    note: `Crypto deposit (${net?.label ?? topup.binanceAsset})`, idempotencyKey: `cryptotopup:${topupId}`,
-  });
-  if (user?.telegramId != null) {
+  if (!res || res.credited <= 0) return { credited: false, amountMinor: 0, newBalanceMinor: res?.balance ?? null };
+  const user = await prisma.user.findUnique({ where: { id: res.userId }, select: { telegramId: true } });
+  const net = cryptoNetwork(res.asset.replace(/^np:/, ""));
+  if (user?.telegramId != null && final) {
     await enqueueTelegramMessage(
       user.telegramId,
-      `✅ <b>Wallet topped up!</b>\n\n💰 ${formatMinor(credit, walletCur as CurrencyCode)} added via ${net?.label ?? "crypto"}.\nNew balance: <b>${formatMinor(Number(newBalance), walletCur as CurrencyCode)}</b>. You can pay for any order instantly now. 🚀`,
+      `✅ <b>Wallet topped up!</b>\n\n💰 ${formatMinor(res.credited, res.walletCur as CurrencyCode)} added via ${net?.label ?? "crypto"}.\nNew balance: <b>${formatMinor(Number(res.balance ?? 0n), res.walletCur as CurrencyCode)}</b>. You can pay for any order instantly now. 🚀`,
     ).catch(() => undefined);
     await clearChatClutter(user.telegramId).catch(() => undefined);
   }
-  await enqueueAdminAlert(`💰 Crypto top-up credited: ${formatMinor(credit, walletCur as CurrencyCode)} to user ${topup.userId} (${net?.label ?? topup.binanceAsset}).`).catch(() => undefined);
-  return { credited: true, amountMinor: credit, newBalanceMinor: newBalance };
+  await enqueueAdminAlert(`💰 Crypto top-up credited${final ? "" : " (partial)"}: ${formatMinor(res.credited, res.walletCur as CurrencyCode)} to user ${res.userId} (${net?.label ?? res.asset}).`).catch(() => undefined);
+  return { credited: true, amountMinor: res.credited, newBalanceMinor: res.balance };
 }
 
 /** `order_id` of a top-up payment → the WalletTopup id, else null. */
@@ -701,9 +725,14 @@ export async function checkCryptoPayment(kind: "order" | "topup", refId: string,
 
 /** Customer cancels before paying: close the order, refund wallet money, drop the card. */
 export async function cancelCryptoOrder(orderId: string, userId: string): Promise<boolean> {
-  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { userId: true, status: true } });
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { userId: true, status: true, binanceTxnId: true } });
   if (!order || order.userId !== userId || order.status !== "PENDING_PAYMENT") return false;
-  await prisma.$transaction(async (tx) => { await cancelStalePendingTx(tx, userId); });
+  // Also used for UPI / Binance cards: once a payment reference was submitted
+  // the order is paid-awaiting-approval and a "Cancel" tap must not close it.
+  if (order.binanceTxnId && !/^(np|tm):/.test(order.binanceTxnId)) return false;
+  // Only THIS order — under its row lock, refunding its wallet part and coupon.
+  const closed = await prisma.$transaction((tx) => closeUnpaidOrderTx(tx, orderId, "CANCELLED", "cancelled"));
+  if (!closed) return false;
   await prisma.payment.updateMany({ where: { orderId, status: { in: ["CREATED", "PENDING"] } }, data: { status: "FAILED", failureReason: "cancelled by customer" } });
   await clearPaymentPrompts(orderId).catch(() => undefined);
   try { await getRedis().del(cardKey("order", orderId)); } catch { /* fine */ }

@@ -135,6 +135,7 @@ import {
   scheduleBroadcast,
   setFlashSale,
   setProductImage,
+  getWallet as getWalletSummary,
   setCustomEmojiEntries,
   findWalletMismatches,
   repairWalletLedger,
@@ -1679,7 +1680,7 @@ async function walletHistoryView(ctx: Ctx, userId: string): Promise<void> {
   if (h.rows.length === 0) lines.push("<i>No wallet activity yet.</i>");
   for (const r of h.rows) {
     const when = r.at.toISOString().slice(0, 16).replace("T", " ");
-    lines.push(`${r.amountMinor >= 0 ? "🟢" : "🔴"} <b>${sign(r.amountMinor)}</b> · ${r.type} · ${when}${r.note ? `\n   <i>${escapeHtml(r.note)}</i>` : ""}`);
+    lines.push(`${r.amountMinor >= 0 ? "🟢" : "🔴"} <b>${sign(r.amountMinor)} ${r.currency}</b> · ${r.type} · ${when}${r.note ? `\n   <i>${escapeHtml(r.note)}</i>` : ""}`);
   }
   const kb = new InlineKeyboard()
     .add(sbtn("➕ Add", cb("adm", "uadd", userId), "success"), sbtn("➖ Deduct", cb("adm", "udeduct", userId), "danger")).row()
@@ -3115,7 +3116,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, `🎁 Send the new <b>${id === "repeat" ? "repeat" : "first-purchase"}</b> referral reward percentage (e.g. <code>${id === "repeat" ? "2" : "5"}</code>). Send <code>0</code> to disable.`);
       return;
     case "refund": {
-      const r = await adminRefundOrder(id, String(ctx.from?.id ?? ""));
+      const r = await adminRefundOrder(id, ctx.user.id); // a User.id: it lands in AuditLog.actorId (FK)
       if (r.ok) await ctx.reply(r.refundedMinor ? `↩️ Refunded ${fmt(r.refundedMinor, r.currency ?? "USD")} to the customer's wallet.` : "↩️ Order marked refunded (nothing was paid).");
       else await ctx.reply(r.reason === "ALREADY" ? "Already refunded/cancelled." : "Order not found.");
       return orderView(ctx, id);
@@ -4024,9 +4025,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const usdMinor = claim?.usdMinor ?? Number.parseInt(legacy[2] ?? "0", 10);
       const utr = claim?.utr;
       if (!uid || !Number.isFinite(usdMinor) || usdMinor <= 0) { await ctx.reply("That top-up request has expired or is invalid. Ask the customer to resend the UTR."); return; }
+      // Credit in the WALLET's currency. UPI top-up is offered to INR customers,
+      // whose wallets are INR — crediting the USD figure there gave ₹5 for ₹500.
+      const wcur = ((await getWalletSummary(uid).catch(() => null))?.currency ?? "USD") as "USD" | "INR";
+      const creditMinor = wcur === "INR" ? inrMinor : usdMinor;
       // idempotencyKey is @unique, so a second tap — or a redelivered callback —
       // cannot credit the same UPI payment twice.
-      const res = await adjustUserWalletById(uid, usdMinor, `UPI top-up approved (₹${(inrMinor / 100).toFixed(2)})`, {
+      const res = await adjustUserWalletById(uid, creditMinor, ctx.user.id, {
         note: `UPI top-up ₹${(inrMinor / 100).toFixed(2)}${utr ? ` · UTR ${utr}` : ""}`,
         idempotencyKey: utr ? upiUtrKey(utr) : undefined,
       });
@@ -4041,16 +4046,16 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         if (tu) {
           await notifyTopupToAdmins(
             { telegramHandle: null, firstName: tu.label, telegramId: tu.telegramId ? BigInt(tu.telegramId) : null, currency: tu.currency },
-            usdMinor, `UPI ₹${(inrMinor / 100).toFixed(2)}`, "", res.newBalanceMinor,
+            creditMinor, `UPI ₹${(inrMinor / 100).toFixed(2)}`, "", res.newBalanceMinor,
           ).catch(() => undefined);
         }
         await ctx.reply(
-          `✅ Credited <b>$${(usdMinor / 100).toFixed(2)}</b> (₹${(inrMinor / 100).toFixed(2)} @ 100 INR = 1 USD). New balance: <b>${(Number(res.newBalanceMinor ?? 0n) / 100).toFixed(2)} ${res.currency ?? "USD"}</b>.`,
+          `✅ Credited <b>${fmt(creditMinor, wcur)}</b> for a ₹${(inrMinor / 100).toFixed(2)} UPI payment. New balance: <b>${fmt(Number(res.newBalanceMinor ?? 0n), res.currency ?? wcur)}</b>.`,
           { parse_mode: "HTML" },
         );
         // Plain text: dmUser escapes whatever it is handed, so tags would reach
         // the customer as a literal "<b>".
-        await dmUser(uid, `✅ Wallet topped up!\n\n💰 $${(usdMinor / 100).toFixed(2)} added (₹${(inrMinor / 100).toFixed(2)} at 100 INR = 1 USD).\nYou can pay for any order instantly now. 🚀`).catch(() => undefined);
+        await dmUser(uid, `✅ Wallet topped up!\n\n💰 ${fmt(creditMinor, wcur).replace(/<[^>]+>/g, "")} added for your ₹${(inrMinor / 100).toFixed(2)} UPI payment.\nYou can pay for any order instantly now. 🚀`).catch(() => undefined);
         // The "we're verifying your UTR" receipt has done its job now.
         if (tu?.telegramId) await clearChatClutter(tu.telegramId).catch(() => undefined);
       } else {
@@ -6042,8 +6047,10 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     // An amount past the cap turns into a minor-unit value the wallet column
     // cannot hold, and the credit fails deep inside Prisma with no explanation.
     if (!target || !Number.isFinite(val) || val <= 0 || val > MAX_PRICE_MAJOR) { await ctx.reply("Please send a valid amount, e.g. 10."); return true; }
-    const r = await adjustUserWalletById(target, sign * Math.round(val * 100), String(ctx.from?.id ?? ""));
-    await ctx.reply(r.ok ? `✅ ${sign > 0 ? "Added" : "Deducted"} ${val.toFixed(2)}. New balance: <b>${(Number(r.newBalanceMinor) / 100).toFixed(2)} ${r.currency}</b>.` : "❌ Could not adjust.", { parse_mode: "HTML" });
+    const r = await adjustUserWalletById(target, sign * Math.round(val * 100), ctx.user?.id);
+    await ctx.reply(r.ok
+      ? `✅ ${sign > 0 ? "Added" : "Deducted"} ${val.toFixed(2)}. New balance: <b>${(Number(r.newBalanceMinor) / 100).toFixed(2)} ${r.currency}</b>.`
+      : r.reason === "INSUFFICIENT_BALANCE" ? "❌ The wallet doesn't have that much — a deduction can't take it below zero." : "❌ Could not adjust.", { parse_mode: "HTML" });
     await userDetailView(ctx, target);
     return true;
   }
@@ -6055,8 +6062,8 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await ctx.reply("Format: <id or @user> <amount>. Example: 123456789 500");
       return true;
     }
-    const res = await adjustUserWallet(identifier, Math.round(amt * 100));
-    if (!res.ok) await ctx.reply("❌ User not found. Use their Telegram numeric ID or @username (they must have used the bot).");
+    const res = await adjustUserWallet(identifier, Math.round(amt * 100), ctx.user?.id);
+    if (!res.ok) await ctx.reply(res.reason === "INSUFFICIENT_BALANCE" ? "❌ The wallet doesn't have that much — a deduction can't take it below zero." : "❌ User not found. Use their Telegram numeric ID or @username (they must have used the bot).");
     else await ctx.reply(`✅ ${amt >= 0 ? "Credited" : "Debited"} ${escapeHtml(res.label ?? "")}. New balance: <b>${(Number(res.newBalanceMinor) / 100).toFixed(2)} ${res.currency}</b>.`, { parse_mode: "HTML" });
     await sendPanel(ctx, false);
     return true;
@@ -6103,6 +6110,9 @@ export async function notifyAdminsForApproval(ctx: Ctx, orderId: string, method:
   const ids = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY);
   if (ids.length === 0) return 0;
   const o = await getAdminOrder(orderId);
+  // Already settled (auto-verified a moment ago, or approved by another admin):
+  // an approve card now would only confuse — and a second approve is a no-op.
+  if (o && !["PENDING_PAYMENT", "MANUAL_REVIEW"].includes(o.status)) return -1;
   const head = o
     ? `🧾 <b>${method} payment to review</b>\nOrder <b>${o.orderNumber}</b> — ${fmt(o.totalMinor, o.currency)}\nBuyer: ${escapeHtml(o.userLabel)}`
     : `🧾 <b>${method} payment to review</b> (order ${orderId})`;

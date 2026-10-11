@@ -1,5 +1,5 @@
 import { cached, getRedis } from "../redis.js";
-import { convertMinor } from "../fx.js";
+import { convertMinor, convertMinorExact } from "../fx.js";
 import { prisma, type Currency, type User } from "@gis/database";
 import { REFERRAL_PREFIX } from "@gis/shared";
 
@@ -147,9 +147,14 @@ export async function setUserCurrency(userId: string, currency: Currency): Promi
 
     // The wallet is the same kind of bare number and must move with it, or a
     // balance would silently gain or lose value on a currency switch.
-    const w = await tx.wallet.findUnique({ where: { userId }, select: { id: true, balanceMinor: true, currency: true } });
+    // Locked: this writes an ABSOLUTE converted balance, so a credit or debit
+    // landing between an unlocked read and the write would simply vanish.
+    const wRows = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+      SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
+    const w = wRows[0];
     if (w && w.currency !== currency) {
-      const converted = BigInt(Math.round(convertMinor(Number(w.balanceMinor), w.currency as Currency, currency)));
+      // Rounded DOWN: switching back and forth must never create money.
+      const converted = BigInt(Math.max(0, Math.floor(convertMinorExact(Number(w.balanceMinor), w.currency as Currency, currency))));
       await tx.wallet.update({ where: { id: w.id }, data: { currency, balanceMinor: converted } });
       // The conversion goes in the ledger as a pair — the old balance out in
       // the old currency, the converted one in, in the new — so the ledger
@@ -169,15 +174,22 @@ export async function getReferralStats(userId: string): Promise<{
   purchased: number;
   earnedMinor: bigint;
 }> {
-  const [invited, purchased, rewards] = await Promise.all([
+  const [invited, purchased, rewards, wallet] = await Promise.all([
     prisma.user.count({ where: { referredById: userId } }),
     prisma.user.count({ where: { referredById: userId, firstPurchaseAt: { not: null } } }),
-    prisma.referralReward.aggregate({
+    prisma.referralReward.groupBy({
+      by: ["currency"],
       where: { referrerId: userId, status: "CREDITED" },
       _sum: { amountMinor: true },
     }),
+    prisma.wallet.findUnique({ where: { userId }, select: { currency: true } }),
   ]);
-  return { invited, purchased, earnedMinor: BigInt(rewards._sum.amountMinor ?? 0) };
+  // Rewards are stored in the currency they were paid in; a referrer who
+  // switched INR↔USD has both. Callers print this in the WALLET currency, so
+  // convert each group rather than adding ₹ and $ minor units together.
+  const target: Currency = wallet?.currency ?? "USD";
+  const earned = rewards.reduce((sum, g) => sum + convertMinor(g._sum.amountMinor ?? 0, g.currency, target), 0);
+  return { invited, purchased, earnedMinor: BigInt(earned) };
 }
 
 /**

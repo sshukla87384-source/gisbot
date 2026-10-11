@@ -96,6 +96,8 @@ async function sweepReservationsAndOrders(): Promise<void> {
   // Refund any wallet money applied to a part-paid order BEFORE expiring it —
   // otherwise the customer's balance is silently destroyed with the order.
   const dying = await prisma.order.findMany({
+    // (A submitted UPI reference extends expiresAt to the approval deadline,
+    // so paid-awaiting-approval orders are not caught here early.)
     where: { status: "PENDING_PAYMENT", expiresAt: { lt: now }, walletUsedMinor: { gt: 0 } },
     select: { id: true, userId: true, orderNumber: true, walletUsedMinor: true },
     // Bounded like the expiry pass below: this loop runs one transaction per row
@@ -193,7 +195,9 @@ async function releaseHolds(): Promise<void> {
   const now = new Date();
 
   const commissions = await prisma.commissionEntry.findMany({
-    where: { holdUntil: { lt: now }, releasedAt: null, clawedBackAt: null },
+    // Only for orders that actually completed — a refunded or cancelled order
+    // must not pay its reseller (refunds also stamp clawedBackAt).
+    where: { holdUntil: { lt: now }, releasedAt: null, clawedBackAt: null, orderItem: { order: { status: "COMPLETED" } } },
     take: 200,
   });
   for (const entry of commissions) {

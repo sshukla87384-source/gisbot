@@ -243,7 +243,7 @@ export async function miniAppWallet(userId: string) {
   return {
     balanceMinor: Number(w.balanceMinor),
     currency: w.currency,
-    entries: ledger.entries.map((e) => ({ type: e.type, amountMinor: Number(e.amountMinor), balanceAfterMinor: Number(e.balanceAfterMinor), note: e.note, createdAt: e.createdAt.toISOString() })),
+    entries: ledger.entries.map((e) => ({ type: e.type, amountMinor: Number(e.amountMinor), balanceAfterMinor: Number(e.balanceAfterMinor), currency: e.currency, note: e.note, createdAt: e.createdAt.toISOString() })),
     gifts: (gifts as Array<{ code?: string; amountMinor?: number; currency?: string; status?: string; createdAt?: Date }>).map((g) => ({ code: g.code ?? "", amountMinor: g.amountMinor ?? 0, currency: g.currency ?? w.currency, status: g.status ?? "", createdAt: g.createdAt?.toISOString() ?? null })),
   };
 }

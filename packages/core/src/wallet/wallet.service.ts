@@ -13,6 +13,8 @@ export interface LedgerEntry {
   type: WalletTxType;
   amountMinor: bigint;
   balanceAfterMinor: bigint;
+  /** The currency THIS row was written in — a wallet that switched INR↔USD has rows in both. */
+  currency: Currency;
   note: string | null;
   createdAt: Date;
 }
@@ -43,6 +45,7 @@ export async function getLedger(userId: string, page: number, pageSize = 8): Pro
       type: r.type,
       amountMinor: r.amountMinor,
       balanceAfterMinor: r.balanceAfterMinor,
+      currency: r.currency,
       note: r.referenceNote,
       createdAt: r.createdAt,
     })),
@@ -62,6 +65,8 @@ export async function adjustWallet(opts: {
   note?: string;
   actorId?: string;
   idempotencyKey?: string;
+  /** An admin deduction must not push a wallet below zero (ADJUSTMENT otherwise may). */
+  floorZero?: boolean;
 }): Promise<bigint> {
   return prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint }>>`
@@ -70,7 +75,7 @@ export async function adjustWallet(opts: {
     if (!wallet) throw new CoreError("WALLET_NOT_FOUND");
 
     const newBalance = wallet.balanceMinor + opts.amountMinor;
-    if (newBalance < 0n && opts.type !== "ADJUSTMENT") throw new CoreError("INSUFFICIENT_BALANCE");
+    if (newBalance < 0n && (opts.type !== "ADJUSTMENT" || (opts.floorZero && opts.amountMinor < 0n))) throw new CoreError("INSUFFICIENT_BALANCE");
 
     await tx.walletTransaction.create({
       data: {
@@ -89,51 +94,43 @@ export async function adjustWallet(opts: {
   });
 }
 
+type WTx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
 /**
- * Refund wallet money that was applied to an order which is being cancelled or
- * expired, then mark the order so it can never be refunded twice. Idempotent
- * via the wallet ledger's unique idempotency key.
+ * Credit (or debit) a wallet INSIDE the caller's transaction — so a status flip
+ * and the money move together or not at all. Locks the wallet row, writes the
+ * ledger line and the balance. Returns the new balance and the wallet currency.
+ */
+export async function creditWalletTx(
+  tx: WTx,
+  opts: { userId: string; amountMinor: bigint; type: WalletTxType; note?: string; idempotencyKey?: string; orderId?: string },
+): Promise<{ balance: bigint; currency: Currency }> {
+  const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
+    SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${opts.userId} FOR UPDATE`;
+  const w = locked[0];
+  if (!w) throw new CoreError("WALLET_NOT_FOUND");
+  const balance = w.balanceMinor + opts.amountMinor;
+  if (balance < 0n && opts.type !== "ADJUSTMENT") throw new CoreError("INSUFFICIENT_BALANCE");
+  await tx.walletTransaction.create({
+    data: { walletId: w.id, type: opts.type, amountMinor: opts.amountMinor, balanceAfterMinor: balance, currency: w.currency, referenceNote: opts.note, idempotencyKey: opts.idempotencyKey, orderId: opts.orderId },
+  });
+  await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: balance } });
+  return { balance, currency: w.currency };
+}
+
+/**
+ * Expire an unpaid order and refund the wallet money applied to it — only if it
+ * is still unpaid once its row is locked (see closeUnpaidOrderTx).
  */
 export async function refundWalletForOrder(
-  userId: string,
+  _userId: string,
   orderId: string,
-  orderNumber: string,
+  _orderNumber: string,
   amountMinor: number,
 ): Promise<boolean> {
   if (!amountMinor || amountMinor <= 0) return false;
-  return prisma.$transaction(async (tx) => {
-    // SELECT ... FOR UPDATE, not findUnique. This writes an ABSOLUTE balance, so
-    // an unlocked read lets a concurrent checkout or top-up interleave: both read
-    // the same balance, both write their own total, and one movement vanishes.
-    // adjustWallet and applyWalletTx already lock; this refund path did not.
-    const locked = await tx.$queryRaw<Array<{ id: string; balanceMinor: bigint; currency: Currency }>>`
-      SELECT "id", "balanceMinor", "currency" FROM "Wallet" WHERE "userId" = ${userId} FOR UPDATE`;
-    const w = locked[0];
-    if (!w) return false;
-    const already = await tx.walletTransaction.findFirst({ where: { idempotencyKey: `refund-cancel:${orderId}` } });
-    if (already) return false;
-    // walletUsedMinor is in the ORDER's currency; the wallet has its own, and a
-    // currency switch after the order was placed makes them differ. Refunding
-    // the raw number then handed back INR-scaled minor units as dollars.
-    const ord = await tx.order.findUnique({ where: { id: orderId }, select: { currency: true } });
-    const backMinor = ord && ord.currency !== w.currency
-      ? convertMinor(amountMinor, ord.currency as Currency, w.currency as Currency)
-      : amountMinor;
-    const back = w.balanceMinor + BigInt(backMinor);
-    await tx.walletTransaction.create({
-      data: {
-        walletId: w.id, type: "REFUND", amountMinor: BigInt(backMinor), balanceAfterMinor: back,
-        currency: w.currency, orderId, referenceNote: `expired ${orderNumber}`,
-        idempotencyKey: `refund-cancel:${orderId}`,
-      },
-    });
-    await tx.wallet.update({ where: { id: w.id }, data: { balanceMinor: back } });
-    await tx.order.update({ where: { id: orderId }, data: { status: "EXPIRED", walletUsedMinor: 0 } });
-    // The coupon was burned when this order was created and it will never be
-    // paid. Give it back with the money, in the same transaction.
-    await releaseCouponForOrderTx(tx, orderId);
-    return true;
-  });
+  const { closeUnpaidOrderTx } = await import("../orders/manual-pay.service.js");
+  return prisma.$transaction((tx) => closeUnpaidOrderTx(tx, orderId, "EXPIRED", "expired"));
 }
 
 

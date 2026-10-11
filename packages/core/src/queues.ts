@@ -318,6 +318,18 @@ export function stripTelegramHtml(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
+/**
+ * Shorten Telegram HTML to `max` characters without cutting a tag in half
+ * (a photo caption is capped at 1024). Slicing the raw string cut through
+ * `<a href=…>` or `<tg-emoji …>`, Telegram refused the whole caption and the
+ * fallback dropped the photo and the buttons.
+ */
+export function capTelegramHtml(html: string, max: number, tail = "…"): string {
+  if (html.length <= max) return html;
+  const first = splitTelegramHtml(html, Math.max(16, max - tail.length))[0] ?? "";
+  return `${first}${tail}`;
+}
+
 /** Tags that may legitimately stay open across a line (everything but <a>/<tg-emoji>). */
 const REOPENABLE = ["blockquote", "pre", "code", "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "span", "tg-spoiler"];
 
@@ -361,7 +373,11 @@ export function splitTelegramHtml(html: string, max = TELEGRAM_TEXT_MAX): string
     if (line.length > max) {
       flush();
       const plain = stripTelegramHtml(line);
-      for (let i = 0; i < plain.length; i += max) parts.push(plain.slice(i, i + max));
+      // Re-escaped: every caller sends these parts with parse_mode HTML, so a
+      // bare "<" or "&" left in the plain text made Telegram reject the part.
+      // (Telegram counts the PARSED length, so escaping does not overflow it.)
+      const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      for (let i = 0; i < plain.length; i += max) parts.push(esc(plain.slice(i, i + max)));
       continue;
     }
     const reopenCost = open.reduce((n, t) => n + t.length * 2 + 5, 0);

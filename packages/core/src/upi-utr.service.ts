@@ -32,6 +32,9 @@ export async function hasUpiUtrBeenUsed(utr: string): Promise<boolean> {
     select: { id: true },
   });
   if (settled) return true;
+  // A UTR that paid an ORDER cannot be reused as a wallet top-up either.
+  const paidOrder = await prisma.order.findFirst({ where: { binanceTxnId: upiUtrKey(utr) }, select: { id: true } });
+  if (paidOrder) return true;
   try {
     return (await getRedis().get(`${PENDING_PREFIX}${utr}`)) !== null;
   } catch {
@@ -78,19 +81,27 @@ export async function claimUpiUtrForOrder(orderId: string, utr: string): Promise
   const usedByOrder = await prisma.order.findFirst({ where: { binanceTxnId: key }, select: { id: true } });
   if (usedByOrder) return { ok: false, reason: "ALREADY_USED" };
   try {
+    // Claimed = paid, awaiting approval: give the admin a day to approve it
+    // instead of letting the 5-minute payment window expire a paid order.
+    const approveBy = new Date(Date.now() + 24 * 3600_000);
     let claimed = await prisma.order.updateMany({
       where: { id: orderId, status: "PENDING_PAYMENT", binanceTxnId: null },
-      data: { binanceTxnId: key },
+      data: { binanceTxnId: key, expiresAt: approveBy },
     });
     if (claimed.count === 0) {
       // The session closed while they were fetching the reference. Someone who
       // actually paid must not be told their order vanished — revive it inside
-      // the grace period and let the operator decide. Nothing is released here.
-      const graceFrom = new Date(Date.now() - UPI_UTR_GRACE_MIN * 60_000);
-      claimed = await prisma.order.updateMany({
-        where: { id: orderId, status: "EXPIRED", binanceTxnId: null, expiresAt: { gte: graceFrom } },
-        data: { binanceTxnId: key, status: "PENDING_PAYMENT" },
-      });
+      // the grace period and let the operator decide. But NOT if its wallet
+      // part was refunded at expiry: reviving it would charge only the UPI
+      // remainder for the whole order.
+      const refunded = await prisma.walletTransaction.findUnique({ where: { idempotencyKey: `refund-cancel:${orderId}` }, select: { id: true } });
+      if (!refunded) {
+        const graceFrom = new Date(Date.now() - UPI_UTR_GRACE_MIN * 60_000);
+        claimed = await prisma.order.updateMany({
+          where: { id: orderId, status: "EXPIRED", binanceTxnId: null, expiresAt: { gte: graceFrom } },
+          data: { binanceTxnId: key, status: "PENDING_PAYMENT", expiresAt: approveBy },
+        });
+      }
     }
     if (claimed.count === 0) return { ok: false, reason: "ORDER_NOT_PENDING" };
   } catch (e) {

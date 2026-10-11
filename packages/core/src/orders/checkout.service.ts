@@ -27,7 +27,7 @@ export interface DeliveredSecret {
   allowPwChange?: boolean;
   kind: "LICENSE_KEY" | "DIGITAL_ACCOUNT";
   /** Plaintext, for immediate dispatch only. Never persist or log. */
-  secret: { key?: string; username?: string; password?: string; expiresAt?: string };
+  secret: { key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string };
   activationGuide: string | null;
 }
 
@@ -119,7 +119,7 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
             if (line.productType === "DIGITAL_ACCOUNT") {
               const creds = await assignAccountSlot(tx, line.variantId, item.id, masterKey);
               const expiresAt = deliveryExpiry(creds.expiresAt, line.validityHours);
-              const payload = { kind: "DIGITAL_ACCOUNT", ...creds, expiresAt: expiresAt?.toISOString() };
+              const payload = { kind: "DIGITAL_ACCOUNT", username: creds.username, password: creds.password, ...(creds.twofa ? { twofa: creds.twofa } : {}), expiresAt: expiresAt?.toISOString() };
               await tx.orderItem.update({
                 where: { id: item.id },
                 data: {
@@ -130,7 +130,7 @@ async function fulfillLinesTx(tx: Tx2, orderId: string, lines: PricedLine[], mas
                   deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
                 },
               });
-              deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "DIGITAL_ACCOUNT", secret: { username: creds.username, password: creds.password, expiresAt: expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
+              deliveries.push({ orderItemId: item.id, productName: line.productName, variantName: line.variantName, kind: "DIGITAL_ACCOUNT", secret: { username: creds.username, password: creds.password, ...(creds.twofa ? { twofa: creds.twofa } : {}), expiresAt: expiresAt?.toISOString() }, activationGuide: line.activationGuide, allowPwChange: line.allowPwChange });
               delivered = true;
             } else {
               const { key, expiresAt: stockExpiry, costMinor: cost } = await assignLicenseKey(tx, line.variantId, item.id, masterKey);
