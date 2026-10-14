@@ -1323,6 +1323,35 @@ export async function removeCustomEmojiEntry(name: string): Promise<void> {
   await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
 }
 
+/**
+ * Remove every entry whose name starts with one of `prefixes` (pack_ imports,
+ * auto_ bulk pastes). Returns how many went. Named spots and hand-picked
+ * icons (ui_) stay.
+ */
+export async function pruneCustomEmojiEntries(prefixes: string[]): Promise<number> {
+  const cur = await getCustomEmojiRegistry();
+  let n = 0;
+  for (const k of Object.keys(cur)) if (prefixes.some((p) => k.startsWith(p))) { delete cur[k]; n++; }
+  await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
+  return n;
+}
+
+/**
+ * Point every entry that stands for this glyph (named spots like "wallet",
+ * pack/bulk entries) at one premium emoji, and record it as the hand-picked
+ * icon. `id === "none"` keeps the glyph plain everywhere.
+ */
+export async function setUiEmoji(uiName: string, glyph: string, id: string): Promise<void> {
+  const cur = await getCustomEmojiRegistry();
+  const key = glyph.replace(/\uFE0F/g, "");
+  for (const [k, v] of Object.entries(cur)) {
+    if (k === uiName || (v.glyph ?? "").replace(/\uFE0F/g, "") !== key) continue;
+    if (id === "none") delete cur[k]; else cur[k] = { id, glyph: v.glyph };
+  }
+  cur[uiName] = { id, glyph };
+  await prisma.setting.upsert({ where: { key: "ui.custom_emoji" }, create: { key: "ui.custom_emoji", value: cur as object }, update: { value: cur as object } });
+}
+
 // ───────────── Support live chat relay ─────────────
 /** Deliver a support reply from an admin to a customer by user id. */
 export async function dmUser(userId: string, text: string): Promise<boolean> {

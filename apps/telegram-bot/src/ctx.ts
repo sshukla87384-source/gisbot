@@ -57,6 +57,7 @@ export interface SessionData {
     | "admin_ref_repeat"
     | "admin_bnpl"
     | "admin_emoji_capture"
+    | "admin_emoji_fix"
     | "admin_emoji_name"
     | "wallet_free_txn"
     | "reseller_price"
@@ -281,6 +282,8 @@ export interface SessionData {
   saleDraft?: { title?: string; body?: string; btnText?: string; btnStyle?: string; btnUrl?: string; endsHours?: number; photo?: string };
   btnKey?: string;
   pendEmojiId?: string;
+  /** 🎯 Fix icons: index into BOT_UI_GLYPHS being replaced. */
+  emojiFixIdx?: number;
   pendEmojiGlyph?: string;
   dmTarget?: string;
   webAdminEmail?: string;

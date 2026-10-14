@@ -88,6 +88,11 @@ import {
   getCustomEmojiRegistry,
   setCustomEmojiEntry,
   removeCustomEmojiEntry,
+  pruneCustomEmojiEntries,
+  setUiEmoji,
+  uiEmojiName,
+  UI_GLYPH_LABELS,
+  PLAIN,
   dmUser,
   setWebAdminPassword,
   getDeliveryInstructions,
@@ -1471,13 +1476,48 @@ async function refMilestoneView(ctx: Ctx): Promise<void> {
 
 const EMOJI_NAME_HINTS = "wallet, cart, vip, diamond, fire, gift, rocket, star, bolt, shop, money, chart, home, support · crypto buttons: crypto, deposit, usdt, bnb, tron, polygon, ton, sol, ltc (or a network code like usdttrc20)";
 
+const FIX_PAGE = 10;
+
+/** 🎯 Every icon the bot uses, with its current premium emoji, one tap to change. */
+async function emojiFixView(ctx: Ctx, page: number): Promise<void> {
+  const { map } = await premiumGlyphMap().catch(() => ({ map: new Map<string, string>() }));
+  const pages = Math.max(1, Math.ceil(BOT_UI_GLYPHS.length / FIX_PAGE));
+  const p = Math.min(Math.max(0, page), pages - 1);
+  const slice = BOT_UI_GLYPHS.slice(p * FIX_PAGE, (p + 1) * FIX_PAGE);
+  const kb = new InlineKeyboard();
+  slice.forEach((g, i) => {
+    const idx = p * FIX_PAGE + i;
+    kb.text(`${g} ${UI_GLYPH_LABELS[g] ?? ""}`.trim(), cb("adm", "emojiset", String(idx)));
+    if (i % 2 === 1) kb.row();
+  });
+  kb.row();
+  if (p > 0) kb.text("◀️ Prev", cb("adm", "emojifix", String(p - 1)));
+  if (p < pages - 1) kb.text("Next ▶️", cb("adm", "emojifix", String(p + 1)));
+  kb.row().text("🎨 Custom emoji", cb("adm", "emoji"));
+  const lines = slice.map((g) => {
+    const id = map.get(g.replace(/\uFE0F/g, ""));
+    // The glyph itself is shown through the premium layer, so it already
+    // displays the icon in use; the tag says whether it is premium at all.
+    return `${id ? `<tg-emoji emoji-id="${id}">${g}</tg-emoji>` : g}  <b>${escapeHtml(UI_GLYPH_LABELS[g] ?? g)}</b> — ${id ? "premium" : "plain"}`;
+  });
+  await show(ctx, [
+    `🎯 <b>Fix icons</b> · page ${p + 1}/${pages}`,
+    "",
+    "Each line shows the icon customers see now. Tap one to change it — then send the premium emoji you want (e.g. search <b>money</b> in your emoji keyboard for 💰).",
+    "",
+    ...lines,
+  ].join("\n"), kb, true);
+}
+
 async function emojiRegistryView(ctx: Ctx): Promise<void> {
   const [reg, auto, glyphs] = await Promise.all([getCustomEmojiRegistry(), getAutoEmojiConfig(), premiumGlyphMap().catch(() => ({ map: new Map<string, string>() }))]);
   const names = Object.keys(reg);
   const kb = new InlineKeyboard()
     .add(sbtn(auto.enabled ? "✨ Premium everywhere: ON" : "✨ Premium everywhere: OFF", cb("adm", "emojiauto", auto.enabled ? "0" : "1"), auto.enabled ? "success" : "danger")).row()
-    .text(auto.learn ? "🧠 Use emoji from my products: ON" : "🧠 Use emoji from my products: OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
-    .add(sbtn("📦 Import a premium emoji pack (1 link)", cb("adm", "emojipack"), "success")).row()
+    .add(sbtn("🎯 Fix icons one by one (pick the right emoji)", cb("adm", "emojifix", "0"), "success")).row()
+    .add(sbtn("🧹 Remove auto-added emoji (packs / bulk / products)", cb("adm", "emojiclean"), "danger")).row()
+    .text(auto.learn ? "🧠 Emoji from my products (often app logos): ON" : "🧠 Emoji from my products (often app logos): OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
+    .add(sbtn("📦 Import a premium emoji pack (1 link)", cb("adm", "emojipack"), "primary")).row()
     .add(sbtn("📥 Bulk add (send many at once)", cb("adm", "emojibulk"), "primary")).row()
     .text("➕ Add one (with a name)", cb("adm", "emojiadd")).row();
   for (const n of names.slice(0, 20)) kb.text(`✖️ ${n}`, cb("adm", "emojirm", n)).row();
@@ -1497,7 +1537,9 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
     "",
     `🧩 <b>Bot buttons & screens covered: ${covered.length}/${BOT_UI_GLYPHS.length}</b>${missing.length ? `\nStill plain: ${missing.join(" ")}` : " — everything is premium ✅"}`,
     "",
-    "📦 <b>Import a pack</b>: paste any premium emoji pack link (<code>t.me/addemoji/…</code>) — every emoji in it is applied to all buttons (Next, Refer, links…), screens and posts at once.",
+    "🎯 <b>Fix icons</b>: see every icon the bot uses (💰 money, 🛒 cart, ▶️ next…) and pick exactly the premium emoji you want for each — or keep it plain. Your picks always win.",
+    "🧹 <b>Wrong app logos on buttons?</b> They come from packs/bulk pastes/product descriptions whose emoji stand in for app icons. Tap 🧹 to clear them all, then use 🎯.",
+    "📦 <b>Import a pack</b>: use an <b>icon/emoji pack</b>, not an app-logo pack — every emoji in it is applied to buttons and screens at once.",
     "📥 <b>Bulk add</b>: or send one message with many premium emoji (e.g. 🔥✅💰🛒⚡🎁).",
     `➕ <b>Add one</b> with a name to theme a specific spot: <i>${EMOJI_NAME_HINTS}</i>`,
     "",
@@ -3075,6 +3117,46 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "emojiauto":
       await setAutoEmojiConfig({ enabled: id === "1" });
       return emojiRegistryView(ctx);
+    case "emojifix":
+      return emojiFixView(ctx, Number.parseInt(id || "0", 10) || 0);
+    case "emojiset": {
+      const idx = Number.parseInt(id, 10);
+      const g = BOT_UI_GLYPHS[idx];
+      if (g === undefined) return emojiFixView(ctx, 0);
+      ctx.session.emojiFixIdx = idx;
+      ctx.session.awaiting = "admin_emoji_fix";
+      await ctx.reply([
+        `🎯 <b>${g} ${escapeHtml(UI_GLYPH_LABELS[g] ?? "")}</b>`,
+        "",
+        "Send <b>one premium emoji</b> to use for this icon everywhere (buttons, screens, posts).",
+        `Tip: open the emoji keyboard and search <b>${escapeHtml((UI_GLYPH_LABELS[g] ?? "").split(" ")[0]!.toLowerCase())}</b>, then pick an animated premium one.`,
+      ].join("\n"), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text(`▫️ Keep ${g} plain`, cb("adm", "emojiplain", String(idx))).row()
+          .text("◀️ Back to icons", cb("adm", "emojifix", String(Math.floor(idx / FIX_PAGE)))),
+      });
+      return;
+    }
+    case "emojiplain": {
+      const idx = Number.parseInt(id, 10);
+      const g = BOT_UI_GLYPHS[idx];
+      ctx.session.awaiting = null;
+      if (g === undefined) return emojiFixView(ctx, 0);
+      await setUiEmoji(uiEmojiName(g), g, PLAIN);
+      invalidatePremiumGlyphMap();
+      setDynamicEmojis(await getCustomEmojiRegistry());
+      flash(ctx, `▫️ ${g} is plain now.`);
+      return emojiFixView(ctx, Math.floor(idx / FIX_PAGE));
+    }
+    case "emojiclean": {
+      const n = await pruneCustomEmojiEntries(["pack_", "auto_"]);
+      await setAutoEmojiConfig({ learn: false });
+      invalidatePremiumGlyphMap();
+      setDynamicEmojis(await getCustomEmojiRegistry());
+      flash(ctx, `🧹 Removed <b>${n}</b> auto-added emoji and stopped using emoji from product descriptions. Your named and hand-picked icons stay. Now use 🎯 Fix icons to choose the right ones.`);
+      return emojiRegistryView(ctx);
+    }
     case "emojilearn":
       await setAutoEmojiConfig({ learn: id === "1" });
       return emojiRegistryView(ctx);
@@ -5327,6 +5409,25 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     setDynamicEmojis(await getCustomEmojiRegistry());
     flash(ctx, `✅ Added <b>${added}</b> premium emoji — they now replace the plain ones across the bot.`);
     await emojiRegistryView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_emoji_fix") {
+    const idx = ctx.session.emojiFixIdx ?? -1;
+    const g = BOT_UI_GLYPHS[idx];
+    if (g === undefined) { await ctx.reply("That icon expired — open 🎯 Fix icons again."); return true; }
+    const ents = ((ctx.message?.entities ?? []) as Array<{ type: string; custom_emoji_id?: string }>).filter((e) => e.type === "custom_emoji" && e.custom_emoji_id);
+    const pick = ents[0]?.custom_emoji_id;
+    if (!pick) {
+      ctx.session.awaiting = "admin_emoji_fix";
+      await ctx.reply("That isn't a premium emoji. Send one <b>premium (animated) emoji</b> from your emoji keyboard — it needs Telegram Premium on your account.", { parse_mode: "HTML" });
+      return true;
+    }
+    ctx.session.emojiFixIdx = undefined;
+    await setUiEmoji(uiEmojiName(g), g, pick);
+    invalidatePremiumGlyphMap();
+    setDynamicEmojis(await getCustomEmojiRegistry());
+    flash(ctx, `✅ ${g} <b>${escapeHtml(UI_GLYPH_LABELS[g] ?? "")}</b> now uses <tg-emoji emoji-id="${pick}">${g}</tg-emoji> everywhere.`);
+    await emojiFixView(ctx, Math.floor(idx / FIX_PAGE));
     return true;
   }
   if (awaiting === "admin_emoji_capture") {

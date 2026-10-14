@@ -19,7 +19,12 @@ import { getCustomEmojiRegistry } from "./admin.service.js";
 export interface AutoEmojiConfig {
   /** Swap plain emoji for premium ones across the bot. */
   enabled: boolean;
-  /** Also use premium emoji found in product names/descriptions. */
+  /**
+   * Also use premium emoji found in product names/descriptions. OFF by
+   * default: those are mostly APP LOGOS (a Netflix or PayPal logo stored under
+   * a plain fallback like 🎬 or 💰), and learning them put app stickers on the
+   * Wallet, Next and Refer buttons all over the bot.
+   */
   learn: boolean;
 }
 
@@ -28,17 +33,19 @@ const CFG_KEY = "emoji.auto";
 export async function getAutoEmojiConfig(): Promise<AutoEmojiConfig> {
   try {
     const row = await prisma.setting.findUnique({ where: { key: CFG_KEY } });
-    const v = row?.value as Partial<AutoEmojiConfig> | null | undefined;
-    return { enabled: v?.enabled !== false, learn: v?.learn !== false };
+    // `learnProducts` replaces the old `learn` flag (which defaulted ON);
+    // the old value is ignored so every shop starts without the logo leak.
+    const v = row?.value as (Partial<AutoEmojiConfig> & { learnProducts?: boolean }) | null | undefined;
+    return { enabled: v?.enabled !== false, learn: v?.learnProducts === true };
   } catch {
-    return { enabled: true, learn: true };
+    return { enabled: true, learn: false };
   }
 }
 
 export async function setAutoEmojiConfig(patch: Partial<AutoEmojiConfig>): Promise<AutoEmojiConfig> {
   const cur = await getAutoEmojiConfig();
   const next = { ...cur, ...patch };
-  const value = { enabled: next.enabled, learn: next.learn };
+  const value = { enabled: next.enabled, learnProducts: next.learn };
   await prisma.setting.upsert({ where: { key: CFG_KEY }, create: { key: CFG_KEY, value }, update: { value } });
   cache = null;
   return next;
@@ -87,9 +94,14 @@ export async function premiumGlyphMap(): Promise<{ cfg: AutoEmojiConfig; map: Ma
     }
     try {
       const reg = await getCustomEmojiRegistry();
-      for (const entry of Object.values(reg)) {
+      // Hand-picked per-icon choices (🎯 Fix icons) are applied LAST so they
+      // beat anything a pack import or a bulk paste mapped to the same glyph.
+      const entries = Object.entries(reg).sort(([a], [b]) => Number(a.startsWith(UI_PREFIX)) - Number(b.startsWith(UI_PREFIX)));
+      for (const [name, entry] of entries) {
         const key = emojiKey(entry.glyph ?? "");
-        if (key && entry.id && isSingleEmoji(key)) map.set(key, entry.id);
+        if (!key || !isSingleEmoji(key)) continue;
+        if (name.startsWith(UI_PREFIX) && entry.id === PLAIN) { map.delete(key); continue; } // "keep this one plain"
+        if (entry.id && /^\d{5,25}$/.test(entry.id)) map.set(key, entry.id);
       }
     } catch { /* registry unavailable — learned only */ }
   }
@@ -108,6 +120,23 @@ function isSingleEmoji(s: string): boolean {
   const m = s.match(EMOJI_SEQ);
   return !!m && m.length === 1 && m[0].replace(/️/g, "") === s;
 }
+
+/** Registry names of hand-picked icons, and the marker for "keep this glyph plain". */
+export const UI_PREFIX = "ui_";
+export const PLAIN = "none";
+/** Registry name for a hand-picked icon of `glyph`. */
+export const uiEmojiName = (glyph: string): string => `${UI_PREFIX}${[...emojiKey(glyph)].map((ch) => ch.codePointAt(0)!.toString(16)).join("_")}`.slice(0, 24);
+
+/** What each bot icon stands for — shown in 🎯 Fix icons so the right premium emoji is picked. */
+export const UI_GLYPH_LABELS: Record<string, string> = {
+  "◀️": "Back", "▶️": "Next", "🏠": "Menu", "🛍": "Shop", "🛒": "Cart", "🗂": "Categories", "📦": "Orders",
+  "💰": "Money / Wallet", "💳": "Payment", "🎁": "Gift / Refer", "🔗": "Link", "📤": "Share", "⚡": "Instant",
+  "✅": "Done / Yes", "❌": "Cancel / No", "🎫": "Ticket", "💬": "Chat", "👤": "Account", "🌐": "Language",
+  "💱": "Currency", "🔥": "Hot / Sale", "🎯": "Target", "📋": "Copy / List", "🔄": "Refresh", "🧾": "Receipt",
+  "➕": "Add", "✏️": "Edit", "🗑": "Delete", "⭐": "Star / Rating", "🪙": "Crypto / Coin", "🇮🇳": "UPI / India",
+  "📊": "Stats", "🔔": "Notify", "🏆": "Tier / Reward", "👥": "Referrals", "🧑‍💻": "Developer", "🎡": "Spin",
+  "💎": "VIP", "🔑": "Key", "🛟": "Support",
+};
 
 /** The emoji the bot's own buttons and screens use most — the coverage report in 🎨 Custom Emoji. */
 export const BOT_UI_GLYPHS = [
