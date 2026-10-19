@@ -314,6 +314,8 @@ export interface DeliveryPayload {
   password?: string;
   twofa?: string;
   expiresAt?: string;
+  /** Free-text delivery typed in the web admin panel ("text" kind). */
+  text?: string;
 }
 
 /** HTML delivery message — same shape the bot renders (Bot UX doc §6). */
@@ -422,7 +424,7 @@ export function deliveredValue(payload: DeliveryPayload): string {
 export function copyValuesOf(payload: DeliveryPayload): string[] {
   const c = credsOf(payload);
   if (c.id && c.pw) return [`${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`];
-  const rows = (payload.key ?? "").split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+  const rows = (payload.key ?? payload.text ?? "").split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
   if (rows.length === 0) return payload.username ? [payload.username.trim()] : [];
   return rows.map((r) => {
     const k = splitCredential(r);
@@ -456,7 +458,7 @@ export function copyButtonsFor(payload: DeliveryPayload, ref: { orderItemId?: st
   }
   const values = copyValuesOf(payload);
   if (values.length === 0) return out;
-  const keyRows = (payload.key ?? "").split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+  const keyRows = (payload.key ?? payload.text ?? "").split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
   const rowsAreAccounts = keyRows.length > 0 && keyRows.every((r) => splitCredential(r) !== null);
   if (values.length === 1) {
     const v = values[0]!;

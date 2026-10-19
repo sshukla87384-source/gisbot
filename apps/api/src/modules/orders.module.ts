@@ -1,5 +1,5 @@
 import { loadConfig } from "@gis/config";
-import { confirmManualPayment, enqueueTelegramMessage } from "@gis/core";
+import { confirmManualPayment, copyButtonsFor, DELIVERY_FOLLOWUP, enqueueTelegramMessage } from "@gis/core";
 import { prisma } from "@gis/database";
 import { decryptSecret, encryptSecret } from "@gis/shared";
 import { Body, Controller, Get, Module, Param, Post, Query, Req } from "@nestjs/common";
@@ -133,7 +133,12 @@ export class OrdersController {
 
     const order = await prisma.order.findUnique({ where: { id }, include: { user: true } });
     if (order?.user.telegramId != null) {
-      await enqueueTelegramMessage(order.user.telegramId, deliveryText(item.productNameSnap, item.variantNameSnap, payload));
+      // Copy buttons + the separate navigation message, like every other
+      // delivery — a web-panel delivery used to arrive with no buttons at all.
+      await enqueueTelegramMessage(order.user.telegramId, deliveryText(item.productNameSnap, item.variantNameSnap, payload), {
+        buttons: copyButtonsFor({ ...payload, kind: String(payload.kind ?? "") }, { orderItemId: itemId }),
+        followUp: DELIVERY_FOLLOWUP,
+      });
     }
     await writeAudit(req, "order.fulfill.manual", "Order", id, undefined, { itemId, kind: data.kind });
     return { ok: true, orderCompleted: remaining === 0 };
@@ -159,7 +164,10 @@ export class OrdersController {
     if (order.user.telegramId == null) throw conflict("NO_TELEGRAM", "User has no Telegram id.");
     for (const item of order.items) {
       const payload = JSON.parse(decryptSecret(item.deliveryPayloadEncrypted!, master)) as Record<string, string | undefined>;
-      await enqueueTelegramMessage(order.user.telegramId, deliveryText(item.productNameSnap, item.variantNameSnap, payload));
+      await enqueueTelegramMessage(order.user.telegramId, deliveryText(item.productNameSnap, item.variantNameSnap, payload), {
+        buttons: copyButtonsFor({ ...payload, kind: String(payload.kind ?? "") }, { orderItemId: item.id }),
+        ...(item === order.items[order.items.length - 1] ? { followUp: DELIVERY_FOLLOWUP } : {}),
+      });
     }
     await writeAudit(req, "order.resend", "Order", id, undefined, { items: order.items.length });
     return { resent: order.items.length };
