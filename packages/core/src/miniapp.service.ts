@@ -11,7 +11,7 @@ import { getHideSoldOut, stockMapFor, UNLIMITED_STOCK } from "./catalog/catalog.
 import { getLedger, getWallet } from "./wallet/wallet.service.js";
 import { checkoutWithWallet, type CheckoutResult } from "./orders/checkout.service.js";
 import { listOrders, revealOrderDeliveries } from "./orders/order.service.js";
-import { buildCombinedDeliveryText, buildDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./orders/assign.js";
+import { copyButtonsFor, buildCombinedDeliveryText, buildDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./orders/assign.js";
 import { DELIVERY_FOLLOWUP, deliveryButtons, enqueueTelegramDocument, enqueueTelegramMessage } from "./queues.js";
 import { firstOrderAllowed, listMyGifts } from "./growth.service.js";
 import { getReferralConfig, milestoneProgress, referralEarnings } from "./referral.service.js";
@@ -359,12 +359,12 @@ export async function miniAppBuyWithWallet(
 
 async function dispatchDeliveriesToTelegram(telegramId: bigint, r: CheckoutResult): Promise<void> {
   const money = formatMinor(r.totalMinor, r.currency as CurrencyCode);
-  const lines: DeliveryLine[] = r.deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
+  const lines: DeliveryLine[] = r.deliveries.map((d) => ({ orderItemId: d.orderItemId, productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
   if (lines.length === 1) {
     const d = lines[0]!;
-    await enqueueTelegramMessage(telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: r.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId: r.orderId }), followUp: DELIVERY_FOLLOWUP });
+    await enqueueTelegramMessage(telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: r.orderNumber }), { buttons: copyButtonsFor(d.payload, { orderItemId: d.orderItemId, orderId: r.orderId }), followUp: DELIVERY_FOLLOWUP });
   } else if (lines.length > DELIVERY_FILE_THRESHOLD) {
-    await enqueueTelegramDocument(telegramId, `order-${r.orderNumber}.txt`, buildDeliveryTxt(lines, r.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${lines.length} items are in the attached file. 💾 Saved in 📦 My Orders.`, undefined, DELIVERY_FOLLOWUP);
+    await enqueueTelegramDocument(telegramId, `order-${r.orderNumber}.txt`, buildDeliveryTxt(lines, r.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${lines.length} items are in the attached file. 💾 Saved in 📦 My Orders.`, [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${r.orderId}` }], DELIVERY_FOLLOWUP);
   } else if (lines.length > 1) {
     await enqueueTelegramMessage(telegramId, buildCombinedDeliveryText(lines, r.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(lines, r.orderId), followUp: DELIVERY_FOLLOWUP });
   } else if (r.pendingManualItems > 0) {

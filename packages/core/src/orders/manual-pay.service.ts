@@ -5,7 +5,7 @@ import { CoreError, cb, effectiveHours, encryptSecret, decryptSecret, formatMino
 import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_BUTTONS, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
-import { repairAccountPair } from "./assign.js";
+import { copyButtonsFor, repairAccountPair } from "./assign.js";
 import { notifyTierChange } from "../loyalty.service.js";
 import { accrueCommission, accrueCommissionTx } from "./commission.js";
 import type { DeliveryPayload } from "./assign.js";
@@ -384,7 +384,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
         try {
           const reusable = await fulfillReusableItemTx(tx, item, masterKey);
           if (reusable) {
-            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload: reusable, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+            if (order.user.telegramId !== null) deliveries.push({ orderItemId: item.id, productName: item.productNameSnap, variantName: item.variantNameSnap, payload: reusable, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             await accrueCommissionTx(tx, item, order.currency);
             continue;
           }
@@ -419,7 +419,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
-            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+            if (order.user.telegramId !== null) deliveries.push({ orderItemId: item.id, productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
             const expiresAt = deliveryExpiry(creds.expiresAt, effectiveHours(item.variant.durationHours, item.variant.durationDays));
@@ -434,7 +434,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
                 deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), masterKey),
               },
             });
-            if (order.user.telegramId !== null) deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+            if (order.user.telegramId !== null) deliveries.push({ orderItemId: item.id, productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
           }
           // Reseller commission on the UPI / Binance rail too.
           await accrueCommissionTx(tx, item, order.currency);
@@ -497,9 +497,9 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
     if (outcome.deliveries.length === 1) {
       const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }), followUp: DELIVERY_FOLLOWUP });
+      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: copyButtonsFor(d.payload, { orderItemId: d.orderItemId, orderId }), followUp: DELIVERY_FOLLOWUP });
     } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, undefined, DELIVERY_FOLLOWUP);
+      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${orderId}` }], DELIVERY_FOLLOWUP);
     } else if (outcome.deliveries.length > 1) {
       await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId), followUp: DELIVERY_FOLLOWUP });
     }
@@ -607,7 +607,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
 
   const tgId = item.order.user.telegramId;
   if (tgId !== null) {
-    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange), { buttons: deliveryButtons(credsOf(payload)), followUp: DELIVERY_FOLLOWUP });
+    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange), { buttons: copyButtonsFor(payload, { orderItemId: item.id }), followUp: DELIVERY_FOLLOWUP });
     // Deliver the item and nothing else. The thank-you, referral nudge and
     // delivery instructions are ORDER-level and were already sent at payment —
     // re-sending them here is what produced the duplicated messages.
@@ -823,7 +823,7 @@ export async function adminReplaceOrderItem(
     // try/catch that returns FAILED — a Redis blip while enqueuing used to report
     // a completed replacement as failed, which left the claim PENDING forever
     // (every retry then returned ALREADY_REPLACED) and the customer untold.
-    void notifyReplacementToBuyer(item, oldPayload, out.payload as never, out.repNumber, opts.warrantyCovered !== false);
+    void notifyReplacementToBuyer(item, oldPayload, out.payload as never, out.repNumber, opts.warrantyCovered !== false, out.repItemId);
     return { ok: true, detail };
   } catch (err) {
     const code = err instanceof CoreError ? err.code : "";
@@ -841,6 +841,7 @@ async function notifyReplacementToBuyer(
   payload: DeliveryPayload,
   repNumber: string,
   warrantyCovered: boolean,
+  repItemId?: string,
 ): Promise<void> {
   try {
     if (item.order.user.telegramId === null) return;
@@ -871,7 +872,7 @@ async function notifyReplacementToBuyer(
       item.order.user.telegramId,
       `${header}\n${buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange)}`,
       {
-        buttons: deliveryButtons(credsOf(payload)),
+        buttons: copyButtonsFor(payload, repItemId ? { orderItemId: repItemId } : {}),
         followUp: { text: "✅ <b>Replacement delivered.</b> It is in the message above and in your order.", buttons: [{ text: "📦 View updated order", callbackData: `ord:view:${item.orderId}`, style: "primary" as const }, ...DELIVERY_BUTTONS] },
       },
     );

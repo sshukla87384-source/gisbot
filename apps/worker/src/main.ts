@@ -92,7 +92,7 @@ async function main(): Promise<void> {
               if (styled && b.iconCustomEmojiId && !b.copyText) base.icon_custom_emoji_id = b.iconCustomEmojiId;
               return base;
             });
-          const isCopy = (b: Record<string, unknown>) => "copy_text" in b || String(b.callback_data ?? "").startsWith("dl:copy");
+          const isCopy = (b: Record<string, unknown>) => "copy_text" in b || /^dl:c(?:opy|i:)/.test(String(b.callback_data ?? ""));
           const copies = mapped.filter(isCopy);
           const others = mapped.filter((b) => !isCopy(b));
           const copyRows: Array<Array<Record<string, unknown>>> = [];

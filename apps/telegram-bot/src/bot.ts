@@ -37,6 +37,10 @@ import {
   isDeliveredLink,
   linkLines,
   isCopyable,
+  copyValuesOf,
+  copyButtonsFor,
+  combinedDeliveryButtons,
+  type OutboxButton,
   DELIVERY_FILE_THRESHOLD,
   createApiKey,
   revokeApiKeyOwned,
@@ -1875,7 +1879,7 @@ export function createBot(): Bot<Ctx> {
             ]),
             { parse_mode: "HTML" },
           );
-          await deliverAll(ctx, result.deliveries, result.orderNumber);
+          await deliverAll(ctx, result.deliveries, result.orderNumber, result.orderId);
           // Served — the pre-purchase greeting and any "we're checking" notices
           // have done their job.
           if (ctx.chat) await clearChatClutter(ctx.chat.id);
@@ -1981,7 +1985,7 @@ export function createBot(): Bot<Ctx> {
               ]),
               { parse_mode: "HTML" },
             );
-            await deliverAll(ctx, result.deliveries, result.orderNumber);
+            await deliverAll(ctx, result.deliveries, result.orderNumber, result.orderId);
             if (result.pendingManualItems > 0) await ctx.reply(`🔄 ${result.pendingManualItems} item(s) are being prepared — arriving here shortly.`);
             const instr = await deliveryInstructionsMessage();
             if (instr) {
@@ -2140,6 +2144,23 @@ export function createBot(): Bot<Ctx> {
         }
         // 📋 Copy for a delivered value too long for a native copy_text button:
         // the value alone, in a code block (tap = copy), self-deleting.
+        // One item's value(s) too long for a copy_text button: n = 0 → all of them.
+        case "dl:ci": {
+          const revealed = await revealDelivery(user.id, args[0] ?? "").catch(() => null);
+          const vals = revealed ? copyValuesOf(revealed.payload) : [];
+          const n = intArg(args, 1, 0);
+          const picked = n === 0 ? vals : vals[n - 1] ? [vals[n - 1]!] : [];
+          if (picked.length === 0) { await ctx.answerCallbackQuery({ text: "Nothing to copy for this item.", show_alert: true }); break; }
+          await ctx.answerCallbackQuery({ text: "📋 Tap the text below to copy" });
+          if (user.telegramId !== null) {
+            await enqueueTelegramMessage(
+              user.telegramId,
+              `${picked.map((v) => `<code>${escapeHtml(v)}</code>`).join("\n\n")}\n\n<i>Tap to copy · this message disappears in 10 minutes. 💾 Always in 📦 My orders.</i>`,
+              { deleteAfterSec: 600 },
+            );
+          }
+          break;
+        }
         case "dl:copy":
         case "dl:copyall": {
           const orderId = args[0] ?? "";
@@ -2545,7 +2566,7 @@ export function createBot(): Bot<Ctx> {
               { parse_mode: "HTML" },
             );
           }
-          await deliverAll(ctx, ds, args[0] ?? "");
+          await deliverAll(ctx, ds, undefined, args[0] ?? "");
           break;
         }
 
@@ -3323,6 +3344,19 @@ export function createBot(): Bot<Ctx> {
   return bot;
 }
 
+/** Outbox-style copy buttons → an inline keyboard (numbered ones two per row). */
+function copyKeyboard(buttons: OutboxButton[]): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  let pair = 0;
+  for (const b of buttons) {
+    const numbered = /#\d+$|account \d+$/.test(b.text);
+    if (!numbered && pair > 0) { kb.row(); pair = 0; }
+    if (b.copyText) kb.copyText(b.text, b.copyText); else if (b.callbackData) kb.text(b.text, b.callbackData); else continue;
+    if (numbered) { pair++; if (pair === 2) { kb.row(); pair = 0; } } else kb.row();
+  }
+  return kb;
+}
+
 async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
   const oiId = (d as unknown as { orderItemId?: string }).orderItemId ?? "";
   await sendRevealed(ctx, oiId, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide, d.allowPwChange);
@@ -3333,10 +3367,10 @@ async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
  * rich single-item card; for 2..threshold we send one combined message; for
  * large orders (> threshold) we attach a .txt file with all the keys.
  */
-async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?: string): Promise<void> {
+async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?: string, orderId?: string): Promise<void> {
   if (deliveries.length === 0) return;
   if (deliveries.length === 1) { await sendDelivery(ctx, deliveries[0]!); return; }
-  const lines = deliveries.map((d) => ({ productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
+  const lines = deliveries.map((d) => ({ orderItemId: d.orderItemId || undefined, productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
   // Navigation goes on its own message after the content (see sendRevealed):
   // a tap must never replace the message that holds the keys.
   const menu = new InlineKeyboard().text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row().text("🏠 Menu", "mnu:home");
@@ -3353,6 +3387,7 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
       const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
       await ctx.replyWithDocument(file, {
         caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
+        ...(orderId ? { reply_markup: new InlineKeyboard().text("📋 Copy ALL", `dl:copyall:${orderId}`) } : {}),
       });
       await sendNav();
       return;
@@ -3371,8 +3406,11 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
       return;
     }
   }
-  await ctx.reply(combined, { parse_mode: "HTML" }).catch(async () => {
-    await ctx.reply(combined.replace(/<[^>]+>/g, "")).catch(() => undefined);
+  // The combined message carried NO copy buttons; one per item + Copy ALL now.
+  const copyKb = copyKeyboard(combinedDeliveryButtons(lines, orderId ?? ""));
+  const markup = copyKb.inline_keyboard.length > 0 ? { reply_markup: copyKb } : {};
+  await ctx.reply(combined, { parse_mode: "HTML", ...markup }).catch(async () => {
+    await ctx.reply(combined.replace(/<[^>]+>/g, ""), markup).catch(() => ctx.reply(combined.replace(/<[^>]+>/g, "")).catch(() => undefined));
   });
   await sendNav();
 }
@@ -3439,17 +3477,11 @@ async function sendRevealed(
   if (payload.expiresAt) lines.push(`⏳ Valid until: ${payload.expiresAt.slice(0, 10)}`);
   if (activationGuide) lines.push("", `📄 ${escapeHtml(activationGuide)}`);
   lines.push("", "💾 <b>Saved in 📦 My Orders</b> — reopen it any time.", "Problem? Open a 🎫 Support ticket.");
-  const kb = new InlineKeyboard();
-  // isCopyable(): Telegram caps copy_text at 256 chars and rejects the WHOLE
-  // message when it is exceeded, so an over-long value gets no copy button —
-  // it is in the message body, where tapping it copies anyway.
-  if (isCopyable(rName)) kb.copyText("📋 Copy ID", rName).row();
-  if (isCopyable(rPass)) kb.copyText("📋 Copy password", rPass).row();
-  if (isCopyable(rTwo)) kb.copyText("📋 Copy 2FA secret", rTwo).row();
-  if (rName && rPass) {
-    const all = `${rName}|${rPass}${rTwo ? `|${rTwo}` : ""}`;
-    if (isCopyable(all)) kb.copyText("📋 Copy ALL credentials", all).row();
-  }
+  // Copy buttons for EVERY kind of delivery — keys, links, several keys or
+  // accounts in one item — not only ID/password pairs (license keys used to
+  // arrive with no copy button at all). Over-long values get a tap-to-copy
+  // callback instead of a copy_text button Telegram would reject.
+  const kb = copyKeyboard(copyButtonsFor(payload, orderItemId ? { orderItemId } : {}));
   // Navigation is NOT on the delivery message. Views replace the message they
   // were tapped on, so "📦 My orders" under the credentials used to wipe the
   // credentials off the screen. They ride on a separate follow-up message;

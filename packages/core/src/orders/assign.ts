@@ -413,6 +413,61 @@ export function deliveredValue(payload: DeliveryPayload): string {
   return (payload.key ?? payload.username ?? "").trim();
 }
 
+/**
+ * Everything a customer may want to copy from ONE delivered item, one entry
+ * per unit: each key / link row, or "id|password[|2fa]" per account row. A
+ * multi-row delivery (several keys or accounts in one item — supplier and
+ * manual deliveries often are) used to get NO copy button at all.
+ */
+export function copyValuesOf(payload: DeliveryPayload): string[] {
+  const c = credsOf(payload);
+  if (c.id && c.pw) return [`${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`];
+  const rows = (payload.key ?? "").split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+  if (rows.length === 0) return payload.username ? [payload.username.trim()] : [];
+  return rows.map((r) => {
+    const k = splitCredential(r);
+    return k ? `${k.id}|${k.pw}${k.twofa ? `|${k.twofa}` : ""}` : r;
+  });
+}
+
+/**
+ * Copy buttons for ONE delivered item — used by every delivery path (bot,
+ * worker, Mini App, manual/supplier fulfilment, replacements), so none ships
+ * without them. Values too long for Telegram's copy_text get a callback
+ * button instead (dl:ci:<orderItemId>:<n>, n = 0 for "all"), which the bot
+ * answers with the value in a tap-to-copy block.
+ */
+export function copyButtonsFor(payload: DeliveryPayload, ref: { orderItemId?: string; orderId?: string } = {}): OutboxButton[] {
+  const out: OutboxButton[] = [];
+  const fallback = (n: number): string | null =>
+    ref.orderItemId ? `dl:ci:${ref.orderItemId}:${n}` : ref.orderId && n <= 1 ? `dl:copy${n === 0 ? "all" : ""}:${ref.orderId}${n === 0 ? "" : ":1"}` : null;
+  const add = (text: string, value: string, n: number): void => {
+    if (isCopyable(value)) { out.push({ text, copyText: value }); return; }
+    const cbd = fallback(n);
+    if (cbd && cbd.length <= 64) out.push({ text, callbackData: cbd });
+  };
+  const c = credsOf(payload);
+  if (c.id && c.pw) {
+    if (isCopyable(c.id)) out.push({ text: "📋 Copy ID", copyText: c.id });
+    if (isCopyable(c.pw)) out.push({ text: "📋 Copy password", copyText: c.pw });
+    if (c.twofa && isCopyable(c.twofa)) out.push({ text: "📋 Copy 2FA secret", copyText: c.twofa });
+    add("📋 Copy ALL credentials", `${c.id}|${c.pw}${c.twofa ? `|${c.twofa}` : ""}`, 1);
+    return out;
+  }
+  const values = copyValuesOf(payload);
+  if (values.length === 0) return out;
+  const keyRows = (payload.key ?? "").split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+  const rowsAreAccounts = keyRows.length > 0 && keyRows.every((r) => splitCredential(r) !== null);
+  if (values.length === 1) {
+    const v = values[0]!;
+    add(isDeliveredLink(v) ? "📋 Copy link" : rowsAreAccounts ? "📋 Copy account" : "📋 Copy key", v, 1);
+    return out;
+  }
+  values.slice(0, COPY_BUTTON_CAP).forEach((v, i) => add(rowsAreAccounts ? `📋 Copy account ${i + 1}` : `📋 Copy #${i + 1}`, v, i + 1));
+  add("📋 Copy ALL", values.join("\n"), 0);
+  return out;
+}
+
 /** At most this many per-item copy buttons on one delivery (plus Copy ALL). */
 const COPY_BUTTON_CAP = 12;
 
@@ -424,12 +479,15 @@ const COPY_BUTTON_CAP = 12;
  * value alone in a tap-to-copy code block (`dl:copy:<orderId>:<n>`).
  */
 export function combinedDeliveryButtons(items: DeliveryLine[], orderId: string): OutboxButton[] {
-  const values = items.map((it) => deliveredValue(it.payload)).filter((v) => v.length > 0);
+  const units = items.map((it) => ({ v: copyValuesOf(it.payload).join("\n"), oi: it.orderItemId })).filter((u) => u.v.length > 0);
+  const values = units.map((u) => u.v);
   const out: OutboxButton[] = [];
-  values.slice(0, COPY_BUTTON_CAP).forEach((v, i) => {
+  units.slice(0, COPY_BUTTON_CAP).forEach((u, i) => {
     const n = i + 1;
     const text = values.length === 1 ? "📋 Copy" : `📋 Copy #${n}`;
-    out.push(isCopyable(v) ? { text, copyText: v } : { text, callbackData: `dl:copy:${orderId}:${n}` });
+    // An over-long value is fetched by its own item id when known — the
+    // order-level index can drift from this message's numbering.
+    out.push(isCopyable(u.v) ? { text, copyText: u.v } : { text, callbackData: u.oi ? `dl:ci:${u.oi}:0` : `dl:copy:${orderId}:${n}` });
   });
   if (values.length > 1) {
     const all = values.join("\n");
@@ -595,6 +653,8 @@ export function comeBackMessage(u: { telegramHandle?: string | null; firstName?:
 export const DELIVERY_FILE_THRESHOLD = 15;
 
 export interface DeliveryLine {
+  /** Lets copy buttons for over-long values fetch exactly this unit (dl:ci). */
+  orderItemId?: string;
   productName: string;
   variantName: string;
   payload: DeliveryPayload;

@@ -6,7 +6,7 @@ import type { NormalizedPaymentEvent } from "@gis/payments";
 import { effectiveHours, encryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
 import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
 import { accrueCommissionTx } from "./commission.js";
-import { assignAccountSlot, assignLicenseKey, buildDeliveryText, deliveryExpiry, buildCombinedDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
+import { copyButtonsFor, assignAccountSlot, assignLicenseKey, buildDeliveryText, deliveryExpiry, buildCombinedDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
 import { logWallet } from "../logs.service.js";
@@ -274,7 +274,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
           const reusable = await fulfillReusableItemTx(tx, item, masterKey);
           if (reusable) {
             if (order.user.telegramId !== null) {
-              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload: reusable, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+              deliveries.push({ orderItemId: item.id, productName: item.productNameSnap, variantName: item.variantNameSnap, payload: reusable, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             }
             await accrueCommissionTx(tx, item, order.currency);
             continue;
@@ -310,7 +310,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               },
             });
             if (order.user.telegramId !== null) {
-              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+              deliveries.push({ orderItemId: item.id, productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             }
           } else {
             const creds = await assignAccountSlot(tx, item.variantId, item.id, masterKey, true);
@@ -335,7 +335,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
               },
             });
             if (order.user.telegramId !== null) {
-              deliveries.push({ productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
+              deliveries.push({ orderItemId: item.id, productName: item.productNameSnap, variantName: item.variantNameSnap, payload, activationGuide: guide, allowPwChange: item.variant.product.allowPasswordChange });
             }
           }
           deliveredThisItem = true;
@@ -461,9 +461,9 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       );
       if (outcome.deliveries.length === 1) {
         const d = outcome.deliveries[0]!;
-        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: deliveryButtons(credsOf(d.payload), { orderId }), followUp: DELIVERY_FOLLOWUP });
+        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: copyButtonsFor(d.payload, { orderItemId: d.orderItemId, orderId }), followUp: DELIVERY_FOLLOWUP });
       } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-        await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, undefined, DELIVERY_FOLLOWUP);
+        await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${orderId}` }], DELIVERY_FOLLOWUP);
       } else if (outcome.deliveries.length > 1) {
         await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId), followUp: DELIVERY_FOLLOWUP });
       }
