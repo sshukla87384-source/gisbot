@@ -94,6 +94,8 @@ const bodies = {
     sweepMinUsd: z.record(z.string().max(24), z.number().min(0).max(100_000)).optional(),
     toleranceStablePct: z.number().min(0).max(20).optional(),
     toleranceVolatilePct: z.number().min(0).max(20).optional(),
+    /** Move received funds to the payout wallets automatically (default off = manual withdraw). */
+    autoSweep: z.boolean().optional(),
   }),
 } as const;
 
@@ -134,6 +136,7 @@ async function snapshot() {
       sweepMinUsd: terminal.sweepMinUsd,
       toleranceStablePct: terminal.toleranceStablePct,
       toleranceVolatilePct: terminal.toleranceVolatilePct,
+      autoSweep: terminal.autoSweep,
       chains: TERMINAL_CHAINS.map((c) => ({ code: c.code, label: `${c.asset} · ${c.chainLabel}`, defaultSweepMinUsd: c.defaultSweepMinUsd })),
     },
   };
@@ -238,6 +241,7 @@ export class FeaturesController {
         if (b.sweepMinUsd) patch.sweepMinUsd = Object.fromEntries(Object.entries(b.sweepMinUsd).filter(([c]) => known.has(c)));
         if (b.toleranceStablePct !== undefined) patch.toleranceStablePct = b.toleranceStablePct;
         if (b.toleranceVolatilePct !== undefined) patch.toleranceVolatilePct = b.toleranceVolatilePct;
+        if (b.autoSweep !== undefined) patch.autoSweep = b.autoSweep;
         if (Object.keys(patch).length) await setTerminalConfig(patch);
         break;
       }

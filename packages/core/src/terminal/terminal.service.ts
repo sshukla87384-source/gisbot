@@ -53,10 +53,16 @@ export interface TerminalConfig {
   /** Underpayment tolerance, percent (stable / volatile). */
   toleranceStablePct: number;
   toleranceVolatilePct: number;
+  /**
+   * Move received funds to the payout wallet automatically. OFF by default:
+   * money stays on the terminal's addresses until the operator taps
+   * 💸 Withdraw — they decide when it leaves.
+   */
+  autoSweep: boolean;
 }
 
 const CFG_KEY = "terminal.cfg";
-const DEFAULT_CFG: TerminalConfig = { enabled: [], payout: {}, sweepMinUsd: {}, toleranceStablePct: 1, toleranceVolatilePct: 2.5 };
+const DEFAULT_CFG: TerminalConfig = { enabled: [], payout: {}, sweepMinUsd: {}, toleranceStablePct: 1, toleranceVolatilePct: 2.5, autoSweep: false };
 let cfgCache: { at: number; value: TerminalConfig } | null = null;
 
 export async function getTerminalConfig(): Promise<TerminalConfig> {
@@ -72,6 +78,7 @@ export async function getTerminalConfig(): Promise<TerminalConfig> {
         sweepMinUsd: v.sweepMinUsd && typeof v.sweepMinUsd === "object" ? { ...v.sweepMinUsd } : {},
         toleranceStablePct: typeof v.toleranceStablePct === "number" ? v.toleranceStablePct : 1,
         toleranceVolatilePct: typeof v.toleranceVolatilePct === "number" ? v.toleranceVolatilePct : 2.5,
+        autoSweep: v.autoSweep === true,
       };
     }
   } catch { /* defaults */ }
@@ -85,6 +92,7 @@ export async function setTerminalConfig(patch: Partial<TerminalConfig>): Promise
   const value = {
     enabled: [...next.enabled], payout: { ...next.payout }, sweepMinUsd: { ...next.sweepMinUsd },
     toleranceStablePct: next.toleranceStablePct, toleranceVolatilePct: next.toleranceVolatilePct,
+    autoSweep: next.autoSweep,
   };
   await prisma.setting.upsert({ where: { key: CFG_KEY }, create: { key: CFG_KEY, value }, update: { value } });
   cfgCache = { at: Date.now(), value: next };
@@ -404,10 +412,25 @@ async function creditStrandedPayment(r: { id: string; chain: string; userId: str
  * EXPIRED slots that hold money (a short payment that was never completed),
  * so nothing is ever stranded on a payment address.
  */
-export async function sweepTerminalPayments(limit = 10): Promise<number> {
+export async function sweepTerminalPayments(limit = 10, opts: { manual?: boolean } = {}): Promise<number> {
   if (!(await hasTerminalSeed())) return 0;
   const cfg = await getTerminalConfig();
   const now = new Date();
+  if (!opts.manual && !cfg.autoSweep) {
+    // Manual mode: nothing leaves the terminal on its own. Customers are still
+    // made whole — a short payment that was never completed is credited to
+    // their wallet on schedule; only the transfer waits for 💸 Withdraw.
+    const stranded = await prisma.terminalPayment.findMany({
+      where: { status: { in: ["PARTIAL", "EXPIRED"] }, receivedAmount: { not: "0" }, createdAt: { lt: new Date(now.getTime() - 24 * 3600_000) } },
+      orderBy: { updatedAt: "asc" },
+      take: limit,
+    });
+    for (const r of stranded) {
+      const done = await prisma.walletTransaction.findUnique({ where: { idempotencyKey: `terminal-partial:${r.id}` }, select: { id: true } }).catch(() => null);
+      if (!done) await creditStrandedPayment(r).catch(() => undefined);
+    }
+    return 0;
+  }
   const stale = new Date(now.getTime() - 15 * 60_000);
   const rows = await prisma.terminalPayment.findMany({
     where: {
@@ -486,10 +509,40 @@ async function gasAlertThrottled(chain: string, note: string): Promise<void> {
   await enqueueAdminAlert(`⛽ Terminal needs gas — ${note}`).catch(() => undefined);
 }
 
-/** Admin: force a sweep pass now. */
+/**
+ * Admin: 💸 Withdraw — move everything waiting on the terminal to the payout
+ * wallets now (works whether auto-transfer is on or off). Runs passes until
+ * nothing more is due, so a backlog goes in one tap.
+ */
 export async function sweepTerminalNow(): Promise<number> {
-  await prisma.terminalPayment.updateMany({ where: { sweepStatus: { in: ["RETRY", "SKIPPED"] } }, data: { nextSweepAt: new Date() } });
-  return sweepTerminalPayments(25);
+  await prisma.terminalPayment.updateMany({ where: { sweepStatus: { in: ["RETRY", "SKIPPED", "PENDING"] } }, data: { nextSweepAt: new Date() } });
+  let total = 0;
+  for (let pass = 0; pass < 8; pass++) {
+    const n = await sweepTerminalPayments(25, { manual: true });
+    total += n;
+    if (n === 0) break;
+  }
+  return total;
+}
+
+/** What is sitting on the terminal waiting to be withdrawn, per network. */
+export async function terminalWaitingTotals(): Promise<Array<{ chain: string; label: string; asset: string; amount: number; payments: number; payout: string | null }>> {
+  const cfg = await getTerminalConfig();
+  const rows = await prisma.terminalPayment.findMany({
+    where: { sweepStatus: { in: ["PENDING", "RETRY", "SWEEPING", "SKIPPED"] }, receivedAmount: { not: "0" } },
+    select: { chain: true, receivedAmount: true },
+  });
+  const by = new Map<string, { amount: number; payments: number }>();
+  for (const r of rows) {
+    const cur = by.get(r.chain) ?? { amount: 0, payments: 0 };
+    cur.amount += Number.parseFloat(r.receivedAmount) || 0;
+    cur.payments++;
+    by.set(r.chain, cur);
+  }
+  return [...by.entries()].map(([code, v]) => {
+    const c = terminalChain(code);
+    return { chain: code, label: c?.chainLabel ?? code, asset: c?.asset ?? code, amount: v.amount, payments: v.payments, payout: cfg.payout[code] ?? null };
+  });
 }
 
 // ── Admin views ──────────────────────────────────────────────────────────────

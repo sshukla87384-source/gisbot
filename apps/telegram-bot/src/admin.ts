@@ -203,11 +203,13 @@ import {
   importTerminalSeed,
   removeTerminalSeed,
   getTerminalConfig,
+  setTerminalConfig,
   toggleTerminalChain,
   setTerminalPayout,
   terminalGasReport,
   terminalStats,
   sweepTerminalNow,
+  terminalWaitingTotals,
   recentTerminalPayments,
   listSuppliers,
   addSupplier,
@@ -1042,16 +1044,23 @@ async function railsView(ctx: Ctx): Promise<void> {
  * per payment, auto-sweep to the operator's own wallet. No processor, no KYC.
  */
 async function terminalView(ctx: Ctx): Promise<void> {
-  const [seeded, cfg, stats] = await Promise.all([hasTerminalSeed(), getTerminalConfig(), terminalStats().catch(() => null)]);
+  const [seeded, cfg, stats, waiting] = await Promise.all([hasTerminalSeed(), getTerminalConfig(), terminalStats().catch(() => null), terminalWaitingTotals().catch(() => [])]);
   const fp = seeded ? await terminalFingerprint() : "";
   const kb = new InlineKeyboard();
   const lines = [
     "🔐 <b>Private crypto terminal</b>",
     "",
     seeded ? `🔑 Seed: <b>loaded</b> (id <code>${fp}</code>)` : "🔑 Seed: <b>none yet</b> — create one or import your 12 words.",
-    stats ? `📊 Open: <b>${stats.open}</b> · Paid 24h: <b>${stats.paid24h}</b> (${stats.usd24h.toFixed(2)}) · Awaiting sweep: <b>${stats.unswept}</b>` : "",
+    stats ? `📊 Open: <b>${stats.open}</b> · Paid 24h: <b>${stats.paid24h}</b> (${stats.usd24h.toFixed(2)})` : "",
+    waiting.length
+      ? `💰 <b>Waiting on the terminal:</b>\n${waiting.map((w) => `• ${w.amount.toFixed(w.amount < 1 ? 6 : 2)} ${escapeHtml(w.asset)} (${escapeHtml(w.label)}) · ${w.payments} payment(s)`).join("\n")}`
+      : "💰 Nothing waiting on the terminal.",
     "",
-    "Every order / deposit gets a <b>fresh address</b> from this seed on the network the customer picks. The worker watches the chain, delivers on confirmation and <b>sweeps the money to your payout wallet</b>.",
+    cfg.autoSweep
+      ? "🔁 <b>Auto-transfer is ON</b> — received money is moved to your payout wallet automatically."
+      : "✋ <b>Auto-transfer is OFF</b> — received money stays on the terminal until <b>you</b> tap 💸 Withdraw.",
+    "",
+    "Every order / deposit gets a <b>fresh address</b> from this seed on the network the customer picks. The worker watches the chain and delivers on confirmation.",
     "",
     "<b>Per network:</b> tap the name to turn it on/off, 🏦 to set where swept funds go (your Trust Wallet address on that network). A network is live only when it is ON <i>and</i> has a payout address.",
     "⛽ BEP20 / Polygon / TRC20 sweeps need a little gas on the main address — see Gas balances.",
@@ -1064,7 +1073,9 @@ async function terminalView(ctx: Ctx): Promise<void> {
   }
   if (!seeded) kb.text("🆕 Create 12-word seed", cb("adm", "tmnew")).text("📥 Import seed", cb("adm", "tmimport")).row();
   else {
-    kb.text("⛽ Gas balances", cb("adm", "tmgas")).text("🧹 Sweep now", cb("adm", "tmsweep")).row();
+    kb.add(sbtn("💸 Withdraw to my wallet now", cb("adm", "tmsweep"), "success")).row();
+    kb.text(cfg.autoSweep ? "🔁 Auto-transfer: ON — turn off" : "✋ Auto-transfer: OFF — turn on", cb("adm", "tmauto", cfg.autoSweep ? "0" : "1")).row();
+    kb.text("⛽ Gas balances", cb("adm", "tmgas")).row();
     kb.text("📜 Recent payments", cb("adm", "tmrecent")).text("🗑 Remove seed", cb("adm", "tmdel")).row();
   }
   kb.text("◀️ Back", cb("adm", "m_pay"));
@@ -4713,10 +4724,27 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await ctx.reply(`⛽ <b>Gas / main addresses</b>\n\n${text}\n\n<i>SOL, TON and LTC pay their own fee from the swept amount.</i>`, { parse_mode: "HTML" });
       return;
     }
+    // 💸 Withdraw: confirm with the amounts and destinations first.
     case "tmsweep": {
-      await ctx.reply("🧹 Sweeping…");
+      const [waiting, cfgW] = await Promise.all([terminalWaitingTotals(), getTerminalConfig()]);
+      if (waiting.length === 0) { flash(ctx, "💰 Nothing is waiting on the terminal right now."); return terminalView(ctx); }
+      const lines = waiting.map((w) => `• <b>${w.amount.toFixed(w.amount < 1 ? 6 : 2)} ${escapeHtml(w.asset)}</b> (${escapeHtml(w.label)}) → ${w.payout ? `<code>${escapeHtml(w.payout)}</code>` : "⚠️ <b>no payout address set</b> — set 🏦 first"}`);
+      void cfgW;
+      await ctx.reply(["💸 <b>Withdraw to your wallet?</b>", "", ...lines, "", "<i>Network fees are paid from the gas balance (BEP20 / Polygon / TRC20) or from the amount (SOL, TON, LTC).</i>"].join("\n"), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().add(sbtn("✅ Yes, withdraw now", cb("adm", "tmsweepgo"), "success")).row().text("✖️ Cancel", cb("adm", "tm")),
+      });
+      return;
+    }
+    case "tmsweepgo": {
+      await ctx.reply("💸 Withdrawing… transfers are confirmed as alerts.");
       const n = await sweepTerminalNow().catch((e: unknown) => { void e; return -1; });
-      await ctx.reply(n < 0 ? "❌ Sweep run failed — check logs." : `🧹 Sweep pass done — ${n} transfer(s) sent. Details arrive as alerts.`);
+      await ctx.reply(n < 0 ? "❌ Withdrawal run failed — check 🩺 Logs." : n === 0 ? "ℹ️ Nothing could be sent right now (gas missing or below the minimum) — see the alerts / ⛽ Gas balances." : `✅ ${n} transfer(s) sent to your payout wallet(s).`);
+      return terminalView(ctx);
+    }
+    case "tmauto": {
+      await setTerminalConfig({ autoSweep: id === "1" });
+      flash(ctx, id === "1" ? "🔁 Auto-transfer ON — received money moves to your payout wallet automatically." : "✋ Auto-transfer OFF — money stays on the terminal until you tap 💸 Withdraw.");
       return terminalView(ctx);
     }
     case "tmrecent": {
