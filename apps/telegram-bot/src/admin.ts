@@ -525,6 +525,7 @@ function panelKeyboard(): InlineKeyboard {
     .add(sbtn("💰 Money", cb("adm", "m_money"), "success"), sbtn("💳 Payments & APIs", cb("adm", "m_pay"), "primary")).row()
     .add(sbtn("📣 Marketing", cb("adm", "m_mkt"), "primary"), sbtn("🎨 Content & Style", cb("adm", "m_content"), "primary")).row()
     .add(sbtn("🧰 Tools", cb("adm", "m_tools"), "primary"), sbtn("🔐 Security", cb("adm", "m_sec"), "primary")).row()
+    .add(sbtn("🗂 Categories & Shop layout", cb("adm", "shoplayout"), "success")).row()
     .add(sbtn("↻ Refresh", cb("adm", "home"), "success")).row();
 }
 
@@ -540,7 +541,8 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_prod: { title: "🛍 <b>Products Management</b>", subtitle: "Add and manage your catalog", rows: [
       [["➕ Add Product", cb("adm", "addp"), "success"]],
       [["📦 All Products", cb("adm", "prods"), "primary"]],
-      [["🗂 Categories &amp; grouping", cb("adm", "cats"), "success"]],
+      [["🏠 Shop layout (categories on top)", cb("adm", "shoplayout"), "success"]],
+      [["🗂 Categories & grouping", cb("adm", "cats"), "success"]],
       [["🔔 Waiting Lists", cb("adm", "wait"), "success"]],
       [["🧰 Repair account stock", cb("adm", "fixacc"), "primary"]],
     ] },
@@ -1975,6 +1977,36 @@ async function recoveryView(ctx: Ctx): Promise<void> {
     kb,
     true,
   );
+}
+
+/**
+ * 🏠 Shop layout — one tap per category: ✅ shows it as a tile at the top of
+ * 🛍 Shop ("ElevenLabs (3)"), ▫️ lists its products in the normal list.
+ */
+async function shopLayoutView(ctx: Ctx): Promise<void> {
+  const [cats, homeIds] = await Promise.all([listCategoriesAdmin(), getShopHomeCategoryIds()]);
+  const home = new Set(homeIds);
+  const kb = new InlineKeyboard();
+  const SHOWN = 40;
+  const ordered = [...cats.filter((c) => home.has(c.id)).sort((a, b) => homeIds.indexOf(a.id) - homeIds.indexOf(b.id)), ...cats.filter((c) => !home.has(c.id))];
+  ordered.slice(0, SHOWN).forEach((c, i) => {
+    kb.text(`${home.has(c.id) ? "✅" : "▫️"} ${c.name.slice(0, 16)} (${c.productCount})`, cb("adm", "shoptg", c.id));
+    if (i % 2 === 1) kb.row();
+  });
+  kb.row()
+    .add(sbtn("➕ New category", cb("adm", "catnew"), "success"), sbtn("🗂 Assign products", cb("adm", "cats"), "primary")).row()
+    .text("👀 Preview shop", cb("shp", "home", 1)).row()
+    .text("◀️ Back", cb("adm", "home"));
+  await show(ctx, [
+    "🏠 <b>Shop layout</b>",
+    "",
+    "Tap a category to put it at the <b>top of 🛍 Shop</b> (✅) as a tile with its product count — two per row, like <i>ElevenLabs (3)</i>. Tap again to remove (▫️).",
+    "Their products open from the tile; every other product is listed below as <i>Name — $price (Stock: n)</i>.",
+    "",
+    homeIds.length ? `✅ On top now: <b>${homeIds.length}</b> (in the order shown first)` : "Nothing on top yet — the shop shows one plain list.",
+    cats.length === 0 ? "\nNo categories yet — tap ➕ New category, then 🗂 Assign products to fill it." : "",
+    cats.length > SHOWN ? `<i>Showing ${SHOWN} of ${cats.length}.</i>` : "",
+  ].filter(Boolean).join("\n"), kb, true);
 }
 
 async function categoriesAdminView(ctx: Ctx): Promise<void> {
@@ -3564,6 +3596,12 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const list = await toggleShopHomeCategory(id);
       flash(ctx, list.includes(id) ? "🏠 Shown at the top of the shop." : "🏠 Removed from the top of the shop.");
       return categoriesAdminView(ctx);
+    }
+    case "shoplayout": return shopLayoutView(ctx);
+    case "shoptg": {
+      const list = await toggleShopHomeCategory(id);
+      flash(ctx, list.includes(id) ? "✅ Shown at the top of the shop." : "▫️ Removed from the top of the shop.");
+      return shopLayoutView(ctx);
     }
     case "catnew":
       ctx.session.awaiting = "admin_cat_new";
