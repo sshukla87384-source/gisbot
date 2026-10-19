@@ -109,6 +109,57 @@ export async function getHideSoldOut(): Promise<boolean> {
   return row?.value === undefined || row?.value === null ? true : Boolean(row.value);
 }
 
+/**
+ * Shop home layout: the categories shown as tiles ("ElevenLabs (3)") at the
+ * top of 🛍 Shop, in this order. Their products are reached through the tile;
+ * every other product is listed below as before. Empty = the plain list.
+ */
+const HOME_CATS_KEY = "shop.homeCategories";
+
+export async function getShopHomeCategoryIds(): Promise<string[]> {
+  const row = await prisma.setting.findUnique({ where: { key: HOME_CATS_KEY } }).catch(() => null);
+  const v = row?.value as { ids?: unknown } | null | undefined;
+  return Array.isArray(v?.ids) ? v.ids.filter((x): x is string => typeof x === "string").slice(0, 40) : [];
+}
+
+/** Add or remove one category from the shop home tiles. Returns the new list. */
+export async function toggleShopHomeCategory(categoryId: string): Promise<string[]> {
+  const cur = await getShopHomeCategoryIds();
+  const next = cur.includes(categoryId) ? cur.filter((x) => x !== categoryId) : [...cur, categoryId].slice(0, 40);
+  await prisma.setting.upsert({ where: { key: HOME_CATS_KEY }, create: { key: HOME_CATS_KEY, value: { ids: next } }, update: { value: { ids: next } } });
+  await invalidate("cat:*");
+  return next;
+}
+
+export interface HomeTile { id: string; name: string; emoji: string | null; count: number; hasChildren: boolean; iconCustomEmojiId: string | null }
+
+/**
+ * The shop home tiles with live product counts (respecting hide-sold-out), and
+ * every category id they cover — so the product list below can leave those
+ * products out. A tile with nothing to sell is not shown.
+ */
+export async function shopHomeTiles(opts: { currency: Currency; userId?: string; locale?: string }): Promise<{ tiles: HomeTile[]; coveredIds: string[] }> {
+  const ids = await getShopHomeCategoryIds();
+  if (ids.length === 0) return { tiles: [], coveredIds: [] };
+  const cats = await prisma.category.findMany({
+    where: { id: { in: ids }, isActive: true, deletedAt: null },
+    include: { _count: { select: { children: true } } },
+  });
+  const byId = new Map(cats.map((c) => [c.id, c]));
+  const tiles: HomeTile[] = [];
+  const covered = new Set<string>();
+  for (const id of ids) {
+    const c = byId.get(id);
+    if (!c) continue;
+    const under = await categoryIdsUnder(c.id);
+    for (const u of under) covered.add(u);
+    const r = await listProducts({ categoryIds: under, currency: opts.currency, page: 1, pageSize: 1, userId: opts.userId, locale: opts.locale });
+    if (r.total === 0) continue;
+    tiles.push({ id: c.id, name: c.name, emoji: c.emoji, count: r.total, hasChildren: c._count.children > 0, iconCustomEmojiId: r.items[0]?.iconCustomEmojiId ?? null });
+  }
+  return { tiles, coveredIds: [...covered] };
+}
+
 export async function setHideSoldOut(on: boolean): Promise<void> {
   await prisma.setting.upsert({
     where: { key: HIDE_SOLD_OUT_KEY },
@@ -226,6 +277,8 @@ export async function listProducts(opts: {
   locale?: string;
   /** Several categories at once — a parent tile includes its children. */
   categoryIds?: string[];
+  /** Leave these categories out (the shop home lists their products as tiles instead). */
+  excludeCategoryIds?: string[];
   /**
    * Invert the sold-out filter: list ONLY what is out of stock. This is the
    * shop's "😴 Sold out" shelf, which is also the one place a customer can ask
@@ -242,6 +295,7 @@ export async function listProducts(opts: {
 }): Promise<Paged<ProductListItem>> {
   const { categoryId, search, featuredOnly, currency, page, userId, channel = "DIRECT" } = opts;
   const categoryIds = opts.categoryIds && opts.categoryIds.length > 0 ? opts.categoryIds : null;
+  const excludeIds = !categoryIds && !categoryId && opts.excludeCategoryIds && opts.excludeCategoryIds.length > 0 ? opts.excludeCategoryIds : null;
   const locale = opts.locale ?? "en";
   const size = opts.pageSize ?? PAGE_SIZE;
   // Only the VIP price override is user-dependent, and overrides are rare. Keying
@@ -264,12 +318,12 @@ export async function listProducts(opts: {
   const hideSoldOut = soldOutOnly || opts.includeSoldOut === true
     ? false
     : await cached("cat:hidesold", 60, getHideSoldOut).catch(() => true);
-  const cacheKey = `cat:prods:${categoryIds ? `m${sha256Hex(categoryIds.slice().sort().join(",")).slice(0, 10)}` : (categoryId ?? "all")}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}:${soldOutOnly ? "so" : hideSoldOut ? "h" : "x"}`;
+  const cacheKey = `cat:prods:${categoryIds ? `m${sha256Hex(categoryIds.slice().sort().join(",")).slice(0, 10)}` : excludeIds ? `x${sha256Hex(excludeIds.slice().sort().join(",")).slice(0, 10)}` : (categoryId ?? "all")}:${featuredOnly ? "f" : "a"}:${searchPart}:${currency}:${page}:${size}:${userPart}:${channel}:${locale}:${soldOutOnly ? "so" : hideSoldOut ? "h" : "x"}`;
   return cached(cacheKey, CACHE_TTL, async () => {
     const where = {
       status: "ACTIVE" as const,
       deletedAt: null,
-      ...(categoryIds ? { categoryId: { in: categoryIds } } : categoryId ? { categoryId } : {}),
+      ...(categoryIds ? { categoryId: { in: categoryIds } } : categoryId ? { categoryId } : excludeIds ? { categoryId: { notIn: excludeIds } } : {}),
       ...(featuredOnly ? { isFeatured: true } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
     };

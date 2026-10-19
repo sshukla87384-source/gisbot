@@ -30,6 +30,7 @@ import {
   listOrders,
   listOrderItems,
   listProducts,
+  shopHomeTiles,
   listApiKeysByOwner,
   listTickets,
   getMyTicket,
@@ -116,10 +117,10 @@ export async function menuView(user: BotUser): Promise<View> {
 }
 
 
-/** "Name (29)" · "❌ Name (0)" · "Name (∞)" — matches the stock-list style. */
+/** "Name — $5 (Stock: 29)" · "(Stock: ∞)" — matches the stock-list style. */
 function stockTag(p: { inStock: boolean; stock: number | null }): string {
-  if (p.stock === null) return " (∞)";
-  return ` (${p.stock})`;
+  if (p.stock === null) return " (Stock: ∞)";
+  return ` (Stock: ${p.stock})`;
 }
 function outMark(p: { inStock: boolean }): string {
   return p.inStock ? "" : "❌ ";
@@ -144,8 +145,20 @@ export async function soldOutView(user: BotUser, page: number): Promise<View> {
 }
 
 export async function shopHomeView(user: BotUser, page: number): Promise<View> {
-  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale });
+  // Chosen categories first, as two-per-row tiles with their product count
+  // ("ElevenLabs (3)"); their products live behind the tile. Everything else
+  // follows as full-width rows: "Name — $price (Stock: n)".
+  const home = await shopHomeTiles({ currency: user.currency as Currency, userId: user.id, locale: user.locale }).catch(() => ({ tiles: [], coveredIds: [] as string[] }));
+  const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale, excludeCategoryIds: home.coveredIds });
   const kb = new InlineKeyboard();
+  if (page <= 1 && home.tiles.length > 0) {
+    home.tiles.forEach((t, i) => {
+      const label = `${t.iconCustomEmojiId ? "" : `${t.emoji ?? "📂"} `}${t.name} (${t.count})`;
+      kb.add(sbtn(label, cb("shp", t.hasChildren ? "sub" : "cat", t.id, 1), "primary", t.iconCustomEmojiId ?? undefined));
+      if (i % 2 === 1) kb.row();
+    });
+    kb.row();
+  }
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
@@ -160,8 +173,8 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   // so the handlers stay; only the two rows here are gone.
   backToMenuRow(kb);
   return {
-    text: result.items.length > 0
-      ? "🛍 <b>All Products</b>\n<i>How to buy: tap a product → choose quantity → pay from your 💰 wallet. Delivery is instant for automatic items.</i>"
+    text: result.items.length > 0 || home.tiles.length > 0
+      ? `🛍 <b>Available Products</b>\n<i>${home.tiles.length > 0 ? "Tap a category to see its plans, or a product below. " : ""}How to buy: tap a product → choose quantity → pay from your 💰 wallet. Delivery is instant for automatic items.</i>`
       : "🛍 The shop is being restocked — check back soon!",
     kb,
   };
@@ -192,9 +205,11 @@ export async function productListView(
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
   kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
-  kb.text("◀️ Categories", cb("shp", "root"));
+  kb.text("◀️ Back to shop", cb("shp", "home", 1));
   backToMenuRow(kb);
-  return { text: result.total > 0 ? "🛍 <b>Products</b>" : "No products here yet.", kb };
+  const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true, emoji: true } }).catch(() => null);
+  const title = cat ? `${cat.emoji ?? "📂"} <b>${escapeHtml(cat.name)}</b>` : "🛍 <b>Products</b>";
+  return { text: result.total > 0 ? `${title}\n<i>Choose a plan:</i>` : "No products here yet.", kb };
 }
 
 export async function searchResultsView(user: BotUser, query: string, page: number): Promise<View> {

@@ -106,6 +106,8 @@ import {
   confirmManualPayment,
   createCategoryQuick,
   listCategoriesAdmin,
+  getShopHomeCategoryIds,
+  toggleShopHomeCategory,
   listProductsForCategorising,
   productIdsForCategorising,
   bulkSetCategory,
@@ -1965,14 +1967,16 @@ async function recoveryView(ctx: Ctx): Promise<void> {
 }
 
 async function categoriesAdminView(ctx: Ctx): Promise<void> {
-  const cats = await listCategoriesAdmin();
+  const [cats, homeIds] = await Promise.all([listCategoriesAdmin(), getShopHomeCategoryIds()]);
+  const home = new Set(homeIds);
   const kb = new InlineKeyboard().add(sbtn("➕ New category", cb("adm", "catnew"), "success")).row();
-  // Five buttons per category against Telegram's 100-button ceiling: past 19 of
-  // them the WHOLE keyboard is rejected and the screen arrives with no buttons
-  // at all, so the list is capped and the remainder is reported in the text.
-  const SHOWN = 19;
+  // Six buttons per category against Telegram's 100-button ceiling: past that
+  // the WHOLE keyboard is rejected and the screen arrives with no buttons at
+  // all, so the list is capped and the remainder is reported in the text.
+  const SHOWN = 15;
   for (const c of cats.slice(0, SHOWN)) {
-    kb.text(`${c.emoji ?? "🗂"} ${c.name.slice(0, 18)} · ${c.productCount}`, cb("adm", "catpick", c.id)).row();
+    kb.text(`${c.emoji ?? "🗂"} ${c.name.slice(0, 18)} · ${c.productCount}`, cb("adm", "catpick", c.id))
+      .text(home.has(c.id) ? "🏠 On shop top ✅" : "🏠 Show on top", cb("adm", "cathome", c.id)).row();
     kb.text("😀", cb("adm", "catemoji", c.id))
       .text("✏️", cb("adm", "catren", c.id))
       .text(c.isActive ? "👁" : "🙈", cb("adm", "cattgl", c.id))
@@ -1986,6 +1990,9 @@ async function categoriesAdminView(ctx: Ctx): Promise<void> {
     "Customers see these as a grid of tiles under <b>🗂 Shop by Category</b>.",
     "",
     "Tap a category to <b>bulk-assign products</b> to it. Per row: 😀 tile emoji · ✏️ rename · 👁/🙈 show or hide the tile · 🗑 delete.",
+    "",
+    "🏠 <b>Show on top</b>: the category appears at the top of 🛍 Shop as a tile with its product count (e.g. <i>ElevenLabs (3)</i>), two per row, in the order you add them. Its products open from the tile; all other products are listed below.",
+    homeIds.length ? `On shop top now: <b>${homeIds.length}</b>` : "",
     "",
     cats.length === 0 ? "None yet — tap ➕ New category." : `<i>${cats.length} categories. Deleting one moves its products to Uncategorized, never deletes them.</i>`,
     cats.length > SHOWN ? `<i>Showing the first ${SHOWN} — Telegram won't render more buttons than that on one screen.</i>` : "",
@@ -3542,6 +3549,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "💰 Send what <b>you pay</b> per unit in <b>USD</b> (e.g. <code>1.80</code>), or <code>-</code> to clear it:");
       return;
     case "cats": return categoriesAdminView(ctx);
+    case "cathome": {
+      const list = await toggleShopHomeCategory(id);
+      flash(ctx, list.includes(id) ? "🏠 Shown at the top of the shop." : "🏠 Removed from the top of the shop.");
+      return categoriesAdminView(ctx);
+    }
     case "catnew":
       ctx.session.awaiting = "admin_cat_new";
       await askStep(ctx, "🗂 Send the <b>category name</b> (e.g. <code>Streaming</code>, <code>AI Tools</code>):");
