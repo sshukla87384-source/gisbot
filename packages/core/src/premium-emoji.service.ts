@@ -54,6 +54,14 @@ export async function setAutoEmojiConfig(patch: Partial<AutoEmojiConfig>): Promi
 /** Glyph key: the emoji without variation selectors, so ✔ and ✔️ match. */
 export const emojiKey = (glyph: string): string => glyph.replace(/️/g, "");
 
+/** Generic symbols safe to learn from the catalogue (never app logos). */
+const SAFE_LEARN = new Set([
+  "✅", "✔", "☑", "❌", "✖", "⚠", "⭐", "🌟", "✨", "🔥", "⚡", "💎", "💰", "💵", "💲", "💳", "🪙", "🎁", "🎉", "🚀",
+  "📦", "🛒", "🛍", "🔑", "🔐", "🔒", "🛡", "⏳", "⌛", "🕐", "📌", "👉", "➡", "▶", "◀", "🏆", "👑", "💯", "🆕", "🔔",
+  "📊", "❤", "💙", "💚", "💛", "🤝", "🌐", "🙏", "✏", "📋", "🧾", "🏠", "🔄", "➕", "🗑", "🎫", "💬", "👤", "👥", "🎡",
+  "🎯", "📈", "📉", "🔗", "📤", "🆘", "🛟", "⏰", "📅", "🟢", "🔴", "🟡", "⬇", "⬆", "💡", "📢", "🏷", "🔍", "🔎",
+].map((g) => g.replace(/️/g, "")));
+
 const TAG_RE = /<tg-emoji\s+emoji-id="(\d{5,25})"\s*>([\s\S]*?)<\/tg-emoji>/gi;
 
 let cache: { at: number; cfg: AutoEmojiConfig; map: Map<string, string> } | null = null;
@@ -67,31 +75,46 @@ export async function premiumGlyphMap(): Promise<{ cfg: AutoEmojiConfig; map: Ma
   const cfg = await getAutoEmojiConfig();
   const map = new Map<string, string>();
   if (cfg.enabled) {
-    if (cfg.learn) {
-      try {
-        const rows = await prisma.product.findMany({
-          where: {
-            deletedAt: null,
-            OR: [{ nameHtml: { contains: "tg-emoji" } }, { descriptionHtml: { contains: "tg-emoji" } }, { description: { contains: "tg-emoji" } }],
-          },
-          select: { nameHtml: true, descriptionHtml: true, description: true },
-          orderBy: { updatedAt: "desc" },
-          take: 400,
-        });
-        for (const r of rows) {
-          for (const src of [r.nameHtml, r.descriptionHtml, r.description]) {
-            if (!src) continue;
-            for (const m of src.matchAll(TAG_RE)) {
-              const glyph = (m[2] ?? "").replace(/<[^>]*>/g, "").trim();
-              const key = emojiKey(glyph);
-              // Only a single emoji is a safe stand-in; text inside a tag is not.
-              if (!key || !isSingleEmoji(key) || map.has(key)) continue;
-              map.set(key, m[1]!);
-            }
+    try {
+      const rows = await prisma.product.findMany({
+        where: {
+          deletedAt: null,
+          OR: [{ nameHtml: { contains: "tg-emoji" } }, { descriptionHtml: { contains: "tg-emoji" } }, { description: { contains: "tg-emoji" } }],
+        },
+        select: { id: true, nameHtml: true, descriptionHtml: true, description: true },
+        orderBy: { updatedAt: "desc" },
+        take: 400,
+      });
+      // glyph → id → set of products using that pairing.
+      const seen = new Map<string, Map<string, Set<string>>>();
+      for (const r of rows) {
+        for (const src of [r.nameHtml, r.descriptionHtml, r.description]) {
+          if (!src) continue;
+          for (const m of src.matchAll(TAG_RE)) {
+            const glyph = (m[2] ?? "").replace(/<[^>]*>/g, "").trim();
+            const key = emojiKey(glyph);
+            // Only a single emoji is a safe stand-in; text inside a tag is not.
+            if (!key || !isSingleEmoji(key)) continue;
+            const byId = seen.get(key) ?? new Map<string, Set<string>>();
+            const set = byId.get(m[1]!) ?? new Set<string>();
+            set.add(r.id);
+            byId.set(m[1]!, set);
+            seen.set(key, byId);
           }
         }
-      } catch { /* learning is best-effort */ }
-    }
+      }
+      for (const [key, byId] of seen) {
+        // The premium emoji used most for this glyph across the catalogue.
+        const [bestId, users] = [...byId.entries()].sort((a, b) => b[1].size - a[1].size)[0]!;
+        if (cfg.learn) { map.set(key, bestId); continue; }
+        // Safe learning (default): only generic symbols — ticks, stars, money,
+        // arrows, fire… — and only a pairing reused by 2+ products. An APP
+        // LOGO (a Netflix or PayPal sticker under 🎬 or 💰) belongs to one
+        // product; a shop's own ✅ / ⭐ / 💰 style repeats across many. This
+        // brings premium icons back to the menu without the logo leak.
+        if (SAFE_LEARN.has(key) && users.size >= 2) map.set(key, bestId);
+      }
+    } catch { /* learning is best-effort */ }
     try {
       const reg = await getCustomEmojiRegistry();
       // Hand-picked per-icon choices (🎯 Fix icons) are applied LAST so they
@@ -234,6 +257,11 @@ export function premiumEmojiTransformer(opts: { buttons: boolean }) {
   // When Telegram refuses premium emoji (bot owner without Premium), stop
   // adding them for a while instead of paying two API calls per message.
   let refusedUntil = 0;
+  // Consecutive premium refusals. ONE bad id (a deleted pack, a typo in
+  // 🎨 Custom Emoji) used to switch premium off for EVERY message for ten
+  // minutes after a single rejection — that is "premium emoji stopped
+  // showing". Now it takes three refusals in a row, and a success resets it.
+  let strikes = 0;
   return async (prev: ApiCall, method: string, payload: unknown, signal?: AbortSignal) => {
     if (!MARKUP_METHODS.has(method) || !payload || typeof payload !== "object" || Date.now() < refusedUntil) return prev(method, payload, signal);
     let state: { cfg: AutoEmojiConfig; map: Map<string, string> };
@@ -249,13 +277,20 @@ export function premiumEmojiTransformer(opts: { buttons: boolean }) {
     const changed = next.text !== p.text || next.caption !== p.caption || next.reply_markup !== p.reply_markup;
     if (!changed) return prev(method, payload, signal);
     const res = await prev(method, next, signal);
+    if (res.ok) strikes = 0;
     // Retry plain only for a premium-caused rejection. "message is not
     // modified", "chat not found" and the like are returned as they are — a
     // retry would flip an unchanged message between premium and plain.
     const desc = res.ok ? "" : (res.description ?? "");
     if (!res.ok && res.error_code === 400 && !/not modified/i.test(desc)) {
       if (PREMIUM_CAUSE.test(desc)) {
-        refusedUntil = Date.now() + 10 * 60_000;
+        // Button icons are the likelier culprit: keep premium text, drop icons.
+        if (next.reply_markup !== p.reply_markup && (next.text !== p.text || next.caption !== p.caption)) {
+          const textOnly = { ...next, reply_markup: p.reply_markup };
+          const r2 = await prev(method, textOnly, signal);
+          if (r2.ok) { strikes = 0; return r2; }
+        }
+        if (++strikes >= 3) { refusedUntil = Date.now() + 10 * 60_000; strikes = 0; }
         return prev(method, payload, signal);
       }
       // One message with broken HTML must not switch premium emoji off for

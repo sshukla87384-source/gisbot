@@ -1566,7 +1566,7 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
     .add(sbtn(auto.enabled ? "✨ Premium everywhere: ON" : "✨ Premium everywhere: OFF", cb("adm", "emojiauto", auto.enabled ? "0" : "1"), auto.enabled ? "success" : "danger")).row()
     .add(sbtn("🎯 Fix icons one by one (pick the right emoji)", cb("adm", "emojifix", "0"), "success")).row()
     .add(sbtn("🧹 Remove auto-added emoji (packs / bulk / products)", cb("adm", "emojiclean"), "danger")).row()
-    .text(auto.learn ? "🧠 Emoji from my products (often app logos): ON" : "🧠 Emoji from my products (often app logos): OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
+    .text(auto.learn ? "🧠 ALL emoji from my products (incl. app logos): ON" : "🧠 ALL emoji from my products (incl. app logos): OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
     .add(sbtn("📦 Import a premium emoji pack (1 link)", cb("adm", "emojipack"), "primary")).row()
     .add(sbtn("📥 Bulk add (send many at once)", cb("adm", "emojibulk"), "primary")).row()
     .text("➕ Add one (with a name)", cb("adm", "emojiadd")).row();
@@ -1582,7 +1582,7 @@ async function emojiRegistryView(ctx: Ctx): Promise<void> {
     "🎨 <b>Custom emoji</b>",
     "",
     auto.enabled
-      ? `✨ <b>Premium everywhere is ON</b> — every page, button, broadcast and delivery swaps a plain emoji for your premium one automatically. <b>${glyphs.map.size}</b> emoji are premium right now${auto.learn ? " (yours below + the ones used in your product names/descriptions)" : ""}.`
+      ? `✨ <b>Premium everywhere is ON</b> — every page, button, broadcast and delivery swaps a plain emoji for your premium one automatically. <b>${glyphs.map.size}</b> emoji are premium right now${auto.learn ? " (yours below + every one used in your product names/descriptions)" : " (yours below + generic ones like ✅ ⭐ 💰 🔥 that your products reuse — never app logos)"}.`
       : "✨ Premium everywhere is OFF — only the named spots below use premium emoji.",
     "",
     `🧩 <b>Bot buttons & screens covered: ${covered.length}/${BOT_UI_GLYPHS.length}</b>${missing.length ? `\nStill plain: ${missing.join(" ")}` : " — everything is premium ✅"}`,
