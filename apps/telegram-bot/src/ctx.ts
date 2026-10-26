@@ -43,6 +43,7 @@ export interface SessionData {
     | "admin_cat_emoji"
     | "admin_cat_rename"
     | "admin_cat_search"
+    | "admin_catlist_search"
     | "admin_margin_floor"
     | "admin_qual_threshold"
     | "admin_recov_minutes"
@@ -192,6 +193,10 @@ export interface SessionData {
   catPage?: number;
   catFilter?: string;
   catSearch?: string;
+  /** Category LISTS (Categories, Shop layout, product category picker): page + search. */
+  catListPage?: number;
+  catListSearch?: string;
+  catListFor?: "cats" | "shop";
   /** Supplier being configured from its docs. */
   supTarget?: string;
   /** Failed payment-verify attempts, so the paste state cannot stick forever. */

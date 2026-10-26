@@ -964,10 +964,42 @@ function rupeesToMinor(raw: string): number | null {
   return Math.round(n * 100);
 }
 
-async function categoryPickKb(): Promise<InlineKeyboard> {
-  const cats = await listCategoriesBrief();
+/**
+ * One page of a category list, optionally filtered by name. Every category
+ * screen used to show a fixed slice (15 / 40 / all) with no Next and no
+ * search — past that, categories simply could not be reached, and a long
+ * list could exceed Telegram's 100-button cap and lose the whole keyboard.
+ */
+function pageCats<T extends { name: string }>(all: T[], page: number, search: string | undefined, size: number): { items: T[]; page: number; pages: number; total: number } {
+  const q = (search ?? "").trim().toLowerCase();
+  const list = q ? all.filter((c) => c.name.toLowerCase().includes(q)) : all;
+  const pages = Math.max(1, Math.ceil(list.length / size));
+  const pg = Math.min(Math.max(1, page), pages);
+  return { items: list.slice((pg - 1) * size, pg * size), page: pg, pages, total: list.length };
+}
+
+/** ◀️ n/N ▶️ plus 🔎 search / clear, for a category list. */
+function catPagerRow(kb: InlineKeyboard, r: { page: number; pages: number }, pageAction: string, search: string | undefined, forView: "cats" | "shop"): void {
+  if (r.pages > 1) {
+    if (r.page > 1) kb.text("◀️ Prev", cb("adm", pageAction, String(r.page - 1)));
+    kb.text(`${r.page}/${r.pages}`, cb("mnu", "noop"));
+    if (r.page < r.pages) kb.text("Next ▶️", cb("adm", pageAction, String(r.page + 1)));
+    kb.row();
+  }
+  kb.text(search ? `🔎 “${search.slice(0, 14)}” — clear` : "🔎 Search categories", cb("adm", search ? "catlsclr" : "catls", forView)).row();
+}
+
+async function categoryPickKb(page = 1): Promise<InlineKeyboard> {
+  const all = await listCategoriesBrief();
+  const r = pageCats(all, page, undefined, 20);
   const kb = new InlineKeyboard();
-  for (const c of cats) kb.text(`${c.emoji ? `${c.emoji} ` : ""}${c.name}`, cb("adm", "pcat", c.id)).row();
+  for (const c of r.items) kb.text(`${c.emoji ? `${c.emoji} ` : ""}${c.name}`, cb("adm", "pcat", c.id)).row();
+  if (r.pages > 1) {
+    if (r.page > 1) kb.text("◀️ Prev", cb("adm", "pcatpg", String(r.page - 1)));
+    kb.text(`${r.page}/${r.pages}`, cb("mnu", "noop"));
+    if (r.page < r.pages) kb.text("Next ▶️", cb("adm", "pcatpg", String(r.page + 1)));
+    kb.row();
+  }
   kb.text("➕ New category", cb("adm", "pnewcat")).row();
   kb.text("⏭ Skip (no category)", cb("adm", "pskip")).row();
   kb.text("✖️ Cancel", cb("adm", "home"));
@@ -2022,13 +2054,16 @@ async function shopLayoutView(ctx: Ctx): Promise<void> {
   const [cats, homeIds] = await Promise.all([listCategoriesAdmin(), getShopHomeCategoryIds()]);
   const home = new Set(homeIds);
   const kb = new InlineKeyboard();
-  const SHOWN = 40;
   const ordered = [...cats.filter((c) => home.has(c.id)).sort((a, b) => homeIds.indexOf(a.id) - homeIds.indexOf(b.id)), ...cats.filter((c) => !home.has(c.id))];
-  ordered.slice(0, SHOWN).forEach((c, i) => {
+  const search = ctx.session.catListFor === "shop" ? ctx.session.catListSearch : undefined;
+  const r = pageCats(ordered, ctx.session.catListFor === "shop" ? (ctx.session.catListPage ?? 1) : 1, search, 30);
+  r.items.forEach((c, i) => {
     kb.text(`${home.has(c.id) ? "✅" : "▫️"} ${c.name.slice(0, 16)} (${c.productCount})`, cb("adm", "shoptg", c.id));
     if (i % 2 === 1) kb.row();
   });
-  kb.row()
+  kb.row();
+  catPagerRow(kb, r, "shoplp", search, "shop");
+  kb
     .add(sbtn("➕ New category", cb("adm", "catnew"), "success"), sbtn("🗂 Assign products", cb("adm", "cats"), "primary")).row()
     .text("👀 Preview shop", cb("shp", "home", 1)).row()
     .text("◀️ Back", cb("adm", "home"));
@@ -2040,7 +2075,8 @@ async function shopLayoutView(ctx: Ctx): Promise<void> {
     "",
     homeIds.length ? `✅ On top now: <b>${homeIds.length}</b> (in the order shown first)` : "Nothing on top yet — the shop shows one plain list.",
     cats.length === 0 ? "\nNo categories yet — tap ➕ New category, then 🗂 Assign products to fill it." : "",
-    cats.length > SHOWN ? `<i>Showing ${SHOWN} of ${cats.length}.</i>` : "",
+    search ? `🔎 Matching “${escapeHtml(search)}”: <b>${r.total}</b>` : "",
+    r.pages > 1 ? `<i>Page ${r.page} of ${r.pages} · ${cats.length} categories</i>` : "",
   ].filter(Boolean).join("\n"), kb, true);
 }
 
@@ -2051,8 +2087,9 @@ async function categoriesAdminView(ctx: Ctx): Promise<void> {
   // Six buttons per category against Telegram's 100-button ceiling: past that
   // the WHOLE keyboard is rejected and the screen arrives with no buttons at
   // all, so the list is capped and the remainder is reported in the text.
-  const SHOWN = 15;
-  for (const c of cats.slice(0, SHOWN)) {
+  const search = ctx.session.catListFor === "cats" ? ctx.session.catListSearch : undefined;
+  const r = pageCats(cats, ctx.session.catListFor === "cats" ? (ctx.session.catListPage ?? 1) : 1, search, 12);
+  for (const c of r.items) {
     kb.text(`${c.emoji ?? "🗂"} ${c.name.slice(0, 18)} · ${c.productCount}`, cb("adm", "catpick", c.id))
       .text(home.has(c.id) ? "🏠 On shop top ✅" : "🏠 Show on top", cb("adm", "cathome", c.id)).row();
     kb.text("😀", cb("adm", "catemoji", c.id))
@@ -2061,6 +2098,7 @@ async function categoriesAdminView(ctx: Ctx): Promise<void> {
       .text("🗑", cb("adm", "catdel", c.id))
       .row();
   }
+  catPagerRow(kb, r, "catlp", search, "cats");
   kb.text("◀️ Back", cb("adm", "m_prod"));
   await show(ctx, [
     "🗂 <b>Categories &amp; grouping</b>",
@@ -2073,7 +2111,8 @@ async function categoriesAdminView(ctx: Ctx): Promise<void> {
     homeIds.length ? `On shop top now: <b>${homeIds.length}</b>` : "",
     "",
     cats.length === 0 ? "None yet — tap ➕ New category." : `<i>${cats.length} categories. Deleting one moves its products to Uncategorized, never deletes them.</i>`,
-    cats.length > SHOWN ? `<i>Showing the first ${SHOWN} — Telegram won't render more buttons than that on one screen.</i>` : "",
+    search ? `🔎 Matching “${escapeHtml(search)}”: <b>${r.total}</b>` : "",
+    r.pages > 1 ? `<i>Page ${r.page} of ${r.pages} · ${cats.length} categories — use ◀️ ▶️ or 🔎.</i>` : "",
   ].filter(Boolean).join("\n"), kb, true);
 }
 
@@ -3633,6 +3672,26 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return categoriesAdminView(ctx);
     }
     case "shoplayout": return shopLayoutView(ctx);
+    case "shoplp":
+      ctx.session.catListFor = "shop";
+      ctx.session.catListPage = Number(id) || 1;
+      return shopLayoutView(ctx);
+    case "catlp":
+      ctx.session.catListFor = "cats";
+      ctx.session.catListPage = Number(id) || 1;
+      return categoriesAdminView(ctx);
+    case "catls":
+      ctx.session.catListFor = id === "shop" ? "shop" : "cats";
+      ctx.session.awaiting = "admin_catlist_search";
+      await askStep(ctx, "🔎 Send part of a <b>category name</b> to find it:");
+      return;
+    case "catlsclr":
+      ctx.session.catListSearch = undefined;
+      ctx.session.catListPage = 1;
+      return id === "shop" ? shopLayoutView(ctx) : categoriesAdminView(ctx);
+    case "pcatpg":
+      await ctx.editMessageReplyMarkup({ reply_markup: await categoryPickKb(Number(id) || 1) }).catch(() => undefined);
+      return;
     case "shoptg": {
       const list = await toggleShopHomeCategory(id);
       flash(ctx, list.includes(id) ? "✅ Shown at the top of the shop." : "▫️ Removed from the top of the shop.");
@@ -6137,6 +6196,12 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     await renameCategory(ctx.session.catTarget ?? "", text);
     await ctx.reply("✏️ Renamed.");
     await categoriesAdminView(ctx);
+    return true;
+  }
+  if (awaiting === "admin_catlist_search") {
+    ctx.session.catListSearch = text.trim() === "-" ? undefined : text.trim().slice(0, 40) || undefined;
+    ctx.session.catListPage = 1;
+    if (ctx.session.catListFor === "shop") await shopLayoutView(ctx); else await categoriesAdminView(ctx);
     return true;
   }
   if (awaiting === "admin_cat_search") {
