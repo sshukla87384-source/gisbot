@@ -21,7 +21,6 @@ interface Order {
   createdAt: string;
   user?: { telegramHandle?: string | null; firstName?: string | null };
   items?: Array<{ productNameSnap: string; variantNameSnap: string; quantity: number }>;
-  _count?: { items: number };
 }
 
 /** Wallet orders have totalMinor 0 (nothing left for a gateway) — say how it was paid. */
@@ -32,10 +31,17 @@ function paidVia(o: Order): string {
 }
 
 function productOf(o: Order): string {
-  const first = o.items?.[0];
+  // Group units: a key/account order stores one row per unit.
+  const groups: Array<{ name: string; qty: number }> = [];
+  for (const it of o.items ?? []) {
+    const key = `${it.productNameSnap} · ${it.variantNameSnap}`;
+    const g = groups.find((x) => x.name === key);
+    if (g) g.qty += it.quantity; else groups.push({ name: key, qty: it.quantity });
+  }
+  const first = groups[0];
   if (!first) return "—";
-  const more = (o._count?.items ?? o.items?.length ?? 1) - 1;
-  return `${first.productNameSnap}${first.quantity > 1 ? ` ×${first.quantity}` : ""}${more > 0 ? ` +${more} more` : ""}`;
+  const name = first.name.replace(/ · (standard|default)?$/i, "");
+  return `${name}${first.qty > 1 ? ` ×${first.qty}` : ""}${groups.length > 1 ? ` +${groups.length - 1} more` : ""}`;
 }
 const STATUSES = ["", "PENDING_PAYMENT", "PAID", "PENDING_FULFILLMENT", "AWAITING_STOCK", "MANUAL_REVIEW", "COMPLETED", "REFUNDED", "CANCELLED", "EXPIRED"];
 

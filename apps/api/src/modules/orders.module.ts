@@ -71,8 +71,8 @@ export class OrdersController {
         take: list.take,
         include: {
           user: { select: { telegramHandle: true, firstName: true } },
-          items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" }, take: 3 },
-          _count: { select: { items: true } },
+          // Enough rows to group units: keys/accounts are one row per unit.
+          items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" }, take: 60 },
         },
       }),
     ]);

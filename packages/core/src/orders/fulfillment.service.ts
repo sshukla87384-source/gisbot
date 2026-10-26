@@ -471,7 +471,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         buyerHandle: outcome.buyerHandle,
         buyerFirst: outcome.buyerFirst,
         buyerReferral: outcome.buyerReferral,
-        headline: "🎉 <b>Payment received!</b>",
+        headline: "🎉 <b>Payment received!</b> ✅",
       });
     }
     await notifyOrderToAdmins(outcome.orderId, "Gateway");

@@ -117,6 +117,7 @@ import {
   deleteCategory,
   createProductFull,
   getAdminOrder,
+  groupOrderLines,
   getHideSoldOut,
   setHideSoldOut,
   adminRevealOrder,
@@ -844,7 +845,9 @@ async function orderView(ctx: Ctx, orderId: string): Promise<void> {
   if (o.bnplMinor > 0) payLines.push(`🕒 Pay later (BNPL): <b>${fmt(o.bnplMinor, o.currency)}</b>`);
   if (o.totalMinor > 0) payLines.push(`💳 Via gateway: <b>${fmt(o.totalMinor, o.currency)}</b>${o.binanceAmount ? ` (= ${o.binanceAmount} USDT)` : ""}`);
   const lines = [
-    ...o.items.map((i) => `📦 <b>${escapeHtml(i.name)}</b>${i.variant.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(i.variant)}`} ×${i.qty}`),
+    // One line per PRODUCT: keys/accounts are stored one row per unit.
+    ...groupOrderLines(o.items.map((i) => ({ productNameSnap: i.name, variantNameSnap: i.variant, quantity: i.qty })))
+      .map((g) => `📦 <b>${escapeHtml(g.productNameSnap)}</b>${g.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(g.variantNameSnap)}`} ×${g.quantity}`),
     "",
     `🧾 Order: <code>${escapeHtml(o.orderNumber)}</code> — ${ORDER_STATUS_ICON[o.status] ?? ""} ${o.status}`,
     `👤 Buyer: ${escapeHtml(o.userLabel)}`,

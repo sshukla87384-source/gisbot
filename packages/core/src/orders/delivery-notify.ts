@@ -12,6 +12,7 @@ import {
 } from "./assign.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
+import { groupOrderLines } from "./order.service.js";
 
 export interface DeliveredOrderNotice {
   telegramId: bigint | string;
@@ -51,10 +52,13 @@ const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;"
 export async function sendDeliveredOrderMessages(n: DeliveredOrderNotice): Promise<void> {
   const cfg = loadConfig();
   const first = n.deliveries[0];
-  const product = first
-    ? `${first.productName}${n.deliveries.length > 1 ? ` +${n.deliveries.length - 1} more` : ""}`
+  // Units of the same product are separate deliveries — count products, not units.
+  const groups = groupOrderLines(n.deliveries.map((d) => ({ productNameSnap: d.productName, variantNameSnap: d.variantName, quantity: 1 })));
+  const g0 = groups[0];
+  const product = g0
+    ? `${g0.productNameSnap}${g0.quantity > 1 ? ` ×${g0.quantity}` : ""}${groups.length > 1 ? ` +${groups.length - 1} more` : ""}`
     : "";
-  const card: string[] = [`${n.headline} ✅`];
+  const card: string[] = [n.headline];
   if (product) card.push(`📦 <b>${esc(product)}</b>`);
   card.push(`🧾 Order <code>${esc(n.orderNumber)}</code> — ${n.money}`);
   if (n.deliveries.length > 0) card.push("👆 <b>Your items are in the message above</b> — always saved in 📦 My Orders.");

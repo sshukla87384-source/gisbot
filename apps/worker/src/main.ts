@@ -141,9 +141,11 @@ async function main(): Promise<void> {
           const markup = toMarkup(fu.buttons);
           // HTML → HTML without premium emoji (a shop owner without Premium
           // gets those refused) → plain text. Never lose the closing card.
-          const noIcons = markup
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const anyMarkup = markup as any;
+          const noIcons = anyMarkup?.inline_keyboard
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ? { inline_keyboard: (markup.inline_keyboard as any[][]).map((row) => row.map(({ icon_custom_emoji_id: _drop, ...b }) => b)) }
+            ? { inline_keyboard: (anyMarkup.inline_keyboard as any[][]).map((row) => row.map(({ icon_custom_emoji_id: _drop, ...b }) => b)) }
             : undefined;
           const unwrappedFu = fu.text.replace(/<tg-emoji[^>]*>([\s\S]*?)<\/tg-emoji>/gi, "$1");
           const m = await telegram.sendMessage(job.data.telegramId, fu.text, { parse_mode: "HTML", reply_markup: markup })

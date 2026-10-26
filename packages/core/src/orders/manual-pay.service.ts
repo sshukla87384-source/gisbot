@@ -511,7 +511,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       buyerHandle: outcome.buyerHandle,
       buyerFirst: outcome.buyerFirst,
       buyerReferral: outcome.buyerReferral,
-      headline: "🎉 <b>Payment confirmed!</b>",
+      headline: "🎉 <b>Payment confirmed!</b> ✅",
     });
   }
   await notifyOrderToAdmins(outcome.orderId, "Payment confirmed");

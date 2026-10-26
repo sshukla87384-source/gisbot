@@ -369,7 +369,7 @@ async function dispatchDeliveriesToTelegram(telegramId: bigint, r: CheckoutResul
     userId,
     orderId: r.orderId,
     orderNumber: r.orderNumber,
-    money: `${money} (💰 wallet, web shop)`,
+    money,
     deliveries: lines,
     pendingManual: r.pendingManualItems,
     awaitingStock: 0,

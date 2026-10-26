@@ -48,9 +48,10 @@ export async function listOrders(userId: string, page: number, pageSize = 6): Pr
   return {
     items: rows.map((o) => ({
       id: o.id,
-      productName: firstItemName(o.items),
-      itemCount: o.items.length,
-      firstQty: o.items[0]?.quantity ?? 1,
+      ...(() => {
+        const g = groupOrderLines(o.items);
+        return { productName: firstItemName(g), itemCount: g.length, firstQty: g[0]?.quantity ?? 1 };
+      })(),
       orderNumber: o.orderNumber,
       status: o.status,
       totalPaidMinor: o.subtotalMinor - o.discountMinor,
@@ -63,6 +64,26 @@ export async function listOrders(userId: string, page: number, pageSize = 6): Pr
     page,
     pages,
   };
+}
+
+/**
+ * Collapse order items into product lines. Keys and accounts are stored one
+ * OrderItem PER UNIT, so "3 × Netflix" is three rows — counting rows made it
+ * read "Netflix +2 more" as if three different products had been bought.
+ */
+export function groupOrderLines<T extends { productNameSnap: string; variantNameSnap?: string; quantity?: number }>(
+  items: T[],
+): Array<{ productNameSnap: string; variantNameSnap: string; quantity: number }> {
+  const out: Array<{ productNameSnap: string; variantNameSnap: string; quantity: number }> = [];
+  const at = new Map<string, number>();
+  for (const it of items) {
+    const v = it.variantNameSnap ?? "";
+    const k = `${it.productNameSnap}\u0000${v}`;
+    const idx = at.get(k);
+    if (idx === undefined) { at.set(k, out.length); out.push({ productNameSnap: it.productNameSnap, variantNameSnap: v, quantity: it.quantity ?? 1 }); }
+    else out[idx]!.quantity += it.quantity ?? 1;
+  }
+  return out;
 }
 
 /** "Product · Variant" for the first line; variant dropped when it repeats the name or is a default. */
@@ -230,7 +251,10 @@ export async function getOrderSummary(
   if (!o) return null;
   return {
     orderNumber: o.orderNumber, totalMinor: Math.max(0, o.subtotalMinor - o.discountMinor), currency: o.currency,
-    productName: firstItemName(o.items), itemCount: o.items.length, firstQty: o.items[0]?.quantity ?? 1,
+    ...(() => {
+      const g = groupOrderLines(o.items);
+      return { productName: firstItemName(g), itemCount: g.length, firstQty: g[0]?.quantity ?? 1 };
+    })(),
   };
 }
 

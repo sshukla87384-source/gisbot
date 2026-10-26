@@ -81,7 +81,17 @@ export default function OrderDetail() {
           {/* Product first — the order number alone does not say what was bought. */}
           <h1 className="text-lg font-semibold">
             {order.items[0]?.productNameSnap ?? "Order"}
-            {order.items.length > 1 ? <span className="text-slate-500"> +{order.items.length - 1} more</span> : null}
+            {(() => {
+              // Units of one product are separate rows — count distinct products.
+              const distinct = new Set(order.items.map((i) => `${i.productNameSnap}\u0000${i.variantNameSnap}`)).size;
+              const sameAsFirst = order.items.filter((i) => i.productNameSnap === order.items[0]?.productNameSnap && i.variantNameSnap === order.items[0]?.variantNameSnap).length;
+              return (
+                <>
+                  {sameAsFirst > 1 ? <span className="text-slate-500"> ×{sameAsFirst}</span> : null}
+                  {distinct > 1 ? <span className="text-slate-500"> +{distinct - 1} more</span> : null}
+                </>
+              );
+            })()}
           </h1>
           <p className="font-mono text-sm text-slate-500">{order.orderNumber} · {formatDateTime(order.createdAt)}</p>
         </div>

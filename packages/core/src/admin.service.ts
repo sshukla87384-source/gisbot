@@ -9,6 +9,7 @@ import { invalidate, cached } from "./redis.js";
 import { usdtRate, priceInrFromUsd, priceUsdFromInr } from "./fx.js";
 import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./orders/assign.js";
 import { clearPaymentPrompts } from "./orders/pay-prompt.service.js";
+import { groupOrderLines } from "./orders/order.service.js";
 import { sanitizeTelegramHtml } from "./tg-html.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
@@ -100,22 +101,22 @@ export async function listPendingPaymentOrders(limit = 10): Promise<OrderBrief[]
     where: { status: "PENDING_PAYMENT" },
     orderBy: { createdAt: "desc" },
     take: limit,
-    include: { items: { select: { productNameSnap: true }, orderBy: { id: "asc" } } },
+    include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } } },
   });
   return rows.map((o) => ({
     id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o),
-    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
+    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: groupOrderLines(o.items).length,
     firstItem: o.items[0]?.productNameSnap ?? "",
   }));
 }
 
 export async function listRecentOrders(limit = 10): Promise<OrderBrief[]> {
   const rows = await prisma.order.findMany({
-    orderBy: { createdAt: "desc" }, take: limit, include: { items: { select: { productNameSnap: true }, orderBy: { id: "asc" } } },
+    orderBy: { createdAt: "desc" }, take: limit, include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } } },
   });
   return rows.map((o) => ({
     id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o),
-    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
+    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: groupOrderLines(o.items).length,
     firstItem: o.items[0]?.productNameSnap ?? "",
   }));
 }
@@ -134,7 +135,7 @@ export async function getAdminOrder(orderId: string): Promise<
   if (!o) return null;
   return {
     id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o), currency: o.currency,
-    binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
+    binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: groupOrderLines(o.items).length,
     firstItem: o.items[0]?.productNameSnap ?? "",
     items: o.items.map((i) => ({ id: i.id, name: i.productNameSnap, variant: i.variantNameSnap, qty: i.quantity, type: i.variant.product.type, fulfilled: i.fulfilledAt !== null })),
     userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
@@ -217,14 +218,14 @@ export async function listUserOrders(userId: string, page = 1, pageSize = 8): Pr
     skip: (p - 1) * pageSize,
     take: pageSize,
     include: {
-      items: { select: { productNameSnap: true }, orderBy: { id: "asc" } },
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } },
       user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
     },
   });
   return {
     items: rows.map((o) => ({
       id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o),
-      currency: o.currency, createdAt: o.createdAt, itemCount: o.items.length,
+      currency: o.currency, createdAt: o.createdAt, itemCount: groupOrderLines(o.items).length,
       userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
       firstItem: o.items[0]?.productNameSnap ?? "",
     })),
@@ -272,7 +273,7 @@ export async function searchOrders(query: string, limit = 10): Promise<OrderSear
     orderBy: { createdAt: "desc" },
     take: Math.min(limit, 25),
     include: {
-      items: { select: { productNameSnap: true }, orderBy: { id: "asc" } },
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } },
       user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
     },
   });
@@ -284,7 +285,7 @@ export async function searchOrders(query: string, limit = 10): Promise<OrderSear
     ...moneyFields(o),
     currency: o.currency,
     createdAt: o.createdAt,
-    itemCount: o.items.length,
+    itemCount: groupOrderLines(o.items).length,
     userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
     firstItem: o.items[0]?.productNameSnap ?? "",
   }));

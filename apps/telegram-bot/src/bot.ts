@@ -110,6 +110,7 @@ import {
   getOrderTracking,
   getOrderSummary,
   orderProductLabel,
+  groupOrderLines,
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
@@ -514,10 +515,11 @@ export function createBot(): Bot<Ctx> {
     if (!o) return "❌ No order with that number on your account. Check 📦 My orders for the exact number.";
     const st: Record<string, string> = { PENDING_PAYMENT: "⌛ Awaiting payment", PAID: "💳 Paid — delivering", PENDING_FULFILLMENT: "🕐 Paid — being prepared by our team", AWAITING_STOCK: "📦 Paid — waiting for stock", COMPLETED: "✅ Delivered", CANCELLED: "🚫 Cancelled", EXPIRED: "⌛ Expired (unpaid)", REFUNDED: "↩️ Refunded", MANUAL_REVIEW: "🔍 Under review" };
     const pay = o.payments[0];
-    const first = o.items[0];
+    const groups = groupOrderLines(o.items);
+    const first = groups[0];
     // Product name first — the order number alone told the customer nothing.
     const title = first
-      ? `${escapeHtml(first.productNameSnap)}${o.items.length > 1 ? ` +${o.items.length - 1} more` : ""}`
+      ? `${escapeHtml(first.productNameSnap)}${first.quantity > 1 ? ` ×${first.quantity}` : ""}${groups.length > 1 ? ` +${groups.length - 1} more` : ""}`
       : "Order";
     const value = Math.max(0, o.subtotalMinor - o.discountMinor);
     const via = o.bnplMinor > 0 ? " via 🕒 Pay later"
@@ -947,7 +949,15 @@ export function createBot(): Bot<Ctx> {
       // confirmStarsPayment delivers through the outbox — keys plus one
       // closing card. A second "Payment Received" card from here duplicated
       // that, and usually landed BEFORE the keys.
-      await confirmStarsPayment(orderId);
+      const r = await confirmStarsPayment(orderId);
+      if (r.status === "already_processed") {
+        // Stars taken for an order that was already settled (paid another way,
+        // or a duplicate event): never silent — the customer and admins hear.
+        await ctx.reply("⭐ Payment received — this order was already paid, so our team will check it and refund or credit you. 🙏").catch(() => undefined);
+        await enqueueAdminAlert(
+          `⭐ <b>Stars paid on an already-settled order</b>\n👤 ${greetName(ctx.user)} · <code>${ctx.from?.id ?? "?"}</code>\n🧾 <code>${escapeHtml(orderId)}</code> · ${num(sp.total_amount)} ⭐\n🔖 Charge <code>${escapeHtml(sp.telegram_payment_charge_id)}</code> — refund or credit the wallet.`,
+        ).catch(() => undefined);
+      }
     } catch (e) {
       // The Stars are already taken. Never leave that silent: credit the order
       // value to the wallet when the order was closed meanwhile, and always

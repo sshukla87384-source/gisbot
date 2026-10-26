@@ -29,6 +29,7 @@ import {
   listCategories,
   listOrders,
   orderProductLabel,
+  groupOrderLines,
   listOrderItems,
   listProducts,
   shopHomeTiles,
@@ -1188,12 +1189,14 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
   const kb = new InlineKeyboard();
   // Product name FIRST, order number underneath — customers recognise what they
   // bought, not a "GIS-2026-…" code.
-  const productLines = (meta?.items ?? []).slice(0, 5).map((i) => {
+  // Grouped: keys/accounts are one row per unit, so 3 × Netflix is 3 rows.
+  const groups = groupOrderLines(meta?.items ?? []);
+  const productLines = groups.slice(0, 5).map((i) => {
     const vn = i.variantNameSnap.trim();
     const showV = vn && !/^(default|standard|-)$/i.test(vn) && !i.productNameSnap.toLowerCase().includes(vn.toLowerCase());
     return `📦 <b>${escapeHtml(i.productNameSnap)}${showV ? ` · ${escapeHtml(vn)}` : ""}</b>${i.quantity > 1 ? ` ×${i.quantity}` : ""}`;
   });
-  if ((meta?.items.length ?? 0) > 5) productLines.push(`➕ <i>and ${(meta?.items.length ?? 0) - 5} more</i>`);
+  if (groups.length > 5) productLines.push(`➕ <i>and ${groups.length - 5} more</i>`);
   const value = meta ? meta.subtotalMinor - meta.discountMinor : 0;
   const paidVia = !meta ? "" : meta.bnplMinor > 0 ? " · 🕒 Pay later" : meta.walletUsedMinor > 0 && meta.walletUsedMinor >= value ? " · 💰 Wallet" : meta.walletUsedMinor > 0 ? ` · 💰 ${fmt(meta.walletUsedMinor, meta.currency)} from wallet` : "";
   const orderLine = meta
@@ -1207,6 +1210,8 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
       PENDING_PAYMENT: "⌛ Awaiting payment",
       PAID: "💳 Paid — delivery starting",
       PENDING_FULFILLMENT: "🕐 Being delivered — you'll get a message the moment it's ready",
+      AWAITING_STOCK: "📦 Paid — waiting for stock; it's delivered here the moment it arrives",
+      MANUAL_REVIEW: "🔍 Under review by our team",
       CANCELLED: "🚫 Cancelled",
       EXPIRED: "⌛ Expired (not paid in time)",
       REFUNDED: "↩️ Refunded",
