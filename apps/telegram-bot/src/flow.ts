@@ -80,7 +80,18 @@ export async function flowStep<T extends Msg>(ctx: Ctx, send: () => Promise<T>):
  * and `first` (usually the payment card) is the only thing tracked.
  */
 export async function flowStart(ctx: Ctx, first: Msg, opts: { card?: boolean } = { card: true }): Promise<void> {
-  await flowSweep(ctx, undefined, { dropCard: true });
+  // A still-open Binance/UPI order keeps its payment card (amount, Pay ID,
+  // QR): opening a wallet prompt from the menu used to delete it while the
+  // customer was still about to pay. That card is removed when the order
+  // closes (rememberPaymentPrompt), not by an unrelated flow.
+  const payOpen = Boolean(ctx.session.binanceOrderId || ctx.session.upiOrderId);
+  const oldCard = ctx.session.flowCardId;
+  await flowSweep(ctx, undefined, { dropCard: !payOpen });
+  if (payOpen && oldCard) {
+    // Untrack it entirely, or the next sweep of THIS flow would delete it.
+    ctx.session.flowCardId = undefined;
+    ctx.session.flowMsgIds = (ctx.session.flowMsgIds ?? []).filter((id) => id !== oldCard);
+  }
   if (opts.card) flowSetCard(ctx, first);
   else flowRemember(ctx, first);
 }

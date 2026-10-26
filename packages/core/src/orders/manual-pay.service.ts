@@ -119,10 +119,31 @@ export async function cancelStalePendingTx(tx: TxM, userId: string): Promise<voi
       userId,
       status: "PENDING_PAYMENT",
       OR: [{ binanceTxnId: null }, { binanceTxnId: { startsWith: "np:" } }, { binanceTxnId: { startsWith: "tm:" } }],
+      // An order held for admin review (holdOrderForReview) is a PAID order
+      // waiting for a human — starting another checkout must not cancel it.
+      // Every payment window is ≤ 60 min, so a far-off expiry marks the hold.
+      expiresAt: { lte: new Date(Date.now() + REVIEW_MARK_MS) },
     },
     select: { id: true },
   });
   for (const o of stale) await closeUnpaidOrderTx(tx, o.id, "CANCELLED", "cancelled");
+}
+
+/** Expiries further out than this are review holds, not payment windows. */
+const REVIEW_MARK_MS = 3 * 3600_000;
+
+/**
+ * The customer says they paid but it could not be auto-verified, and admins
+ * have been asked to approve: give them a day. The 15-minute payment window
+ * used to expire the order before anyone looked, and "Approve" then failed on
+ * an order the customer had actually paid for.
+ */
+export async function holdOrderForReview(orderId: string, hours = 24): Promise<void> {
+  if (!orderId) return;
+  await prisma.order.updateMany({
+    where: { id: orderId, status: "PENDING_PAYMENT" },
+    data: { expiresAt: new Date(Date.now() + hours * 3600_000) },
+  }).catch(() => undefined);
 }
 
 /**

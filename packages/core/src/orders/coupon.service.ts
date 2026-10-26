@@ -249,9 +249,14 @@ export async function recordCouponUseTx(tx: Tx, couponId: string, userId: string
  * PENDING_PAYMENT, so the release and the cancellation stand or fall together.
  */
 export async function releaseCouponForOrderTx(tx: Tx, orderId: string): Promise<boolean> {
-  const usage = await tx.couponUsage.findUnique({ where: { orderId }, select: { id: true, couponId: true } });
+  const usage = await tx.couponUsage.findUnique({ where: { orderId }, select: { id: true, couponId: true, userId: true } });
   if (!usage) return false;
   await tx.couponUsage.delete({ where: { id: usage.id } });
   await tx.coupon.updateMany({ where: { id: usage.couponId, usedCount: { gt: 0 } }, data: { usedCount: { decrement: 1 } } });
+  // Put it back on the cart too: creating the order took it off, so after a
+  // cancel / switch of payment method the next checkout was silently full
+  // price while the customer was told their cart was "exactly as you left it".
+  // Only into an empty slot — a coupon applied since then wins.
+  await tx.cart.updateMany({ where: { userId: usage.userId, couponId: null }, data: { couponId: usage.couponId } }).catch(() => undefined);
   return true;
 }

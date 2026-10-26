@@ -118,6 +118,7 @@ import {
   createProductFull,
   getAdminOrder,
   groupOrderLines,
+  holdOrderForReview,
   getHideSoldOut,
   setHideSoldOut,
   adminRevealOrder,
@@ -6505,12 +6506,17 @@ export async function setProductImageFromFileId(ctx: Ctx, fileId: string, isDocu
 
 /** DM every logged-in admin an approve/reject card for a manual payment. Returns count notified. */
 export async function notifyAdminsForApproval(ctx: Ctx, orderId: string, method: string, reference: string): Promise<number> {
+  // Paid-but-unverified: hold the order for a day so it is still there when an
+  // admin taps Approve — or works the ticket — instead of the payment window
+  // expiring it first. Only touches orders still awaiting payment.
+  await holdOrderForReview(orderId);
   const ids = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY);
   if (ids.length === 0) return 0;
   const o = await getAdminOrder(orderId);
   // Already settled (auto-verified a moment ago, or approved by another admin):
   // an approve card now would only confuse — and a second approve is a no-op.
   if (o && !["PENDING_PAYMENT", "MANUAL_REVIEW"].includes(o.status)) return -1;
+
   const head = o
     ? `🧾 <b>${method} payment to review</b>\n📦 <b>${escapeHtml(orderItemLabel(o, 40))}</b>\nOrder <code>${o.orderNumber}</code> — due ${fmt(o.totalMinor, o.currency)}${o.walletUsedMinor > 0 ? ` (+ ${fmt(o.walletUsedMinor, o.currency)} from wallet)` : ""}\nBuyer: ${escapeHtml(o.userLabel)}`
     : `🧾 <b>${method} payment to review</b> (order ${orderId})`;

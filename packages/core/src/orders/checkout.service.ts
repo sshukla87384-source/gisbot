@@ -380,7 +380,7 @@ export async function adjustBnplLimit(userId: string, deltaMinor: number): Promi
 }
 
 /** Checkout on BNPL credit: deliver now, add to the user's outstanding balance. */
-export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API" = "DIRECT"): Promise<CheckoutResult> {
+export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API" = "DIRECT", opts: { maxTotalMinor?: number } = {}): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   const result = await prisma.$transaction(
     async (tx): Promise<CheckoutResult> => {
@@ -395,6 +395,11 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
       const coupon = await resolveCartCouponTx(tx, userId, currency, subtotalMinor, couponLines(lines));
       const discountMinor = coupon?.discountMinor ?? 0;
       const totalMinor = Math.max(0, subtotalMinor - discountMinor);
+      // Never take on more debt than the confirm screen quoted (the cart or a
+      // price can change in the Mini App between the two taps).
+      if (opts.maxTotalMinor !== undefined && totalMinor > opts.maxTotalMinor) {
+        throw new CoreError("VALIDATION_FAILED", "PRICE_CHANGED", { totalMinor, currency });
+      }
       const available = Math.max(0, u.bnplLimitMinor - u.bnplOutstandingMinor);
       if (available < totalMinor) throw new CoreError("INSUFFICIENT_BALANCE", "BNPL credit limit exceeded");
 

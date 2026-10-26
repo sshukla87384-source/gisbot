@@ -156,11 +156,20 @@ async function sweepReservationsAndOrders(): Promise<void> {
   // hand. Those used to leave the payment card and the whole UTR conversation in
   // the customer's chat for good.
   await sweepResolvedOrderPrompts(async (ids) => {
-    const rows = await prisma.order.findMany({
-      where: { id: { in: ids }, status: { not: "PENDING_PAYMENT" } },
-      select: { id: true },
-    });
-    return rows.map((r) => r.id);
+    // Cards are remembered under an ORDER id or a wallet TOP-UP id. Only
+    // orders used to be checked, so an expired crypto top-up card — live
+    // address, QR and all — stayed in the chat for good.
+    const [orders, topups] = await Promise.all([
+      prisma.order.findMany({ where: { id: { in: ids } }, select: { id: true, status: true } }),
+      prisma.walletTopup.findMany({ where: { id: { in: ids } }, select: { id: true, status: true } }),
+    ]);
+    const open = new Set([
+      ...orders.filter((o) => o.status === "PENDING_PAYMENT").map((o) => o.id),
+      ...topups.filter((t) => t.status === "PENDING").map((t) => t.id),
+    ]);
+    const known = new Set([...orders.map((o) => o.id), ...topups.map((t) => t.id)]);
+    // Resolved = known and no longer open. Unknown ids are left to their 48 h TTL.
+    return ids.filter((id) => known.has(id) && !open.has(id));
   }).catch(() => 0);
   if (keys.count + accounts.count + expired.count > 0) {
     await prisma.auditLog.create({
