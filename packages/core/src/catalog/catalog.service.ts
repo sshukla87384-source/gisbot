@@ -323,6 +323,9 @@ export async function listProducts(opts: {
     const where = {
       status: "ACTIVE" as const,
       deletedAt: null,
+      // A product in a hidden (or deleted) category is not on the shelf — not
+      // in the bot, not in search, not in the reseller API feed.
+      category: { isActive: true, deletedAt: null },
       ...(categoryIds ? { categoryId: { in: categoryIds } } : categoryId ? { categoryId } : excludeIds ? { categoryId: { notIn: excludeIds } } : {}),
       ...(featuredOnly ? { isFeatured: true } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),

@@ -130,9 +130,9 @@ export class DeveloperController {
       featuredOnly: query.featured === "true",
       userId: req.apiKey?.ownerUserId ?? undefined,
       channel: "API" as const,
-      // Partners sync the whole catalogue; a sold-out product must stay in the
-      // feed (with stock 0) rather than disappear from their side.
-      includeSoldOut: true,
+      // The feed mirrors the bot's shelf exactly: what the bot does not show
+      // (hidden product or category, or sold out while the shop hides sold-out
+      // items) is not offered through the API either.
     };
     let truncated = false;
     let res = await listProducts({ ...baseOpts, page: wantAll ? 1 : page, pageSize: wantAll ? 200 : limit });
@@ -204,6 +204,9 @@ export class DeveloperController {
   @Get("products/:id")
   async product(@Param("id") id: string, @Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     try {
+      // Same shelf as the bot: a product in a hidden category is not offered.
+      const shown = await prisma.product.count({ where: { id, status: "ACTIVE", deletedAt: null, category: { isActive: true, deletedAt: null } } });
+      if (shown === 0) throw new Error("hidden");
       const [p, detailRating] = await Promise.all([
         getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API"),
         productRating(id),

@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { prisma } from "@gis/database";
 import { enqueueTelegramDocument, enqueueTelegramMessage, DELIVERY_BUTTONS, type OutboxButton } from "../queues.js";
 import {
   buildCombinedDeliveryText,
@@ -8,7 +9,6 @@ import {
   copyButtonsFor,
   DELIVERY_FILE_THRESHOLD,
   deliveryNotesText,
-  greetName,
   type DeliveryLine,
 } from "./assign.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
@@ -59,42 +59,30 @@ export async function sendDeliveredOrderMessages(n: DeliveredOrderNotice): Promi
   const product = g0
     ? `${g0.productNameSnap}${g0.quantity > 1 ? ` ×${g0.quantity}` : ""}${groups.length > 1 ? ` +${groups.length - 1} more` : ""}`
     : "";
-  const card: string[] = [n.headline];
-  if (product) card.push(`📦 <b>${esc(product)}</b>`);
-  card.push(`🧾 Order <code>${esc(n.orderNumber)}</code> — ${n.money}`);
-  if (n.deliveries.length > 0) card.push("👆 <b>Your items are in the message above</b> — always saved in 📦 My Orders.");
-  if (n.pendingManual > 0) card.push(`⏳ <b>${n.pendingManual} item(s) being prepared</b> — they arrive here automatically, usually within a minute.`);
-  if (n.awaitingStock > 0) card.push(`⚠️ ${n.awaitingStock} item(s) went out of stock at the last moment — our team will restock or refund you shortly.`);
-  if (n.deliveries.length > 0) {
-    card.push("", `🙏 Thank you so much, ${greetName({ telegramHandle: n.buyerHandle ?? null, firstName: n.buyerFirst ?? null })} — enjoy your purchase from ${esc(cfg.STORE_NAME)}! 💙`);
-  }
-  const extras: string[] = [];
-  if (n.deliveries.length > 0) {
-    const instr = await deliveryInstructionsMessage().catch(() => null);
-    if (instr) extras.push(instr);
-    // First delivery of the day only — see shouldSendReferralNudge.
-    if (await shouldSendReferralNudge(n.userId)) {
-      const nudge = referralNudgeMessage(n.buyerReferral, cfg.BOT_USERNAME);
-      if (nudge) extras.push(nudge);
-    }
-  }
   const buttons: OutboxButton[] = [
     ...(n.deliveries.length > 0 ? [{ text: "⚡ Buy again", callbackData: `ord:again:${n.orderId}`, style: "success" as const }] : []),
     ...DELIVERY_BUTTONS,
   ];
-  let closing = [card.join("\n"), ...extras].join("\n\n");
-  let overflow: string | null = null;
-  if (closing.length > MAX_TEXT) {
-    // Over-long shop instructions: they get their own message rather than
-    // sinking the closing card (a rejected follow-up is silently lost).
-    closing = card.join("\n");
-    overflow = extras.join("\n\n");
-  }
+  // After the keys: ONLY the shop's delivery instructions, as their own short
+  // message (or a one-line "delivered" when there are none). No tier, spin,
+  // thank-you card or referral pitch bundled in — customers can see all of
+  // that in their account, and the bundle made every delivery a wall of text.
+  // Remembered as clutter, so only the latest one stays in the chat.
+  const instr = n.deliveries.length > 0 ? await deliveryInstructionsMessage().catch(() => null) : null;
+  const closing = instr && instr.length <= MAX_TEXT ? instr : "✅ <b>Delivered</b> — always saved in 📦 My Orders.";
   const followUp = { text: closing, buttons, clutter: true };
-
+  // Rare, but the customer must know: items still coming / out of stock.
+  const notes: string[] = [];
+  if (n.pendingManual > 0) notes.push(`⏳ <b>${n.pendingManual} item(s) being prepared</b> — they arrive here automatically.`);
+  if (n.awaitingStock > 0) notes.push(`⚠️ ${n.awaitingStock} item(s) went out of stock at the last moment — our team will restock or refund you shortly.`);
   if (n.deliveries.length === 0) {
-    // Nothing to hand over yet (all manual / out of stock): the card IS the message.
-    await enqueueTelegramMessage(n.telegramId, closing, { buttons, clutter: true });
+    // Nothing to hand over yet (all manual / out of stock): one short message.
+    await enqueueTelegramMessage(
+      n.telegramId,
+      [`${n.headline}`, `🧾 Order <code>${esc(n.orderNumber)}</code>${product ? ` · ${esc(product)}` : ""} — ${n.money}`, ...notes].join("\n"),
+      { buttons, clutter: true },
+    );
+    return;
   } else if (n.deliveries.length === 1) {
     const d = first!;
     await enqueueTelegramMessage(
@@ -124,5 +112,23 @@ export async function sendDeliveredOrderMessages(n: DeliveredOrderNotice): Promi
       { buttons: combinedDeliveryButtons(n.deliveries, n.orderId), followUp },
     );
   }
-  if (overflow) await enqueueTelegramMessage(n.telegramId, overflow, { clutter: true, delayMs: 1500 });
+  if (notes.length > 0) await enqueueTelegramMessage(n.telegramId, notes.join("\n"), { clutter: true, delayMs: 1500 });
+  // Referral pitch: NEW customers only (their first paid order), once. A
+  // regular buyer already knows about it and got it again on every order.
+  if (await isFirstPaidOrder(n.userId) && await shouldSendReferralNudge(n.userId)) {
+    const nudge = referralNudgeMessage(n.buyerReferral, cfg.BOT_USERNAME);
+    if (nudge) await enqueueTelegramMessage(n.telegramId, nudge, { clutter: true, delayMs: 3000 });
+  }
+}
+
+/** True when this customer has exactly one paid order — the one just delivered. */
+export async function isFirstPaidOrder(userId: string): Promise<boolean> {
+  try {
+    const n = await prisma.order.count({
+      where: { userId, status: { in: ["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK", "PARTIALLY_REFUNDED"] } },
+    });
+    return n <= 1;
+  } catch {
+    return false;
+  }
 }

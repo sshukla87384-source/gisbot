@@ -110,6 +110,7 @@ import {
   getOrderTracking,
   getOrderSummary,
   orderProductLabel,
+  isFirstPaidOrder,
   deliveryNotesText,
   groupOrderLines,
   setUserCurrency,
@@ -3365,11 +3366,10 @@ function copyKeyboard(buttons: OutboxButton[]): InlineKeyboard {
 }
 
 /**
- * The ONE message that closes a wallet / Pay-Later purchase, after the keys:
- * what was bought (product first, order number after), how it was paid, items
- * still being prepared, tier + spin, the shop's instructions and — once a day —
- * the referral pitch. Remembered as chat clutter, so the NEXT purchase removes
- * this one instead of the chat filling up with old closing cards.
+ * What follows the keys on a wallet / Pay-Later purchase: the shop's delivery
+ * instructions as one short message (or a one-line "delivered"), a note for
+ * items still being prepared, and — on a customer's FIRST order only — the
+ * referral link. Each is chat clutter: the next purchase clears them.
  */
 async function sendPurchaseClosing(
   ctx: Ctx,
@@ -3377,42 +3377,42 @@ async function sendPurchaseClosing(
   result: { orderId: string; orderNumber: string; totalMinor: number; currency: string; pendingManualItems: number; deliveries: DeliveredSecret[] },
   mode: "wallet" | "bnpl",
 ): Promise<void> {
-  const meta = await getOrderSummary(user.id, result.orderId).catch(() => null);
-  const product = meta ? orderProductLabel(meta, 40) : (result.deliveries[0]?.productName ?? "Your order");
-  const lines = [
-    `📦 <b>${escapeHtml(product)}</b>`,
-    `🧾 Order <code>${escapeHtml(result.orderNumber)}</code>`,
-    mode === "wallet"
-      ? `💰 Paid from wallet: <b>${fmt(result.totalMinor, result.currency)}</b>`
-      : `🕒 Added to your Pay Later balance: <b>${fmt(result.totalMinor, result.currency)}</b> — repay anytime from 💰 Wallet`,
-  ];
-  if (result.deliveries.length > 0) lines.push("👆 <b>Your items are in the message above</b> — always saved in 📦 My Orders.");
-  if (result.pendingManualItems > 0) lines.push(`⏳ <b>${result.pendingManualItems} item(s) being prepared</b> — they arrive here automatically, usually within a minute.`);
-  const kb = new InlineKeyboard();
-  try {
-    const [ts, scfg] = await Promise.all([tierOf(user.id), getSpinConfig()]);
-    lines.push("", `🏆 <b>${ts.tier.name} member</b> — ${escapeHtml(ts.tier.perk)}`);
-    lines.push(ts.next ? `📈 Spend <b>${fmt(ts.toNextMinor, ts.currency)}</b> more to reach <b>${ts.next.name}</b>` : "👑 You're at the top tier — thank you!");
-    if (scfg.enabled) { lines.push("🎡 <b>You earned a spin!</b> Tap below to try your luck."); kb.text("🎡 Spin & Win", cb("spn", "ord", result.orderId)); }
-    kb.text("🏆 My Tier", cb("prf", "tier")).row();
-  } catch { /* never block a delivery over this */ }
-  lines.push("", `🙏 Thank you so much, ${greetName(user)} — it is an honour to serve you!`);
-  const extras = [
-    await deliveryInstructionsMessage().catch(() => null),
-    // Referral pitch only on the day's first purchase, not every order.
-    (await shouldSendReferralNudge(user.id)) ? referralNudgeMessage(user.referralCode, ctx.me.username) : null,
-  ].filter((x): x is string => Boolean(x));
-  kb.text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
+  // After the keys: only the shop's delivery instructions, as their own short
+  // message — no tier, spin, thank-you card or referral pitch bundled in.
+  // Customers find all of that in their account. Remembered as clutter so
+  // only the latest one stays in the chat.
+  const kb = new InlineKeyboard()
+    .text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
     .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home");
-  const card = successCard(mode === "wallet" ? "Order Success" : "Order Placed — Pay Later", lines);
-  const full = [card, ...extras].join("\n\n");
-  // Long shop instructions could push one message past Telegram's 4096 cap;
-  // then they ride in their own message rather than losing the closing card.
-  const parts = full.length <= 4000 ? [full] : [card, ...extras];
-  for (let i = 0; i < parts.length; i++) {
-    const last = i === parts.length - 1;
-    const m = await ctx.reply(parts[i]!, { parse_mode: "HTML", ...(last ? { reply_markup: kb } : {}) }).catch(() => undefined);
+  const remember = async (m: { message_id: number } | undefined): Promise<void> => {
     if (m && ctx.chat) await rememberChatClutter(ctx.chat.id, m.message_id);
+  };
+  if (result.deliveries.length === 0) {
+    // Nothing delivered yet (made by hand): say what was bought and that it is coming.
+    const meta = await getOrderSummary(user.id, result.orderId).catch(() => null);
+    const product = meta ? orderProductLabel(meta, 40) : "Your order";
+    await remember(await ctx.reply(
+      [
+        `✅ <b>${escapeHtml(product)}</b> — ${mode === "wallet" ? "paid from 💰 wallet" : "on 🕒 Pay Later"} (${fmt(result.totalMinor, result.currency)})`,
+        `🧾 Order <code>${escapeHtml(result.orderNumber)}</code>`,
+        `⏳ <b>${result.pendingManualItems} item(s) being prepared</b> — they arrive here automatically.`,
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: kb },
+    ).catch(() => undefined));
+    return;
+  }
+  const instr = await deliveryInstructionsMessage().catch(() => null);
+  const text = instr && instr.length <= 3900
+    ? instr
+    : `✅ <b>Delivered</b>${mode === "bnpl" ? " on 🕒 Pay Later — repay anytime from 💰 Wallet" : ""} — always saved in 📦 My Orders.`;
+  await remember(await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => undefined));
+  if (result.pendingManualItems > 0) {
+    await remember(await ctx.reply(`⏳ <b>${result.pendingManualItems} more item(s) being prepared</b> — they arrive here automatically.`, { parse_mode: "HTML" }).catch(() => undefined));
+  }
+  // Referral pitch: NEW customers only — their first paid order, once.
+  if (await isFirstPaidOrder(user.id) && await shouldSendReferralNudge(user.id)) {
+    const nudge = referralNudgeMessage(user.referralCode, ctx.me.username);
+    if (nudge) await remember(await ctx.reply(nudge, { parse_mode: "HTML" }).catch(() => undefined));
   }
 }
 

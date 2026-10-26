@@ -103,18 +103,10 @@ export async function notifyTierChange(userId: string): Promise<void> {
       create: { key: `loyalty.last:${userId}`, value: { tier: st.tier.name } as never },
       update: { value: { tier: st.tier.name } as never },
     });
-    if (!prev) return; // first calculation — don't congratulate on signup
-    const u = await prisma.user.findUnique({ where: { id: userId }, select: { telegramId: true, firstName: true } });
-    if (!u?.telegramId) return;
-    await enqueueTelegramMessage(
-      u.telegramId,
-      [
-        `🏆 <b>You're now ${esc(st.tier.name)}!</b>`,
-        "",
-        `Thank you for your support${u.firstName ? `, ${esc(u.firstName)}` : ""} — you've unlocked <b>${esc(st.tier.perk)}</b>.`,
-        st.next ? `\n📈 ${((st.next.minSpendMinor - st.spendMinor) / 100).toFixed(2)} more to reach <b>${esc(st.next.name)}</b>.` : "\n👑 You're at the top tier.",
-      ].join("\n"),
-    );
+    // No "You're now Gold!" DM: the shop owner wants deliveries to carry only
+    // the product and its instructions. The tier is on the customer's
+    // 👤 Profile → 🏆 My Tier whenever they look; the change is still recorded.
+    void prev;
   } catch {
     /* never break an order over a congratulation */
   }
