@@ -711,58 +711,107 @@ export interface ResellerPriceRow {
   /** What their API returns, if they have set one. */
   myPriceMinor: number | null;
   currency: Currency;
+  /** Fulfilled by an upstream supplier. */
+  supplier?: boolean;
 }
 
 /**
- * Products a reseller can price, with their own price alongside ours.
+ * Every product a reseller can sell through the API — the SAME shelf the bot
+ * shows (own and supplier products; nothing hidden), paged and searchable,
+ * with what they pay us and their own selling price side by side.
  *
- * The UserPrice engine already existed and was already applied by the catalog
- * and at checkout — only a screen to set the API-channel price was missing, so
- * resellers had no way to reach a feature that was fully built underneath them.
+ * The selling price lives in ResellerSellPrice and is display-only. It used
+ * to be written as an API-channel UserPrice, which checkout CHARGES — so the
+ * reseller paid their own selling price (₹1 set → ₹1 charged).
  */
 export async function listResellerPrices(
   userId: string,
   currency: Currency,
-  limit = 40,
-): Promise<ResellerPriceRow[]> {
+  opts: { page?: number; pageSize?: number; search?: string } = {},
+): Promise<{ items: ResellerPriceRow[]; page: number; pages: number; total: number; customCount: number }> {
+  const pageSize = Math.min(50, Math.max(1, opts.pageSize ?? 10));
+  const where = {
+    status: "ACTIVE" as const,
+    deletedAt: null,
+    category: { isActive: true, deletedAt: null },
+    ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
+  };
+  const total = await prisma.product.count({ where });
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(1, opts.page ?? 1), pages);
   const products = await prisma.product.findMany({
-    where: { status: "ACTIVE", deletedAt: null },
-    orderBy: [{ pinRank: "desc" }, { name: "asc" }],
-    take: limit,
+    where,
+    orderBy: [{ pinRank: "desc" }, { sortOrder: "asc" }, { name: "asc" }],
+    skip: (page - 1) * pageSize,
+    take: pageSize,
     select: {
       id: true, name: true, iconEmoji: true, salePercentBp: true, saleStartsAt: true, saleEndsAt: true,
-      bulkMinQty: true, bulkPercentBp: true, bulkTiers: true,
+      bulkMinQty: true, bulkPercentBp: true, bulkTiers: true, supplierId: true,
       // RETAIL, and the FIRST variant by sort order — everywhere else in this
-      // file already pins both. Without the tier filter a RESELLER_L1 row (the
-      // admin API can write one) could be picked instead, so "what you pay us"
-      // showed a price from a different tier entirely.
+      // file already pins both.
       variants: { where: { isActive: true, deletedAt: null }, orderBy: { sortOrder: "asc" }, take: 1, select: { prices: { where: { currency, tier: { name: "RETAIL" } }, take: 1, select: { amountMinor: true } } } },
     },
   });
-  const mine = await prisma.userPrice.findMany({
-    where: { userId, productId: { in: products.map((p) => p.id) }, channel: { in: ["API", "BOTH"] } },
-  });
-  const byProduct = new Map<string, { amountMinor: number; currency: Currency }>();
-  for (const m of mine) {
-    // API beats BOTH, so a channel-specific price is never masked by a general one.
-    const cur = byProduct.get(m.productId);
-    if (!cur || m.channel === "API") byProduct.set(m.productId, { amountMinor: m.amountMinor, currency: m.currency as Currency });
-  }
-  return products.map((p) => {
-    const base = p.variants[0]?.prices[0]?.amountMinor ?? null;
-    const own = byProduct.get(p.id);
-    return {
-      productId: p.id,
-      name: p.name,
-      iconEmoji: p.iconEmoji,
-      basePriceMinor: base === null ? null : effectivePriceMinor(base, p),
-      myPriceMinor: own ? (own.currency === currency ? own.amountMinor : convertMinor(own.amountMinor, own.currency, currency)) : null,
-      currency,
-    };
-  });
+  await migrateLegacySellPrices(userId).catch(() => undefined);
+  const ids = products.map((p) => p.id);
+  // What THEY pay: an admin price for this reseller (API or BOTH) beats retail.
+  const costMap = await resolveUserPriceMap(userId, ids, "API", currency);
+  const sells = await prisma.resellerSellPrice.findMany({ where: { userId, productId: { in: ids } } });
+  const sellBy = new Map(sells.map((x) => [x.productId, x] as const));
+  const customCount = await prisma.resellerSellPrice.count({ where: { userId } });
+  return {
+    items: products.map((p) => {
+      const base = p.variants[0]?.prices[0]?.amountMinor ?? null;
+      const own = sellBy.get(p.id);
+      const cost = costMap.get(p.id) ?? (base === null ? null : effectivePriceMinor(base, p));
+      return {
+        productId: p.id,
+        name: p.name,
+        iconEmoji: p.iconEmoji,
+        basePriceMinor: cost,
+        myPriceMinor: own ? (own.currency === currency ? own.amountMinor : convertMinor(own.amountMinor, own.currency as Currency, currency)) : null,
+        currency,
+        supplier: p.supplierId !== null,
+      };
+    }),
+    page, pages, total, customCount,
+  };
 }
 
-/** Set or clear a reseller's own API selling price for one product. */
+/** The reseller's own selling prices for these products, in `currency`. */
+export async function resellerSellPriceMap(userId: string, productIds: string[], currency: Currency): Promise<Map<string, number>> {
+  if (productIds.length === 0) return new Map();
+  const rows = await prisma.resellerSellPrice.findMany({ where: { userId, productId: { in: productIds } } });
+  return new Map(rows.map((r) => [r.productId, r.currency === currency ? r.amountMinor : convertMinor(r.amountMinor, r.currency as Currency, currency)] as const));
+}
+
+/**
+ * Old selling prices were API-channel UserPrice rows. One ABOVE the retail
+ * price can only be a selling price (an admin's reseller price is a
+ * discount), so it moves to ResellerSellPrice and stops being charged.
+ */
+export async function migrateLegacySellPrices(userId: string): Promise<void> {
+  const legacy = await prisma.userPrice.findMany({ where: { userId, channel: "API" } });
+  for (const r of legacy) {
+    const v = await prisma.productVariant.findFirst({
+      where: { productId: r.productId, isActive: true, deletedAt: null },
+      orderBy: { sortOrder: "asc" },
+      select: { prices: { where: { currency: r.currency, tier: { name: "RETAIL" } }, take: 1, select: { amountMinor: true } } },
+    });
+    const retail = v?.prices[0]?.amountMinor;
+    if (retail === undefined || r.amountMinor <= retail) continue;
+    await prisma.$transaction([
+      prisma.resellerSellPrice.upsert({
+        where: { userId_productId: { userId, productId: r.productId } },
+        create: { userId, productId: r.productId, amountMinor: r.amountMinor, currency: r.currency },
+        update: {},
+      }),
+      prisma.userPrice.delete({ where: { id: r.id } }),
+    ]).catch(() => undefined);
+  }
+}
+
+/** Set or clear a reseller's own API selling price for one product (display only). */
 export async function setResellerPrice(
   userId: string,
   productId: string,
@@ -770,11 +819,11 @@ export async function setResellerPrice(
   currency: Currency,
 ): Promise<void> {
   if (amountMinor === null) {
-    await prisma.userPrice.deleteMany({ where: { userId, productId, channel: { in: ["API", "BOTH"] } } });
+    await prisma.resellerSellPrice.deleteMany({ where: { userId, productId } });
   } else {
-    await prisma.userPrice.upsert({
-      where: { userId_productId_channel: { userId, productId, channel: "API" } },
-      create: { userId, productId, amountMinor, currency, channel: "API" },
+    await prisma.resellerSellPrice.upsert({
+      where: { userId_productId: { userId, productId } },
+      create: { userId, productId, amountMinor, currency },
       update: { amountMinor, currency },
     });
   }

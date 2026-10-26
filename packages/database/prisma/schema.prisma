@@ -364,6 +364,23 @@ enum PriceChannel {
   API    // developer API purchases only
 }
 
+/// A reseller's OWN selling price for a product — what THEIR API feed shows
+/// their customers. Display only: it never changes what the reseller pays.
+/// (It used to be stored as a UserPrice, which priceCart charges — so a
+/// reseller who set ₹1 as their selling price was charged ₹1.)
+model ResellerSellPrice {
+  id          String   @id @default(cuid())
+  userId      String
+  productId   String
+  amountMinor Int
+  currency    Currency @default(USD)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, productId])
+  @@index([userId])
+}
+
 model UserPrice {
   id          String       @id @default(cuid())
   userId      String

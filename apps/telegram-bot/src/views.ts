@@ -1045,29 +1045,45 @@ export async function apiOrdersView(user: BotUser): Promise<View> {
   return { text: lines.join("\n"), kb };
 }
 
-export async function resellerPricesView(user: BotUser): Promise<View> {
-  const rows = await listResellerPrices(user.id, user.currency as Currency, 40);
+export async function resellerPricesView(user: BotUser, page = 1, search?: string): Promise<View> {
+  // EVERY product on the bot's shelf — ours and suppliers' — paged and
+  // searchable. It used to stop at the first 40 ("use the API for the rest").
+  const res = await listResellerPrices(user.id, user.currency as Currency, { page, pageSize: 10, ...(search ? { search } : {}) });
   const kb = new InlineKeyboard();
-  for (const r of rows) {
+  kb.add(sbtn(search ? `🔎 “${clip(search, 20)}” — clear` : "🔎 Search products", cb("api", search ? "pclr" : "psrch"), "primary")).row();
+  for (const r of res.items) {
     const shown = r.myPriceMinor ?? r.basePriceMinor;
     kb.text(
-      `${r.myPriceMinor !== null ? "⭐ " : ""}${clip(withIcon(r.iconEmoji, r.name), 28)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
+      `${r.myPriceMinor !== null ? "⭐ " : ""}${clip(withIcon(r.iconEmoji, r.name), 26)} — ${shown === null ? "—" : fmt(shown, r.currency)}`,
       cb("api", "setprice", r.productId),
     ).row();
   }
+  if (res.pages > 1) {
+    if (res.page > 1) kb.text("◀️ Prev", cb("api", "prices", res.page - 1));
+    kb.text(`${res.page}/${res.pages}`, cb("api", "prices", res.page));
+    if (res.page < res.pages) kb.text("Next ▶️", cb("api", "prices", res.page + 1));
+    kb.row();
+  }
   navRow(kb, cb("api", "home"));
-  const withPrice = rows.filter((r) => r.myPriceMinor !== null).length;
+  const list = res.items.map((r) => {
+    const sell = r.myPriceMinor !== null ? `<b>${fmt(r.myPriceMinor, r.currency)}</b>` : "<i>our price</i>";
+    const cost = r.basePriceMinor === null ? "—" : fmt(r.basePriceMinor, r.currency);
+    const profit = r.myPriceMinor !== null && r.basePriceMinor !== null ? ` · profit ${fmt(r.myPriceMinor - r.basePriceMinor, r.currency)}` : "";
+    return `${r.myPriceMinor !== null ? "⭐" : "▫️"} ${escapeHtml(clip(r.name, 34))}${r.supplier ? " 🔗" : ""}\n      you pay ${cost} → you sell ${sell}${profit}`;
+  });
   return {
     text: [
       header(`🏷 ${bold("My Selling Price")}`),
       "",
-      `⭐ <b>Custom set:</b>  <code>${withPrice} of ${rows.length}</code>`,
+      `📦 <b>Products:</b>  <code>${res.total}</code>${search ? `  · matching “${escapeHtml(clip(search, 20))}”` : ""}`,
+      `⭐ <b>Custom prices set:</b>  <code>${res.customCount}</code>`,
       HR,
-      "This is what <b>your</b> API returns to <b>your</b> customers. You still pay our price — the difference is your profit.",
+      "This is what <b>your</b> API shows <b>your</b> customers — for every product here, ours or a supplier's (🔗). You always pay our price; the difference is your profit.",
       "",
-      "Tap a product to set or change its price. ⭐ = your custom price is set.",
-      rows.length >= 40 ? "\n<i>Showing first 40 — use the API for the rest.</i>" : "",
-    ].filter(Boolean).join("\n"),
+      ...list,
+      "",
+      "<i>Tap a product to set or change its price. Only products shown in this bot are listed — and only those appear in your API.</i>",
+    ].filter((l) => l !== null).join("\n"),
     kb,
   };
 }

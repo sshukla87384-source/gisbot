@@ -1,4 +1,4 @@
-import { addToCart, checkoutWithWallet, checkoutWithBnpl, getBnplStatus, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
+import { migrateLegacySellPrices, resellerSellPriceMap, addToCart, checkoutWithWallet, checkoutWithBnpl, getBnplStatus, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { randomUUID } from "node:crypto";
 import { prisma, type Currency } from "@gis/database";
@@ -123,6 +123,9 @@ export class DeveloperController {
     const wantAll = query.all === "true" || query.all === "1";
     const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit ?? query.per_page ?? "100", 10) || 100));
     const currency = currencyOf(query);
+    const owner = req.apiKey?.ownerUserId ?? undefined;
+    // Old selling prices were stored where checkout charges them — move them first.
+    if (owner) await migrateLegacySellPrices(owner).catch(() => undefined);
     const baseOpts = {
       currency,
       search: query.search,
@@ -149,6 +152,9 @@ export class DeveloperController {
     const inStockOnly = query.inStock === "true";
     const src = query.source; // "own" | "supplier" | undefined (both)
     const rat = await productRatings(res.items.map((p) => p.id));
+    // Your selling price (🏷 My Selling Price in the bot) is what this feed
+    // shows; costPrice is what you are charged.
+    const sellMap = owner ? await resellerSellPriceMap(owner, res.items.map((p) => p.id), currency) : new Map<string, number>();
     const items = res.items
       .filter((p) => (inStockOnly ? p.inStock : true))
       .filter((p) => (src === "own" ? !p.supplierBacked : src === "supplier" ? p.supplierBacked : true))
@@ -158,8 +164,10 @@ export class DeveloperController {
         emoji: p.iconEmoji,
         // Prices are ALWAYS USDT for API consumers.
         currency: "USDT",
-        fromPrice: usdtOf(p.fromPriceMinor, currency),
-        fromPriceUsdt: usdtOf(p.fromPriceMinor, currency),
+        fromPrice: usdtOf(sellMap.get(p.id) ?? p.fromPriceMinor, currency),
+        fromPriceUsdt: usdtOf(sellMap.get(p.id) ?? p.fromPriceMinor, currency),
+        costFromPriceUsdt: usdtOf(p.fromPriceMinor, currency),
+        customPrice: sellMap.has(p.id),
         nativeCurrency: currency,
         fromPriceMinor: p.fromPriceMinor,
         onSale: p.onSale,
@@ -178,10 +186,13 @@ export class DeveloperController {
           // A consumer that only reads variants[].name would show "Standard".
           productName: p.name,
           label: v.name.trim().toLowerCase() === "standard" ? p.name : `${p.name} — ${v.name}`,
-          price: usdtOf(v.priceMinor, currency),
-          priceUsdt: usdtOf(v.priceMinor, currency),
+          price: usdtOf(sellMap.get(p.id) ?? v.priceMinor, currency),
+          priceUsdt: usdtOf(sellMap.get(p.id) ?? v.priceMinor, currency),
+          costPrice: usdtOf(v.priceMinor, currency),
+          costPriceUsdt: usdtOf(v.priceMinor, currency),
           currency: "USDT",
-          priceMinor: v.priceMinor,
+          priceMinor: sellMap.get(p.id) ?? v.priceMinor,
+          costPriceMinor: v.priceMinor,
           nativeCurrency: currency,
           ...stockOut(v.stock),
         })),
@@ -207,6 +218,8 @@ export class DeveloperController {
       // Same shelf as the bot: a product in a hidden category is not offered.
       const shown = await prisma.product.count({ where: { id, status: "ACTIVE", deletedAt: null, category: { isActive: true, deletedAt: null } } });
       if (shown === 0) throw new Error("hidden");
+      const owner = req.apiKey?.ownerUserId ?? undefined;
+      const sell = owner ? (await resellerSellPriceMap(owner, [id], currencyOf(query))).get(id) : undefined;
       const [p, detailRating] = await Promise.all([
         getProductView(id, currencyOf(query), req.apiKey?.ownerUserId ?? undefined, "API"),
         productRating(id),
@@ -236,11 +249,13 @@ export class DeveloperController {
           name: v.name,
           productName: p.name,
           label: v.name.trim().toLowerCase() === "standard" ? p.name : `${p.name} — ${v.name}`,
-          price: usdtOf(v.priceMinor, currencyOf(query)),
-          priceUsdt: usdtOf(v.priceMinor, currencyOf(query)),
+          price: usdtOf(sell ?? v.priceMinor, currencyOf(query)),
+          priceUsdt: usdtOf(sell ?? v.priceMinor, currencyOf(query)),
+          costPriceUsdt: usdtOf(v.priceMinor, currencyOf(query)),
           originalPriceUsdt: usdtOf(v.originalPriceMinor, currencyOf(query)),
           currency: "USDT",
-          priceMinor: v.priceMinor,
+          priceMinor: sell ?? v.priceMinor,
+          costPriceMinor: v.priceMinor,
           originalPriceMinor: v.originalPriceMinor,
           ...stockOut(v.stock),
         })),
@@ -448,6 +463,13 @@ export class DeveloperController {
     const parsed = purchaseSchema.safeParse(body);
     if (!parsed.success) throw new ApiError(400, "VALIDATION_FAILED", parsed.error.issues[0]?.message ?? "Invalid body.");
     const { variantId, quantity, payWith } = parsed.data;
+    // Only what the bot shows can be bought here, and an old selling price
+    // must not be charged as the reseller's cost.
+    const onShelf = await prisma.productVariant.count({
+      where: { id: variantId, isActive: true, deletedAt: null, product: { status: "ACTIVE", deletedAt: null, category: { isActive: true, deletedAt: null } } },
+    });
+    if (onShelf === 0) throw notFound("Product");
+    await migrateLegacySellPrices(userId).catch(() => undefined);
     const idemRaw = req.headers["idempotency-key"];
     const idem = (Array.isArray(idemRaw) ? idemRaw[0] : idemRaw)?.trim();
     const idemKey = idem ? `apiidem:${req.apiKey?.id}:${idem}` : null;

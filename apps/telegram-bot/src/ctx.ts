@@ -61,6 +61,7 @@ export interface SessionData {
     | "admin_emoji_name"
     | "wallet_free_txn"
     | "reseller_price"
+    | "reseller_price_search"
     | "upi_ref"
     | "buy_qty"
     | "coupon_code"
@@ -269,6 +270,9 @@ export interface SessionData {
   admApiName?: string;
   /** Custom-pricing wizard state. */
   priceProductId?: string;
+  /** Reseller "My Selling Price" list: page and search being viewed. */
+  rpPage?: number;
+  rpSearch?: string;
   priceUserId?: string;
   priceUserLabel?: string;
   priceAmountMinor?: number;

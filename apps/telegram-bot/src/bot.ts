@@ -1500,6 +1500,11 @@ export function createBot(): Bot<Ctx> {
         { reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🏠 Menu", "mnu:home") },
       ));
     }
+    if (awaiting === "reseller_price_search") {
+      ctx.session.rpSearch = ctx.message.text.trim().slice(0, 40) || undefined;
+      ctx.session.rpPage = 1;
+      return render(ctx, await views.resellerPricesView(ctx.user, 1, ctx.session.rpSearch), false);
+    }
     if (awaiting === "reseller_price") {
       const pid = ctx.session.priceProductId ?? "";
       ctx.session.priceProductId = undefined;
@@ -1508,7 +1513,7 @@ export function createBot(): Bot<Ctx> {
       if (/^off$/i.test(raw)) {
         await setResellerPrice(ctx.user.id, pid, null, ctx.user.currency as Currency);
         await ctx.reply("🏷 Custom price removed — your API now returns our price.");
-        return render(ctx, await views.resellerPricesView(ctx.user), false);
+        return render(ctx, await views.resellerPricesView(ctx.user, ctx.session.rpPage ?? 1, ctx.session.rpSearch), false);
       }
       const val = Number.parseFloat(raw.replace(/[^0-9.]/g, ""));
       if (!Number.isFinite(val) || val <= 0) {
@@ -1518,7 +1523,7 @@ export function createBot(): Bot<Ctx> {
       }
       await setResellerPrice(ctx.user.id, pid, Math.round(val * 100), ctx.user.currency as Currency);
       await ctx.reply(`🏷 Saved. Your API will return <b>${val.toFixed(2)}</b> for this product.`, { parse_mode: "HTML" });
-      return render(ctx, await views.resellerPricesView(ctx.user), false);
+      return render(ctx, await views.resellerPricesView(ctx.user, ctx.session.rpPage ?? 1, ctx.session.rpSearch), false);
     }
 
     
@@ -2763,7 +2768,19 @@ export function createBot(): Bot<Ctx> {
         }
         case "api:prices":
           await ctx.answerCallbackQuery();
-          await render(ctx, await views.resellerPricesView(user), true);
+          ctx.session.rpPage = intArg(args, 0, 1);
+          await render(ctx, await views.resellerPricesView(user, ctx.session.rpPage, ctx.session.rpSearch), true);
+          break;
+        case "api:psrch":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "reseller_price_search";
+          await ctx.reply("🔎 Send a product name (or part of it) to find it:");
+          break;
+        case "api:pclr":
+          await ctx.answerCallbackQuery();
+          ctx.session.rpSearch = undefined;
+          ctx.session.rpPage = 1;
+          await render(ctx, await views.resellerPricesView(user, 1), true);
           break;
         case "api:setprice": {
           await ctx.answerCallbackQuery();
