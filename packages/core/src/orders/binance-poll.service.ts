@@ -4,6 +4,7 @@ import { CLAIM_WINDOW_MS } from "./binance-window.js";
 import { prisma } from "@gis/database";
 import { createHmac } from "node:crypto";
 import { enqueueAdminAlert } from "../queues.js";
+import { REVIEW_MARK_MS } from "./manual-pay.service.js";
 import { getRedis } from "../redis.js";
 import { confirmManualPayment } from "./manual-pay.service.js";
 
@@ -138,7 +139,10 @@ export async function pollBinancePayments(): Promise<number> {
   if (!creds) return 0;
 
   const pending: PendingBinanceOrder[] = await prisma.order.findMany({
-    where: { status: "PENDING_PAYMENT", binanceAsset: "USDT", expiresAt: { gt: new Date() } },
+    // Held-for-review orders (holdOrderForReview pushes expiry out a day) are
+    // NOT auto-matched: matching is by amount, and a day-long window would let
+    // someone else's equal payment settle them. An admin approves those.
+    where: { status: "PENDING_PAYMENT", binanceAsset: "USDT", expiresAt: { gt: new Date(), lte: new Date(Date.now() + REVIEW_MARK_MS) } },
     orderBy: { createdAt: "asc" },
     select: { id: true, orderNumber: true, binanceAmount: true, createdAt: true },
     take: 500,

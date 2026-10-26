@@ -1,3 +1,4 @@
+import { orderAwaitingPayment } from "@gis/core";
 import type { Ctx } from "./ctx.js";
 
 /**
@@ -84,7 +85,17 @@ export async function flowStart(ctx: Ctx, first: Msg, opts: { card?: boolean } =
   // QR): opening a wallet prompt from the menu used to delete it while the
   // customer was still about to pay. That card is removed when the order
   // closes (rememberPaymentPrompt), not by an unrelated flow.
-  const payOpen = Boolean(ctx.session.binanceOrderId || ctx.session.upiOrderId);
+  // A new PAYMENT card supersedes the old one (its order was just replaced);
+  // only a side prompt (wallet amount, gift…) keeps an open order's card.
+  // Session ids go stale (cron expiry, paid another way), so ask the database.
+  const sidePrompt = opts.card === false;
+  const [binOpen, upiOpen]: [boolean, boolean] = !sidePrompt ? [false, false] : await Promise.all([
+    orderAwaitingPayment(ctx.session.binanceOrderId),
+    orderAwaitingPayment(ctx.session.upiOrderId),
+  ]);
+  if (sidePrompt && !binOpen) ctx.session.binanceOrderId = undefined;
+  if (sidePrompt && !upiOpen) ctx.session.upiOrderId = undefined;
+  const payOpen = binOpen || upiOpen;
   const oldCard = ctx.session.flowCardId;
   await flowSweep(ctx, undefined, { dropCard: !payOpen });
   if (payOpen && oldCard) {

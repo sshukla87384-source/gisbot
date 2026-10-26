@@ -161,6 +161,15 @@ import * as views from "./views.js";
 import type { View } from "./views.js";
 
 /** Decrypt the session-held TOTP secret. Never stored or logged in the clear. */
+/**
+ * A Binance Order ID is a long number. Anything else typed while an ID prompt
+ * was armed ("hello", "netflix") used to be "verified", fail, open a support
+ * ticket (or an admin approve card) and re-arm the prompt — forever.
+ */
+function looksLikeBinanceId(t: string): boolean {
+  return /\d{8,}/.test(t.replace(/\s+/g, ""));
+}
+
 function otpSecretOf(ctx: Ctx): string | null {
   const enc = ctx.session.otpSecret;
   if (!enc) return null;
@@ -1456,10 +1465,6 @@ export function createBot(): Bot<Ctx> {
       const v = await views.cryptoNetworkView(ctx.user, { kind: "topup", amountMinor: ctx.session.cryptoTopupMinor });
       return flowStep(ctx, () => ctx.reply(v.text, { parse_mode: "HTML", reply_markup: v.kb }));
     }
-    // A Binance Order ID is a long number. Anything else typed while the
-    // deposit prompt was armed ("hello", "netflix") used to be "verified",
-    // fail, open a support ticket and re-arm the prompt — forever.
-    const looksLikeBinanceId = (t: string): boolean => /\d{8,}/.test(t.replace(/\s+/g, ""));
     if (awaiting === "wallet_free_txn" && !looksLikeBinanceId(ctx.message.text)) {
       // Not an ID: let the message be handled normally; the prompt is over.
       ctx.session.payRetries = undefined;

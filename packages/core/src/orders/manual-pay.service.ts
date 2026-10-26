@@ -130,7 +130,7 @@ export async function cancelStalePendingTx(tx: TxM, userId: string): Promise<voi
 }
 
 /** Expiries further out than this are review holds, not payment windows. */
-const REVIEW_MARK_MS = 3 * 3600_000;
+export const REVIEW_MARK_MS = 3 * 3600_000;
 
 /**
  * The customer says they paid but it could not be auto-verified, and admins
@@ -138,6 +138,13 @@ const REVIEW_MARK_MS = 3 * 3600_000;
  * used to expire the order before anyone looked, and "Approve" then failed on
  * an order the customer had actually paid for.
  */
+/** Is this order still waiting to be paid? (cheap check for UI decisions) */
+export async function orderAwaitingPayment(orderId: string | undefined | null): Promise<boolean> {
+  if (!orderId) return false;
+  const n = await prisma.order.count({ where: { id: orderId, status: "PENDING_PAYMENT" } }).catch(() => 0);
+  return n > 0;
+}
+
 export async function holdOrderForReview(orderId: string, hours = 24): Promise<void> {
   if (!orderId) return;
   await prisma.order.updateMany({

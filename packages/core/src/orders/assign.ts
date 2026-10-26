@@ -849,12 +849,18 @@ export function deliveryNotesText(items: DeliveryLine[], max = 700): string {
   const notes: string[] = [];
   const seen = new Set<string>();
   let twofa = false;
+  // Cut the PLAIN text (on whole characters) and escape afterwards: cutting
+  // escaped HTML could split an "&amp;" and get the whole caption rejected.
+  const cut = (x: string, n: number): string => { const a = [...x]; return a.length > n ? `${a.slice(0, n - 1).join("")}…` : x; };
   for (const it of items) {
     const g = (it.activationGuide ?? "").trim();
-    if (g && !seen.has(g)) { seen.add(g); notes.push(`📄 ${esc(it.productName)}: ${esc(g)}`); }
+    if (g && !seen.has(g)) { seen.add(g); notes.push(`📄 ${esc(cut(it.productName, 60))}: ${esc(cut(g, 560))}`); }
     if (it.payload.twofa || /\|[^|]+\|/.test(it.payload.key ?? "")) twofa = true;
   }
   if (twofa) notes.push(`🔐 Paste the 2FA secret at ${TWOFA_SITE} to get your 6-digit OTP.`);
-  const text = notes.join("\n");
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  // Whole notes only: drop trailing ones rather than cut through markup.
+  const kept: string[] = [];
+  let len = 0;
+  for (const n of notes) { if (len + n.length + 1 > max && kept.length > 0) break; kept.push(n); len += n.length + 1; }
+  return kept.join("\n");
 }

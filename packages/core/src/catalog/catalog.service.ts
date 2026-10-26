@@ -786,29 +786,37 @@ export async function resellerSellPriceMap(userId: string, productIds: string[],
 }
 
 /**
- * Old selling prices were API-channel UserPrice rows. One ABOVE the retail
- * price can only be a selling price (an admin's reseller price is a
- * discount), so it moves to ResellerSellPrice and stops being charged.
+ * ONE-TIME, shop-wide: every API-channel UserPrice becomes a selling price.
+ *
+ * Until now the reseller's "My Selling Price" was written as an API-channel
+ * UserPrice — the same row checkout CHARGES. Nothing records who wrote a row,
+ * so a ₹1 "selling price" and an admin's "API only" reseller discount look
+ * identical, and leaving either kind in place keeps a reseller able to set
+ * their own cost. All API-only rows therefore move to ResellerSellPrice
+ * (display only) once; an admin who had given someone an API-only discount
+ * re-enters it (👥 user → custom price). BOTH / DIRECT prices are untouched.
+ * Guarded by a Setting flag, and memoised per process, so it runs once.
  */
-export async function migrateLegacySellPrices(userId: string): Promise<void> {
-  const legacy = await prisma.userPrice.findMany({ where: { userId, channel: "API" } });
+let sellMigrated = false;
+export async function migrateLegacySellPrices(_userId?: string): Promise<void> {
+  if (sellMigrated) return;
+  const FLAG = "migr.sellprice.v1";
+  const done = await prisma.setting.findUnique({ where: { key: FLAG } }).catch(() => null);
+  if (done) { sellMigrated = true; return; }
+  const legacy = await prisma.userPrice.findMany({ where: { channel: "API" } });
   for (const r of legacy) {
-    const v = await prisma.productVariant.findFirst({
-      where: { productId: r.productId, isActive: true, deletedAt: null },
-      orderBy: { sortOrder: "asc" },
-      select: { prices: { where: { currency: r.currency, tier: { name: "RETAIL" } }, take: 1, select: { amountMinor: true } } },
-    });
-    const retail = v?.prices[0]?.amountMinor;
-    if (retail === undefined || r.amountMinor <= retail) continue;
     await prisma.$transaction([
       prisma.resellerSellPrice.upsert({
-        where: { userId_productId: { userId, productId: r.productId } },
-        create: { userId, productId: r.productId, amountMinor: r.amountMinor, currency: r.currency },
+        where: { userId_productId: { userId: r.userId, productId: r.productId } },
+        create: { userId: r.userId, productId: r.productId, amountMinor: r.amountMinor, currency: r.currency },
         update: {},
       }),
       prisma.userPrice.delete({ where: { id: r.id } }),
     ]).catch(() => undefined);
   }
+  await prisma.setting.upsert({ where: { key: FLAG }, create: { key: FLAG, value: { moved: legacy.length, at: new Date().toISOString() } }, update: {} }).catch(() => undefined);
+  if (legacy.length > 0) await invalidate("cat:*").catch(() => undefined);
+  sellMigrated = true;
 }
 
 /** Set or clear a reseller's own API selling price for one product (display only). */
