@@ -100,6 +100,8 @@ import {
   BUTTON_LABEL_KEYS,
   type ButtonLabelKey,
   revokeApiKey,
+  getApiKeyAdmin,
+  reactivateApiKey,
   announceProduct,
   announceFlashSale,
   clearFlashSale,
@@ -1015,21 +1017,83 @@ async function wizardTypeStep(ctx: Ctx): Promise<void> {
   await ctx.reply("<b>New product · Step 3/6</b>\nWhat type is it?", { parse_mode: "HTML", reply_markup: kb });
 }
 
-async function apiKeysView(ctx: Ctx): Promise<void> {
-  const keys = await listApiKeys();
+/**
+ * Developer API keys — WHO each one belongs to, first. This screen used to
+ * list only the key's own name with a Revoke button, so there was no telling
+ * which reseller a key was. Now each key is a row "🟢 @handle (Name) · key",
+ * opening a Manage screen; paged and searchable.
+ */
+async function apiKeysView(ctx: Ctx, page = ctx.session.apiKeyPage ?? 1): Promise<void> {
+  const search = ctx.session.apiKeySearch;
+  const keys = await listApiKeys(search ? { search } : {});
+  const PAGE = 10;
+  const pages = Math.max(1, Math.ceil(keys.length / PAGE));
+  const pg = Math.min(Math.max(1, page), pages);
+  ctx.session.apiKeyPage = pg;
+  const shown = keys.slice((pg - 1) * PAGE, pg * PAGE);
   const kb = new InlineKeyboard().text("➕ New API key", cb("adm", "apinew")).row();
-  const lines = ["🔑 <b>Developer API keys</b>", ""];
-  for (const k of keys.slice(0, 15)) {
-    const state = k.revokedAt ? "🚫 revoked" : "🟢 active";
-    lines.push(`• <b>${escapeHtml(k.name)}</b> — <code>${k.prefix}…</code> · ${state} · ${k.callCount} calls\n  scopes: ${k.scopes.join(", ")}`);
-    if (!k.revokedAt) {
-      const hasPurchase = k.scopes.includes("orders:write") && k.scopes.includes("wallet:read");
-      if (!hasPurchase) kb.text(`⬆️ Enable purchasing — ${k.name.slice(0, 14)}`, cb("adm", "apiup", k.id)).row();
-      kb.text(`🗑 Revoke ${k.name.slice(0, 16)}`, cb("adm", "apirevoke", k.id)).row();
-    }
+  kb.text(search ? `🔎 “${search.slice(0, 16)}” — clear` : "🔎 Find reseller / key", cb("adm", search ? "apiksclr" : "apiks")).row();
+  const who = (k: (typeof keys)[number]): string => k.owner
+    ? `${k.owner.label}${k.owner.handle && k.owner.firstName ? ` (${k.owner.firstName})` : ""}`
+    : "Shop key (no customer)";
+  const lines = [
+    "🔑 <b>Developer API keys</b>",
+    `${keys.filter((k) => !k.revokedAt).length} active · ${keys.length} total${search ? ` · matching “${escapeHtml(search)}”` : ""}`,
+    "",
+  ];
+  for (const k of shown) {
+    const state = k.revokedAt ? "🚫" : "🟢";
+    lines.push(
+      `${state} <b>${escapeHtml(who(k))}</b>${k.owner?.telegramId ? ` · <code>${k.owner.telegramId}</code>` : ""}`,
+      `      🔑 ${escapeHtml(k.name)} · <code>${k.prefix}…</code> · ${k.canPurchase ? "🛒 can buy" : "👀 read-only"} · ${k.callCount} calls · last used ${k.lastUsedAt ? k.lastUsedAt.toISOString().slice(0, 10) : "never"}`,
+    );
+    kb.text(`${state} ${who(k).slice(0, 22)} · ⚙️ Manage`, cb("adm", "apik", k.id)).row();
   }
-  if (keys.length === 0) lines.push("No keys yet. Create one to give partners read-only API access.");
+  if (keys.length === 0) lines.push(search ? "No key matches that." : "No keys yet. Create one to give partners API access.");
+  if (pages > 1) {
+    if (pg > 1) kb.text("◀️ Prev", cb("adm", "apikpg", String(pg - 1)));
+    kb.text(`${pg}/${pages}`, cb("mnu", "noop"));
+    if (pg < pages) kb.text("Next ▶️", cb("adm", "apikpg", String(pg + 1)));
+    kb.row();
+  }
   kb.text("◀️ Back", cb("adm", "home"));
+  await show(ctx, lines.join("\n"), kb, true);
+}
+
+/** One key: whose it is, what it can do, and every action on it. */
+async function apiKeyDetailView(ctx: Ctx, id: string): Promise<void> {
+  const k = await getApiKeyAdmin(id);
+  const kb = new InlineKeyboard();
+  if (!k) { kb.text("◀️ API keys", cb("adm", "apikeys")); await show(ctx, "That key no longer exists.", kb, true); return; }
+  const o = k.owner;
+  const lines = [
+    `🔑 <b>${escapeHtml(o ? o.label : "Shop key (no customer)")}</b>${o?.handle && o.firstName ? ` — ${escapeHtml(o.firstName)}` : ""}`,
+    o?.telegramId ? `🆔 Telegram ID: <code>${o.telegramId}</code>` : "",
+    "",
+    `Key: <b>${escapeHtml(k.name)}</b> · <code>${k.prefix}…</code>`,
+    `Status: ${k.revokedAt ? `🚫 revoked ${k.revokedAt.toISOString().slice(0, 10)}` : "🟢 active"}${k.expiresAt ? ` · expires ${k.expiresAt.toISOString().slice(0, 10)}` : ""}`,
+    `Access: ${k.canPurchase ? "🛒 catalogue + buying (wallet)" : "👀 read-only"} — <i>${escapeHtml(k.scopes.join(", "))}</i>`,
+    `Usage: <b>${k.callCount}</b> calls · last used ${k.lastUsedAt ? k.lastUsedAt.toISOString().slice(0, 16).replace("T", " ") : "never"} · ${k.rateLimitPerMin}/min`,
+    `Created: ${k.createdAt.toISOString().slice(0, 10)}`,
+    ...(o ? [
+      "",
+      `💰 Wallet: <b>${k.wallet ? fmt(Number(k.wallet.balanceMinor), k.wallet.currency) : "—"}</b>`,
+      `📦 Paid orders: <b>${k.orders}</b> · 🏷 Own selling prices set: <b>${k.sellPrices}</b>`,
+      k.otherActiveKeys > 0 ? `⚠️ This reseller has <b>${k.otherActiveKeys}</b> other active key(s).` : "",
+    ] : []),
+  ].filter((l) => l !== "");
+  if (!k.revokedAt) {
+    kb.add(k.canPurchase
+      ? sbtn("👀 Make read-only", cb("adm", "apiro", k.id), "primary")
+      : sbtn("🛒 Allow buying (wallet)", cb("adm", "apiup", k.id), "success")).row();
+    kb.add(sbtn("🗑 Revoke this key", cb("adm", "apirevq", k.id), "danger")).row();
+  } else {
+    kb.add(sbtn("♻️ Re-activate", cb("adm", "apireact", k.id), "success")).row();
+  }
+  if (o) {
+    kb.text("👤 Customer profile", cb("adm", "uinfo", o.id)).text("📦 Their orders", cb("adm", "uord", o.id)).row();
+  }
+  kb.text("◀️ API keys", cb("adm", "apikeys"));
   await show(ctx, lines.join("\n"), kb, true);
 }
 
@@ -4952,10 +5016,40 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "apikeys": return apiKeysView(ctx);
+    case "apikpg": return apiKeysView(ctx, Number(id) || 1);
+    case "apik": return apiKeyDetailView(ctx, id);
+    case "apiks":
+      ctx.session.awaiting = "admin_apikey_search";
+      await askStep(ctx, "🔎 Send the reseller's <b>@username</b>, name, Telegram ID, or the key's name/prefix:");
+      return;
+    case "apiksclr":
+      ctx.session.apiKeySearch = undefined;
+      ctx.session.apiKeyPage = 1;
+      return apiKeysView(ctx, 1);
     case "apiup":
       await setApiKeyScopes(id, ["catalog:read", "orders:read", "orders:write", "wallet:read"]);
-      flash(ctx, "⬆️ Purchasing + wallet access enabled on that key. It works immediately — no need to regenerate.");
-      return apiKeysView(ctx);
+      flash(ctx, "🛒 Buying + wallet access enabled on that key. It works immediately — no need to regenerate.");
+      return apiKeyDetailView(ctx, id);
+    case "apiro":
+      await setApiKeyScopes(id, ["catalog:read", "orders:read"]);
+      flash(ctx, "👀 That key is read-only now — it can see the catalogue and its orders, but can't buy.");
+      return apiKeyDetailView(ctx, id);
+    case "apirevq": {
+      const k = await getApiKeyAdmin(id);
+      const kb = new InlineKeyboard()
+        .add(sbtn("🗑 Yes, revoke it", cb("adm", "apirevoke", id), "danger"))
+        .text("✖️ No", cb("adm", "apik", id));
+      await show(ctx, `Revoke the key of <b>${escapeHtml(k?.owner?.label ?? k?.name ?? "this reseller")}</b>?\n\nTheir apps stop working at once. You can re-activate it later.`, kb, true);
+      return;
+    }
+    case "apireact": {
+      const r = await reactivateApiKey(id);
+      flash(ctx, r.ok ? "♻️ Key re-activated — it works again right away."
+        : r.reason === "OTHER_KEY_ACTIVE" ? "⚠️ This reseller already has another active key. Revoke that one first (one key per reseller)."
+        : r.reason === "EXPIRED" ? "⌛ That key has expired — create a new one instead."
+        : "That key no longer exists.");
+      return apiKeyDetailView(ctx, id);
+    }
     case "apinew": {
       ctx.session.awaiting = "admin_api_name";
       await askStep(ctx, "🔑 <b>New API key</b>\nSend a <b>name</b> for it (e.g. <code>Acme Integration</code>):");
@@ -4986,7 +5080,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "apirevoke": {
       await revokeApiKey(id);
       flash(ctx, "🔑 Key revoked.");
-      return apiKeysView(ctx);
+      return apiKeyDetailView(ctx, id);
     }
     case "bc": {
       ctx.session.awaiting = "admin_broadcast";
@@ -5180,6 +5274,12 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_apikey_search") {
+    ctx.session.apiKeySearch = text.trim() === "-" ? undefined : text.trim().slice(0, 40) || undefined;
+    ctx.session.apiKeyPage = 1;
+    await apiKeysView(ctx, 1);
+    return true;
+  }
   if (awaiting === "admin_api_name") {
     ctx.session.admApiName = text.slice(0, 120) || "API key";
     const kb = new InlineKeyboard()

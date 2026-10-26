@@ -9,7 +9,13 @@ import { errorMessage, formatDateTime } from "@/lib/utils";
 interface ApiKey {
   id: string; name: string; prefix: string; scopes: string[]; rateLimitPerMin: number;
   callCount: number; lastUsedAt: string | null; expiresAt: string | null; revokedAt: string | null; createdAt: string;
+  ownerUserId: string | null;
+  owner: { id: string; label: string; handle: string | null; firstName: string | null; telegramId: string | null } | null;
+  canPurchase: boolean;
 }
+
+const BUY_SCOPES = ["catalog:read", "orders:read", "orders:write", "wallet:read"];
+const READ_SCOPES = ["catalog:read", "orders:read"];
 
 const ALL_SCOPES = ["catalog:read", "orders:read", "analytics:read"];
 // The Docker build sets NEXT_PUBLIC_API_URL to the empty string when its build
@@ -30,10 +36,28 @@ export default function DeveloperPage() {
   const [scopes, setScopes] = useState<string[]>(["catalog:read"]);
   const [rate, setRate] = useState("120");
   const [newKey, setNewKey] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["apikeys"],
-    queryFn: () => apiData<ApiKey[]>("/apikeys"),
+    queryKey: ["apikeys", search],
+    queryFn: () => apiData<ApiKey[]>("/apikeys", { query: { search: search.trim() || undefined } }),
+  });
+
+  const setScopesM = useMutation({
+    mutationFn: (v: { id: string; scopes: string[] }) => apiData(`/apikeys/${v.id}/scopes`, { method: "POST", body: { scopes: v.scopes } }),
+    onSuccess: () => { toast("Access updated"); void qc.invalidateQueries({ queryKey: ["apikeys"] }); },
+    onError: (e) => toast(errorMessage(e), "error"),
+  });
+
+  const reactivate = useMutation({
+    mutationFn: (id: string) => apiData<{ ok: boolean; reason?: string }>(`/apikeys/${id}/reactivate`, { method: "POST" }),
+    onSuccess: (r) => {
+      if (r.ok) toast("Key re-activated");
+      else toast(r.reason === "OTHER_KEY_ACTIVE" ? "This reseller already has another active key — revoke it first." : r.reason === "EXPIRED" ? "That key has expired." : "Key not found.", "error");
+      void qc.invalidateQueries({ queryKey: ["apikeys"] });
+    },
+    onError: (e) => toast(errorMessage(e), "error"),
   });
 
   const create = useMutation({
@@ -104,24 +128,47 @@ export default function DeveloperPage() {
         </Card>
       ) : null}
 
-      <h2 className="text-sm font-semibold text-slate-500">Keys</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold text-slate-500">Keys — by reseller</h2>
+        <div className="w-72"><Input placeholder="Search @username, name, Telegram ID or key…" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+      </div>
       {isLoading ? <p className="text-slate-400">Loading…</p> : (
         <div className="space-y-2">
           {(data ?? []).map((k) => (
             <Card key={k.id}>
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="font-medium">{k.name} {k.revokedAt ? <Badge tone="red">revoked</Badge> : <Badge tone="green">active</Badge>}</p>
-                  <p className="text-xs text-slate-500"><code>{k.prefix}…</code> · {k.scopes.join(", ")} · {k.rateLimitPerMin}/min · {k.callCount} calls</p>
-                  <p className="text-xs text-slate-400">Last used: {k.lastUsedAt ? formatDateTime(k.lastUsedAt) : "never"}</p>
+                  {/* WHO the key belongs to comes first — the list used to show only the key name. */}
+                  <p className="font-semibold">
+                    {k.owner ? k.owner.label : "Shop key (no customer)"}
+                    {k.owner?.handle && k.owner.firstName ? <span className="font-normal text-slate-500"> · {k.owner.firstName}</span> : null}
+                    {k.owner?.telegramId ? <span className="ml-2 font-mono text-xs font-normal text-slate-400">{k.owner.telegramId}</span> : null}
+                    <span className="ml-2">{k.revokedAt ? <Badge tone="red">revoked</Badge> : <Badge tone="green">active</Badge>}</span>
+                  </p>
+                  <p className="text-xs text-slate-500">🔑 {k.name} · <code>{k.prefix}…</code> · {k.canPurchase ? "can buy" : "read-only"} · {k.rateLimitPerMin}/min · {k.callCount} calls</p>
+                  <p className="text-xs text-slate-400">Last used: {k.lastUsedAt ? formatDateTime(k.lastUsedAt) : "never"} · created {formatDateTime(k.createdAt)}</p>
                 </div>
-                {!k.revokedAt ? (
-                  <button onClick={() => { if (confirm(`Revoke "${k.name}"? Apps using it will stop working.`)) revoke.mutate(k.id); }} className="text-xs text-red-500 hover:underline">Revoke</button>
-                ) : null}
+                <Button variant="secondary" onClick={() => setOpen(open === k.id ? null : k.id)}>{open === k.id ? "Close" : "Manage"}</Button>
               </div>
+              {open === k.id ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-3">
+                  {k.owner ? <a className="text-sm text-indigo-600 hover:underline" href={`/users/${k.owner.id}`}>Open customer →</a> : null}
+                  <span className="text-xs text-slate-400">Scopes: {k.scopes.join(", ")}</span>
+                  {!k.revokedAt ? (
+                    <>
+                      <Button variant="secondary" disabled={setScopesM.isPending} onClick={() => setScopesM.mutate({ id: k.id, scopes: k.canPurchase ? READ_SCOPES : BUY_SCOPES })}>
+                        {k.canPurchase ? "Make read-only" : "Allow buying (wallet)"}
+                      </Button>
+                      <button onClick={() => { if (confirm(`Revoke the key of ${k.owner?.label ?? k.name}? Their apps stop working at once.`)) revoke.mutate(k.id); }} className="text-sm text-red-500 hover:underline">Revoke</button>
+                    </>
+                  ) : (
+                    <Button variant="secondary" disabled={reactivate.isPending} onClick={() => reactivate.mutate(k.id)}>Re-activate</Button>
+                  )}
+                </div>
+              ) : null}
             </Card>
           ))}
-          {(data ?? []).length === 0 ? <p className="text-sm text-slate-400">No keys yet.</p> : null}
+          {(data ?? []).length === 0 ? <p className="text-sm text-slate-400">{search ? "No key matches that." : "No keys yet."}</p> : null}
         </div>
       )}
     </div>

@@ -44,6 +44,7 @@ export interface SessionData {
     | "admin_cat_rename"
     | "admin_cat_search"
     | "admin_catlist_search"
+    | "admin_apikey_search"
     | "admin_margin_floor"
     | "admin_qual_threshold"
     | "admin_recov_minutes"
@@ -273,6 +274,9 @@ export interface SessionData {
   };
   /** Name for an API key being created via the bot admin. */
   admApiName?: string;
+  /** Admin API-keys list: page and search. */
+  apiKeyPage?: number;
+  apiKeySearch?: string;
   /** Custom-pricing wizard state. */
   priceProductId?: string;
   /** Reseller "My Selling Price" list: page and search being viewed. */

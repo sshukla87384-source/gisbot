@@ -75,16 +75,120 @@ export async function touchApiKey(id: string): Promise<void> {
     .catch(() => undefined);
 }
 
-export async function listApiKeys(): Promise<
-  Array<{ id: string; name: string; prefix: string; scopes: string[]; rateLimitPerMin: number; callCount: number; lastUsedAt: Date | null; expiresAt: Date | null; revokedAt: Date | null; createdAt: Date }>
-> {
-  return prisma.apiKey.findMany({
-    orderBy: { createdAt: "desc" },
+/** Who a key belongs to, for the admin lists. null = a shop/admin key (no customer). */
+export interface ApiKeyOwner {
+  id: string;
+  /** "@handle", else the first name, else the Telegram id. */
+  label: string;
+  handle: string | null;
+  firstName: string | null;
+  telegramId: string | null;
+}
+
+export interface AdminApiKeyRow {
+  id: string; name: string; prefix: string; scopes: string[]; rateLimitPerMin: number; callCount: number;
+  lastUsedAt: Date | null; expiresAt: Date | null; revokedAt: Date | null; createdAt: Date;
+  ownerUserId: string | null;
+  /** The reseller this key belongs to — shown FIRST in the admin lists. */
+  owner: ApiKeyOwner | null;
+  /** Can buy through the API (orders:write + wallet:read). */
+  canPurchase: boolean;
+}
+
+async function ownersOf(ids: string[]): Promise<Map<string, ApiKeyOwner>> {
+  const uniq = [...new Set(ids)];
+  if (uniq.length === 0) return new Map();
+  const users = await prisma.user.findMany({
+    where: { id: { in: uniq } },
+    select: { id: true, telegramHandle: true, firstName: true, telegramId: true },
+  });
+  return new Map(users.map((u) => [u.id, {
+    id: u.id,
+    label: u.telegramHandle ? `@${u.telegramHandle}` : (u.firstName ?? (u.telegramId !== null ? String(u.telegramId) : "customer")),
+    handle: u.telegramHandle,
+    firstName: u.firstName,
+    telegramId: u.telegramId !== null ? String(u.telegramId) : null,
+  }] as const));
+}
+
+/**
+ * Every API key with its OWNER (the reseller's @handle / name). The admin
+ * lists used to show only the key's own name and a Revoke button, so there
+ * was no telling whose key was whose. Optional search matches the key name,
+ * the prefix, the owner's @handle, first name or Telegram id.
+ */
+export async function listApiKeys(opts: { search?: string } = {}): Promise<AdminApiKeyRow[]> {
+  const rows = await prisma.apiKey.findMany({
+    orderBy: [{ revokedAt: { sort: "asc", nulls: "first" } }, { lastUsedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
+    take: 1000,
     select: {
       id: true, name: true, prefix: true, scopes: true, rateLimitPerMin: true, callCount: true,
-      lastUsedAt: true, expiresAt: true, revokedAt: true, createdAt: true,
+      lastUsedAt: true, expiresAt: true, revokedAt: true, createdAt: true, ownerUserId: true,
     },
   });
+  const owners = await ownersOf(rows.map((r) => r.ownerUserId).filter((x): x is string => Boolean(x)));
+  const out = rows.map((r) => ({
+    ...r,
+    owner: r.ownerUserId ? (owners.get(r.ownerUserId) ?? null) : null,
+    canPurchase: r.scopes.includes("orders:write") && r.scopes.includes("wallet:read"),
+  }));
+  const q = (opts.search ?? "").trim().toLowerCase().replace(/^@/, "");
+  if (!q) return out;
+  return out.filter((k) =>
+    k.name.toLowerCase().includes(q) || k.prefix.toLowerCase().includes(q)
+    || (k.owner?.handle ?? "").toLowerCase().includes(q) || (k.owner?.firstName ?? "").toLowerCase().includes(q)
+    || (k.owner?.telegramId ?? "").includes(q));
+}
+
+/** One key with everything the admin "Manage" screen shows. */
+export async function getApiKeyAdmin(id: string): Promise<(AdminApiKeyRow & {
+  wallet: { balanceMinor: bigint; currency: string } | null;
+  orders: number;
+  sellPrices: number;
+  otherActiveKeys: number;
+}) | null> {
+  const r = await prisma.apiKey.findUnique({
+    where: { id },
+    select: {
+      id: true, name: true, prefix: true, scopes: true, rateLimitPerMin: true, callCount: true,
+      lastUsedAt: true, expiresAt: true, revokedAt: true, createdAt: true, ownerUserId: true,
+    },
+  });
+  if (!r) return null;
+  const uid = r.ownerUserId;
+  const [owners, wallet, orders, sellPrices, otherActiveKeys] = await Promise.all([
+    ownersOf(uid ? [uid] : []),
+    uid ? prisma.wallet.findUnique({ where: { userId: uid }, select: { balanceMinor: true, currency: true } }).catch(() => null) : Promise.resolve(null),
+    uid ? prisma.order.count({ where: { userId: uid, status: { in: ["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK", "PARTIALLY_REFUNDED"] } } }) : Promise.resolve(0),
+    uid ? prisma.resellerSellPrice.count({ where: { userId: uid } }).catch(() => 0) : Promise.resolve(0),
+    uid ? prisma.apiKey.count({ where: { ownerUserId: uid, revokedAt: null, id: { not: id } } }) : Promise.resolve(0),
+  ]);
+  return {
+    ...r,
+    owner: uid ? (owners.get(uid) ?? null) : null,
+    canPurchase: r.scopes.includes("orders:write") && r.scopes.includes("wallet:read"),
+    wallet: wallet ? { balanceMinor: BigInt(wallet.balanceMinor), currency: String(wallet.currency) } : null,
+    orders,
+    sellPrices,
+    otherActiveKeys,
+  };
+}
+
+/**
+ * Turn a revoked key back on. Refused while the same reseller has another
+ * live key — one key per owner, or revoking "the" key would leave another
+ * still working (see regenerateApiKeyForOwner).
+ */
+export async function reactivateApiKey(id: string): Promise<{ ok: true } | { ok: false; reason: "NOT_FOUND" | "OTHER_KEY_ACTIVE" | "EXPIRED" }> {
+  const k = await prisma.apiKey.findUnique({ where: { id }, select: { ownerUserId: true, expiresAt: true } });
+  if (!k) return { ok: false, reason: "NOT_FOUND" };
+  if (k.expiresAt && k.expiresAt.getTime() < Date.now()) return { ok: false, reason: "EXPIRED" };
+  if (k.ownerUserId) {
+    const other = await prisma.apiKey.count({ where: { ownerUserId: k.ownerUserId, revokedAt: null, id: { not: id } } });
+    if (other > 0) return { ok: false, reason: "OTHER_KEY_ACTIVE" };
+  }
+  await prisma.apiKey.update({ where: { id }, data: { revokedAt: null } });
+  return { ok: true };
 }
 
 /** Update the scopes of an existing key in place (keeps the same key value). Invalid scopes are dropped. */
