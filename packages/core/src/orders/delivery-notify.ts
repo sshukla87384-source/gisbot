@@ -7,6 +7,7 @@ import {
   combinedDeliveryButtons,
   copyButtonsFor,
   DELIVERY_FILE_THRESHOLD,
+  deliveryNotesText,
   greetName,
   type DeliveryLine,
 } from "./assign.js";
@@ -106,7 +107,13 @@ export async function sendDeliveredOrderMessages(n: DeliveredOrderNotice): Promi
       n.telegramId,
       `order-${n.orderNumber}.txt`,
       buildDeliveryTxt(n.deliveries, n.orderNumber, { amountLabel: n.money }),
-      `🎉 Your order is delivered! ${n.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`,
+      // The list is in the file; the product's note / instructions go HERE,
+      // once, instead of being repeated on every line of the file.
+      [
+        `🎉 <b>${esc(product || "Your order")}</b> — ${n.deliveries.length} items in the attached file.`,
+        deliveryNotesText(n.deliveries),
+        "💾 Saved in 📦 My Orders.",
+      ].filter(Boolean).join("\n\n"),
       [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${n.orderId}` }],
       followUp,
     );

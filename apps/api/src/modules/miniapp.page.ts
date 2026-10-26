@@ -193,7 +193,7 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
       var html = '<div class="hero">'+hero+'</div><h2>'+esc(p.name)+'</h2>'
         + (p.rating ? '<div class="rating">⭐ '+p.rating+' · '+p.ratingCount+' reviews</div>' : '')
         + (p.description ? '<div class="desc">'+esc(p.description)+'</div>' : '<div class="gap"></div>')
-        + '<div class="vars">'+p.variants.map(function(v){ return '<div class="var'+(v.inStock?"":" out")+(sel&&v.id===sel.id?" sel":"")+'" data-v="'+esc(v.id)+'"><span>'+esc(v.name)+(v.inStock?"":" · sold out")+'</span><b>'+money(v.priceMinor, cat.currency)+'</b></div>'; }).join("")+'</div>'
+        + (p.variants.length > 1 ? '<div class="vars">'+p.variants.map(function(v){ var vn = /^(standard|default|regular|-)?$/i.test(String(v.name||"").trim()) ? "" : v.name; return '<div class="var'+(v.inStock?"":" out")+(sel&&v.id===sel.id?" sel":"")+'" data-v="'+esc(v.id)+'"><span>'+esc(vn)+(v.inStock?"":" · sold out")+'</span><b>'+money(v.priceMinor, cat.currency)+'</b></div>'; }).join("")+'</div>' : '')
         + (sel && sel.inStock ? '<div class="qty"><span>Quantity</span><span><button id="qm">−</button> &nbsp;<b>'+qty+'</b>&nbsp; <button id="qp">+</button></span></div>' : '')
         + (sel && sel.inStock
             ? (canWallet

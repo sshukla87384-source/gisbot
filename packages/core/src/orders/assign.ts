@@ -784,44 +784,77 @@ export function buildCombinedDeliveryText(items: DeliveryLine[], orderNumber?: s
 
 /** Plaintext body for the .txt attachment sent for large orders (> threshold). */
 export function buildDeliveryTxt(items: DeliveryLine[], orderNumber?: string, opts: DeliveryRenderOpts = {}): string {
+  // A clean LIST: each product's name once, then only its values, one per
+  // line. The product name, the 2FA hint and the activation note used to be
+  // repeated on every unit — 50 keys meant 50 copies of the same paragraph.
+  // The note/description now travels OUTSIDE the file (see deliveryNotesText).
   const numbered = opts.numbered !== false;
   const out: string[] = [];
-  out.push(`ORDER DELIVERY${orderNumber ? ` — ${orderNumber}` : ""}`);
-  out.push(`${items.length} item(s)`);
-  if (opts.amountLabel) out.push(`Amount paid: ${opts.amountLabel}`);
-  out.push("=".repeat(40), "");
-  items.forEach((it, i) => {
-    const vn = it.variantName.trim().toLowerCase() === "standard" ? "" : ` · ${it.variantName}`;
-    out.push(`${numbered ? `${i + 1}) ` : ""}${it.productName}${vn}`);
-    const p = it.payload;
-    if (p.key) {
-      const rows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
-      const creds = rows.map(splitCredential);
-      if (rows.length > 0 && creds.every((c) => c !== null)) {
-        rows.forEach((_, k) => {
-          const c = creds[k] as { id: string; pw: string; twofa?: string };
-          const rowTag = rows.length > 1 && numbered ? `${k + 1}) ` : "";
-          const rowPad = rows.length > 1 && numbered ? "   " : "";
-          out.push(`   ${rowTag}ID: ${c.id}`);
-          out.push(`   ${rowPad}Password: ${c.pw}`);
-          if (c.twofa) out.push(`   ${rowPad}2FA secret: ${c.twofa}   (paste at ${TWOFA_SITE} to get the OTP)`);
-        });
-      } else {
-        for (const r of rows) out.push(`   Key: ${r}`);
+  out.push(`${orderNumber ? `Order ${orderNumber} · ` : ""}${items.length} item(s)`);
+  out.push("");
+  const groups: Array<{ name: string; items: DeliveryLine[] }> = [];
+  for (const it of items) {
+    const vn = /^(standard|default|regular|-)?$/i.test(it.variantName.trim()) ? "" : ` · ${it.variantName}`;
+    const name = `${it.productName}${vn}`;
+    const g = groups.find((x) => x.name === name);
+    if (g) g.items.push(it); else groups.push({ name, items: [it] });
+  }
+  for (const g of groups) {
+    const rows: Array<{ text: string; until?: string }> = [];
+    let anyTwofa = false;
+    for (const it of g.items) {
+      const p = it.payload;
+      const until = p.expiresAt ? p.expiresAt.slice(0, 10) : undefined;
+      if (p.key) {
+        const keyRows = p.key.split(/\r?\n/).map((r) => r.trim()).filter(Boolean);
+        const creds = keyRows.map(splitCredential);
+        if (keyRows.length > 0 && creds.every((c) => c !== null)) {
+          for (const c of creds as Array<{ id: string; pw: string; twofa?: string }>) {
+            if (c.twofa) anyTwofa = true;
+            rows.push({ text: `${c.id} | ${c.pw}${c.twofa ? ` | ${c.twofa}` : ""}`, ...(until ? { until } : {}) });
+          }
+        } else {
+          for (const r of keyRows) rows.push({ text: r, ...(until ? { until } : {}) });
+        }
       }
+      const fxx = repairAccountPair(p.username, p.password);
+      const tName = fxx?.id ?? p.username;
+      const tPass = fxx?.pw ?? p.password;
+      const tTwo = fxx?.twofa ?? p.twofa;
+      if (tTwo) anyTwofa = true;
+      if (tName || tPass) rows.push({ text: [tName, tPass, tTwo].filter(Boolean).join(" | "), ...(until ? { until } : {}) });
     }
-    const fxx = repairAccountPair(p.username, p.password);
-    const tName = fxx?.id ?? p.username;
-    const tPass = fxx?.pw ?? p.password;
-    const tTwo = fxx?.twofa ?? p.twofa;
-    if (tName) out.push(`   ID: ${tName}`);
-    if (tPass) out.push(`   Password: ${tPass}`);
-    if (tTwo) out.push(`   2FA secret: ${tTwo}   (paste at ${TWOFA_SITE} to get the OTP)`);
-    if (tName && tPass) out.push(`   Copy all: ${tName}|${tPass}${tTwo ? `|${tTwo}` : ""}`);
-    if (p.expiresAt) out.push(`   Valid until: ${p.expiresAt.slice(0, 10)}`);
-    if (it.activationGuide) out.push(`   Note: ${it.activationGuide}`);
+    // One validity date for the whole group goes on the header; mixed dates
+    // stay on their own lines.
+    const dates = [...new Set(rows.map((r) => r.until ?? ""))];
+    const sharedUntil = dates.length === 1 && dates[0] ? dates[0] : null;
+    out.push(`${g.name} (${rows.length})${sharedUntil ? ` — valid until ${sharedUntil}` : ""}`);
+    if (anyTwofa) out.push("Format: ID | Password | 2FA secret");
+    else if (rows.some((r) => r.text.includes(" | "))) out.push("Format: ID | Password");
+    out.push("-".repeat(30));
+    rows.forEach((r, i) => {
+      out.push(`${numbered ? `${i + 1}. ` : ""}${r.text}${!sharedUntil && r.until ? `   (valid until ${r.until})` : ""}`);
+    });
     out.push("");
-  });
-  out.push("Saved in My Orders in the bot - reopen any time. Problem? Open a Support ticket.");
-  return out.join("\n");
+  }
+  return out.join("\n").trimEnd() + "\n";
+}
+
+/**
+ * The text that goes WITH a .txt delivery (caption / message), not inside it:
+ * each product's activation note once, plus the 2FA hint when it applies.
+ */
+export function deliveryNotesText(items: DeliveryLine[], max = 700): string {
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const notes: string[] = [];
+  const seen = new Set<string>();
+  let twofa = false;
+  for (const it of items) {
+    const g = (it.activationGuide ?? "").trim();
+    if (g && !seen.has(g)) { seen.add(g); notes.push(`📄 ${esc(it.productName)}: ${esc(g)}`); }
+    if (it.payload.twofa || /\|[^|]+\|/.test(it.payload.key ?? "")) twofa = true;
+  }
+  if (twofa) notes.push(`🔐 Paste the 2FA secret at ${TWOFA_SITE} to get your 6-digit OTP.`);
+  const text = notes.join("\n");
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }

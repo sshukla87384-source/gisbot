@@ -110,6 +110,7 @@ import {
   getOrderTracking,
   getOrderSummary,
   orderProductLabel,
+  deliveryNotesText,
   groupOrderLines,
   setUserCurrency,
   setUserLocale,
@@ -2594,7 +2595,8 @@ export function createBot(): Bot<Ctx> {
           });
           const name = `order-${(meta?.orderNumber ?? orderId).replace(/[^A-Za-z0-9_-]/g, "")}${numbered ? "" : "-plain"}.txt`;
           await ctx.replyWithDocument(new InputFile(Buffer.from(body, "utf8"), name), {
-            caption: `📄 ${rows.length} item(s)${numbered ? "" : " — no numbering"}. Keep this file safe.`,
+            caption: [`📄 ${rows.length} item(s)${numbered ? "" : " — no numbering"}. Keep this file safe.`, deliveryNotesText(lines)].filter(Boolean).join("\n\n"),
+            parse_mode: "HTML",
             reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home"),
           }).catch(async () => {
             await ctx.reply("Couldn't build that file — tap 📄 Get all keys instead.").catch(() => undefined);
@@ -3480,7 +3482,13 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
     try {
       const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
       keep(await ctx.replyWithDocument(file, {
-        caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
+        // The note / instructions go in the caption, once — not on every line of the file.
+        caption: [
+          `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.`,
+          deliveryNotesText(lines),
+          "💾 Also saved in 📦 My Orders.",
+        ].filter(Boolean).join("\n\n"),
+        parse_mode: "HTML",
         ...(orderId ? { reply_markup: new InlineKeyboard().text("📋 Copy ALL", `dl:copyall:${orderId}`) } : {}),
       }));
       await sendNav();

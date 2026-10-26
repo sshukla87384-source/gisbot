@@ -356,6 +356,10 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
 
   const icon = p.iconEmoji ? `${p.iconEmoji} ` : "";
   const kb = new InlineKeyboard();
+  // No "Standard" anywhere: a default variant is just the product. One
+  // variant → Buy now + Add to cart straight away; several → one row each.
+  const isDefaultVariant = (n: string): boolean => /^(standard|default|regular|-)?$/i.test(n.trim());
+  const single = p.variants.length === 1;
   for (const v of p.variants) {
     if (v.stock > 0 && v.priceMinor !== null) {
       const priceLabel =
@@ -363,13 +367,15 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
           ? `${fmt(v.originalPriceMinor, user.currency)} ➜ ${fmt(v.priceMinor, user.currency)}`
           : fmt(v.priceMinor, user.currency);
       // Direct buy: tapping asks the quantity, then goes straight to payment.
-      const bl = v.name.trim().toLowerCase() === "standard" ? "" : ` ${v.name}`;
-      const buyLabel = p.buyButtonText ? `${p.buyButtonText} — ${priceLabel}` : `⚡ ${icon}Buy${bl} — ${priceLabel}`;
+      const bl = isDefaultVariant(v.name) ? "" : ` ${v.name}`;
+      const buyLabel = p.buyButtonText ? `${p.buyButtonText} — ${priceLabel}` : `⚡ ${icon}Buy${single ? " now" : bl} — ${priceLabel}`;
       const buyStyle = (p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success";
-      kb.add(sbtn(buyLabel, cb("crt", "buynow", v.id), buyStyle, p.iconCustomEmojiId ?? undefined)).row();
+      kb.add(sbtn(buyLabel, cb("crt", "buynow", v.id), buyStyle, p.iconCustomEmojiId ?? undefined));
+      if (single) kb.row().add(sbtn("🛒 Add to cart", cb("crt", "add", v.id), "primary")).row();
+      else kb.add(sbtn("🛒 Add", cb("crt", "add", v.id), "primary")).row();
     } else {
-      const bl = v.name.trim().toLowerCase() === "standard" ? "this" : v.name;
-      kb.add(sbtn(`❌ ${bl} — out of stock`, cb("mnu", "noop"), "danger")).row();
+      const bl = isDefaultVariant(v.name) ? "Sold out" : `${v.name} — out of stock`;
+      kb.add(sbtn(`❌ ${bl}`, cb("mnu", "noop"), "danger")).row();
     }
   }
   // Notify-me options: restock when sold out, price drop always.
