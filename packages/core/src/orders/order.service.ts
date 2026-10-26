@@ -219,13 +219,19 @@ export interface RevealedDelivery {
 export async function getOrderSummary(
   userId: string,
   orderId: string,
-): Promise<{ orderNumber: string; totalMinor: number; currency: string } | null> {
+): Promise<{ orderNumber: string; totalMinor: number; currency: string; productName: string; itemCount: number; firstQty: number } | null> {
   const o = await prisma.order.findFirst({
     where: { id: orderId, userId },
-    select: { orderNumber: true, subtotalMinor: true, discountMinor: true, currency: true },
+    select: {
+      orderNumber: true, subtotalMinor: true, discountMinor: true, currency: true,
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } },
+    },
   });
   if (!o) return null;
-  return { orderNumber: o.orderNumber, totalMinor: Math.max(0, o.subtotalMinor - o.discountMinor), currency: o.currency };
+  return {
+    orderNumber: o.orderNumber, totalMinor: Math.max(0, o.subtotalMinor - o.discountMinor), currency: o.currency,
+    productName: firstItemName(o.items), itemCount: o.items.length, firstQty: o.items[0]?.quantity ?? 1,
+  };
 }
 
 export async function revealOrderDeliveries(userId: string, orderId: string): Promise<RevealedDelivery[]> {

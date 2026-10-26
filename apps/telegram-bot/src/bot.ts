@@ -99,6 +99,7 @@ import {
   revealOrderDeliveries,
   deliveredValue,
   enqueueTelegramMessage,
+  enqueueTelegramDelete,
   startRenewal,
   createWalletGift,
   claimGift,
@@ -108,6 +109,7 @@ import {
   matchFaq,
   getOrderTracking,
   getOrderSummary,
+  orderProductLabel,
   setUserCurrency,
   setUserLocale,
   createUpiManualCheckout,
@@ -942,11 +944,10 @@ export function createBot(): Bot<Ctx> {
     const sp = ctx.message.successful_payment;
     const orderId = sp.invoice_payload;
     try {
-      const r = await confirmStarsPayment(orderId);
-      await ctx.reply(
-        successCard("Payment Received", [`✅ Paid with ⭐ Telegram Stars`, `📦 Delivered ${num(r.delivered)} item(s)`, `🙏 Thank you so much, ${greetName(ctx.user)} — it is an honour to serve you!`]),
-        { parse_mode: "HTML" },
-      );
+      // confirmStarsPayment delivers through the outbox — keys plus one
+      // closing card. A second "Payment Received" card from here duplicated
+      // that, and usually landed BEFORE the keys.
+      await confirmStarsPayment(orderId);
     } catch (e) {
       // The Stars are already taken. Never leave that silent: credit the order
       // value to the wallet when the order was closed meanwhile, and always
@@ -1881,56 +1882,14 @@ export function createBot(): Bot<Ctx> {
             }
             throw e;
           }
-          await ctx.reply(
-            successCard("Order Success", [
-              `✅ Payment confirmed`,
-              `📦 Order <b>${result.orderNumber}</b>`,
-              `💰 Amount ${fmt(result.totalMinor, result.currency)}`,
-              `🙏 Thank you so much, ${greetName(user)} — it is an honour to serve you!`,
-            ]),
-            { parse_mode: "HTML" },
-          );
-          await deliverAll(ctx, result.deliveries, result.orderNumber, result.orderId);
+          // Two messages, in order: the keys, then ONE closing card. This used
+          // to be six (success card, keys, "👆 above", "being prepared", tier &
+          // spin, instructions + referral) — a wall of text on every purchase.
+          await deliverAll(ctx, result.deliveries, result.orderNumber, result.orderId, { nav: false });
           // Served — the pre-purchase greeting and any "we're checking" notices
-          // have done their job.
+          // (and the previous purchase's closing card) have done their job.
           if (ctx.chat) await clearChatClutter(ctx.chat.id);
-          if (result.pendingManualItems > 0) {
-            await ctx.reply(
-              `⏳ <b>${result.pendingManualItems} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`,
-              { parse_mode: "HTML" },
-            );
-          }
-          // Discovery: after paying, show tier progress and offer the spin.
-          try {
-            const [ts, scfg] = await Promise.all([tierOf(user.id), getSpinConfig()]);
-            const rowKb = new InlineKeyboard();
-            rowKb.text("🏆 My Tier", cb("prf", "tier"));
-            if (scfg.enabled) rowKb.text("🎡 Spin & Win", cb("spn", "ord", result.orderId));
-            await ctx.reply(
-              [
-                `🏆 <b>${ts.tier.name} member</b> — ${escapeHtml(ts.tier.perk)}`,
-                ts.next
-                  ? `📈 Spend <b>${fmt(ts.toNextMinor, ts.currency)}</b> more to reach <b>${ts.next.name}</b>`
-                  : "👑 You're at the top tier — thank you!",
-                scfg.enabled ? "\n🎡 <b>You earned a spin!</b> Tap below to try your luck." : "",
-              ].filter(Boolean).join("\n"),
-              { parse_mode: "HTML", reply_markup: rowKb },
-            );
-          } catch { /* never block a delivery over this */ }
-          // One tidy closing message: instructions + referral, not three separate ones.
-          const closing = [
-            await deliveryInstructionsMessage(),
-            // Referral pitch only on the day's first delivery, not every order.
-            (await shouldSendReferralNudge(user.id)) ? referralNudgeMessage(user.referralCode, ctx.me.username) : null,
-          ].filter(Boolean).join("\n\n");
-          if (closing) {
-            await ctx.reply(closing, {
-              parse_mode: "HTML",
-              reply_markup: new InlineKeyboard()
-                .text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
-                .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
-            }).catch(() => undefined);
-          }
+          await sendPurchaseClosing(ctx, user, result, "wallet");
           break;
         }
         // Pay Later is credit — confirm the debt before it is taken on.
@@ -1987,26 +1946,9 @@ export function createBot(): Bot<Ctx> {
           await ctx.answerCallbackQuery({ text: "⏳ Processing…" });
           try {
             const result = await withPurchaseAnimation(ctx, () => checkoutWithBnpl(user.id));
-            await ctx.reply(
-              successCard("Order Placed — Pay Later", [
-                `✅ Placed on 🕒 Pay Later (BNPL)`,
-                `📦 Order <b>${result.orderNumber}</b>`,
-                `🕒 Added to your BNPL balance: ${fmt(result.totalMinor, result.currency)}`,
-                `🙏 Thank you so much, ${greetName(user)} — repay anytime from 💰 Wallet.`,
-              ]),
-              { parse_mode: "HTML" },
-            );
-            await deliverAll(ctx, result.deliveries, result.orderNumber, result.orderId);
-            if (result.pendingManualItems > 0) await ctx.reply(`🔄 ${result.pendingManualItems} item(s) are being prepared — arriving here shortly.`);
-            const instr = await deliveryInstructionsMessage();
-            if (instr) {
-              await ctx.reply(instr, {
-                parse_mode: "HTML",
-                reply_markup: new InlineKeyboard()
-                  .text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
-                  .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home"),
-              }).catch(() => undefined);
-            }
+            await deliverAll(ctx, result.deliveries, result.orderNumber, result.orderId, { nav: false });
+            if (ctx.chat) await clearChatClutter(ctx.chat.id);
+            await sendPurchaseClosing(ctx, user, result, "bnpl");
           } catch (e) {
             // Only a limit problem is a limit problem: out of stock, an empty
             // cart or a price change used to be reported as "limit exceeded".
@@ -2167,7 +2109,7 @@ export function createBot(): Bot<Ctx> {
             await enqueueTelegramMessage(
               user.telegramId,
               `${picked.map((v) => `<code>${escapeHtml(v)}</code>`).join("\n\n")}\n\n<i>Tap to copy · this message disappears in 10 minutes. 💾 Always in 📦 My orders.</i>`,
-              { deleteAfterSec: 600 },
+              { deleteAfterSec: 600, replaceTag: "copy" },
             );
           }
           break;
@@ -2193,7 +2135,7 @@ export function createBot(): Bot<Ctx> {
             await enqueueTelegramMessage(
               user.telegramId,
               `${body}\n\n<i>Tap to copy · this message disappears in 10 minutes. 💾 Always in 📦 My orders.</i>`,
-              { deleteAfterSec: 600 },
+              { deleteAfterSec: 600, replaceTag: "copy" },
             );
           }
           break;
@@ -2552,7 +2494,7 @@ export function createBot(): Bot<Ctx> {
         case "lic:view": {
           const oiId = args[0] ?? "";
           const revealed = await revealDelivery(user.id, oiId);
-          await sendRevealed(ctx, oiId, revealed.productName, revealed.variantName, revealed.payload);
+          await tidyRevealed(ctx, `i:${oiId}`, await sendRevealed(ctx, oiId, revealed.productName, revealed.variantName, revealed.payload));
           break;
         }
         case "ord:reveal": {
@@ -2571,13 +2513,16 @@ export function createBot(): Bot<Ctx> {
           }));
           if (ds.length === 0) { await ctx.reply("No delivered keys found for this order."); break; }
           const deadCount = all.filter((r) => r.replaced).length;
+          const shownIds: number[] = [];
           if (deadCount > 0) {
-            await ctx.reply(
+            const m = await ctx.reply(
               `ℹ️ <b>${deadCount} of these was replaced.</b> The old value is kept for your records but no longer works — it's marked <b>REPLACED</b> below, and the working one came in your replacement order.`,
               { parse_mode: "HTML" },
-            );
+            ).catch(() => undefined);
+            if (m) shownIds.push(m.message_id);
           }
-          await deliverAll(ctx, ds, undefined, args[0] ?? "");
+          shownIds.push(...await deliverAll(ctx, ds, undefined, args[0] ?? ""));
+          await tidyRevealed(ctx, `o:${args[0] ?? ""}`, shownIds);
           break;
         }
 
@@ -3368,9 +3313,93 @@ function copyKeyboard(buttons: OutboxButton[]): InlineKeyboard {
   return kb;
 }
 
-async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
+/**
+ * The ONE message that closes a wallet / Pay-Later purchase, after the keys:
+ * what was bought (product first, order number after), how it was paid, items
+ * still being prepared, tier + spin, the shop's instructions and — once a day —
+ * the referral pitch. Remembered as chat clutter, so the NEXT purchase removes
+ * this one instead of the chat filling up with old closing cards.
+ */
+async function sendPurchaseClosing(
+  ctx: Ctx,
+  user: Ctx["user"],
+  result: { orderId: string; orderNumber: string; totalMinor: number; currency: string; pendingManualItems: number; deliveries: DeliveredSecret[] },
+  mode: "wallet" | "bnpl",
+): Promise<void> {
+  const meta = await getOrderSummary(user.id, result.orderId).catch(() => null);
+  const product = meta ? orderProductLabel(meta, 40) : (result.deliveries[0]?.productName ?? "Your order");
+  const lines = [
+    `📦 <b>${escapeHtml(product)}</b>`,
+    `🧾 Order <code>${escapeHtml(result.orderNumber)}</code>`,
+    mode === "wallet"
+      ? `💰 Paid from wallet: <b>${fmt(result.totalMinor, result.currency)}</b>`
+      : `🕒 Added to your Pay Later balance: <b>${fmt(result.totalMinor, result.currency)}</b> — repay anytime from 💰 Wallet`,
+  ];
+  if (result.deliveries.length > 0) lines.push("👆 <b>Your items are in the message above</b> — always saved in 📦 My Orders.");
+  if (result.pendingManualItems > 0) lines.push(`⏳ <b>${result.pendingManualItems} item(s) being prepared</b> — they arrive here automatically, usually within a minute.`);
+  const kb = new InlineKeyboard();
+  try {
+    const [ts, scfg] = await Promise.all([tierOf(user.id), getSpinConfig()]);
+    lines.push("", `🏆 <b>${ts.tier.name} member</b> — ${escapeHtml(ts.tier.perk)}`);
+    lines.push(ts.next ? `📈 Spend <b>${fmt(ts.toNextMinor, ts.currency)}</b> more to reach <b>${ts.next.name}</b>` : "👑 You're at the top tier — thank you!");
+    if (scfg.enabled) { lines.push("🎡 <b>You earned a spin!</b> Tap below to try your luck."); kb.text("🎡 Spin & Win", cb("spn", "ord", result.orderId)); }
+    kb.text("🏆 My Tier", cb("prf", "tier")).row();
+  } catch { /* never block a delivery over this */ }
+  lines.push("", `🙏 Thank you so much, ${greetName(user)} — it is an honour to serve you!`);
+  const extras = [
+    await deliveryInstructionsMessage().catch(() => null),
+    // Referral pitch only on the day's first purchase, not every order.
+    (await shouldSendReferralNudge(user.id)) ? referralNudgeMessage(user.referralCode, ctx.me.username) : null,
+  ].filter((x): x is string => Boolean(x));
+  kb.text("⚡ Buy again", cb("ord", "again", result.orderId)).text("📦 My orders", cb("ord", "list", 1)).row()
+    .text("🛍 Shop more", cb("shp", "home", 1)).text("🏠 Menu", "mnu:home");
+  const card = successCard(mode === "wallet" ? "Order Success" : "Order Placed — Pay Later", lines);
+  const full = [card, ...extras].join("\n\n");
+  // Long shop instructions could push one message past Telegram's 4096 cap;
+  // then they ride in their own message rather than losing the closing card.
+  const parts = full.length <= 4000 ? [full] : [card, ...extras];
+  for (let i = 0; i < parts.length; i++) {
+    const last = i === parts.length - 1;
+    const m = await ctx.reply(parts[i]!, { parse_mode: "HTML", ...(last ? { reply_markup: kb } : {}) }).catch(() => undefined);
+    if (m && ctx.chat) await rememberChatClutter(ctx.chat.id, m.message_id);
+  }
+}
+
+/**
+ * How a delivery send behaves.
+ * - nav: false → no "👆 Your items are above" navigation message; the caller
+ *   sends ONE closing card instead (a purchase used to end in five or six
+ *   separate messages).
+ */
+interface DeliverOpts { nav?: boolean }
+
+async function sendDelivery(ctx: Ctx, d: DeliveredSecret, opts: DeliverOpts = {}): Promise<number[]> {
   const oiId = (d as unknown as { orderItemId?: string }).orderItemId ?? "";
-  await sendRevealed(ctx, oiId, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide, d.allowPwChange);
+  return sendRevealed(ctx, oiId, d.productName, d.variantName, { kind: d.kind, ...d.secret }, d.activationGuide, d.allowPwChange, opts);
+}
+
+/**
+ * A RE-SHOWN delivery (View / Get all keys from My Orders) is a convenience
+ * copy — the original delivery message and My Orders keep the value. Leaving
+ * every re-view in the chat stacked secret-bearing messages without end, so
+ * the previous re-view OF THE SAME item/order is removed when it is shown again, and each one
+ * tidies itself away after 15 minutes.
+ */
+async function tidyRevealed(ctx: Ctx, tag: string, ids: number[]): Promise<void> {
+  if (!ctx.chat || ids.length === 0) return;
+  const chatId = ctx.chat.id;
+  try {
+    // Per item / per order: opening unit 1 then unit 2 keeps both on screen;
+    // opening unit 1 twice keeps one.
+    const k = `reveal:last:${chatId}:${tag}`;
+    const prev = await getRedis().get(k);
+    await getRedis().set(k, ids.join(","), "EX", 48 * 3600);
+    for (const raw of (prev ?? "").split(",")) {
+      const id = Number(raw);
+      if (Number.isFinite(id) && id > 0 && !ids.includes(id)) await ctx.api.deleteMessage(chatId, id).catch(() => undefined);
+    }
+  } catch { /* housekeeping only */ }
+  for (const id of ids) await enqueueTelegramDelete(String(chatId), id, 15 * 60_000).catch(() => undefined);
 }
 
 /**
@@ -3378,14 +3407,19 @@ async function sendDelivery(ctx: Ctx, d: DeliveredSecret): Promise<void> {
  * rich single-item card; for 2..threshold we send one combined message; for
  * large orders (> threshold) we attach a .txt file with all the keys.
  */
-async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?: string, orderId?: string): Promise<void> {
-  if (deliveries.length === 0) return;
-  if (deliveries.length === 1) { await sendDelivery(ctx, deliveries[0]!); return; }
+async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?: string, orderId?: string, opts: DeliverOpts = {}): Promise<number[]> {
+  if (deliveries.length === 0) return [];
+  if (deliveries.length === 1) return sendDelivery(ctx, deliveries[0]!, opts);
+  const ids: number[] = [];
+  const keep = (m: { message_id: number } | undefined | void): void => { if (m && m.message_id) ids.push(m.message_id); };
   const lines = deliveries.map((d) => ({ orderItemId: d.orderItemId || undefined, productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
   // Navigation goes on its own message after the content (see sendRevealed):
   // a tap must never replace the message that holds the keys.
   const menu = new InlineKeyboard().text("📦 View my orders", cb("ord", "list", 1)).text("🛍 Buy more", cb("shp", "home", 1)).row().text("🏠 Menu", "mnu:home");
-  const sendNav = () => ctx.reply("👆 Your items are in the message above — always saved in 📦 My Orders.", { parse_mode: "HTML", reply_markup: menu }).catch(() => undefined);
+  const sendNav = async (): Promise<void> => {
+    if (opts.nav === false) return;
+    keep(await ctx.reply("👆 Your items are in the message above — always saved in 📦 My Orders.", { parse_mode: "HTML", reply_markup: menu }).catch(() => undefined));
+  };
   // A combined message for 2..threshold items can still blow Telegram's 4096-char
   // cap (long credential blocks, activation guides). Both sends below would then
   // be rejected and the .catch() would swallow it — a customer who has PAID gets
@@ -3396,12 +3430,12 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
     const txt = buildDeliveryTxt(lines, orderNumber);
     try {
       const file = new InputFile(Buffer.from(txt, "utf8"), `order-${orderNumber ?? "delivery"}.txt`);
-      await ctx.replyWithDocument(file, {
+      keep(await ctx.replyWithDocument(file, {
         caption: `🎉 Your order is delivered! ${num(deliveries.length)} items are in the attached file.\n💾 Also saved in 🔑 My Licenses.`,
         ...(orderId ? { reply_markup: new InlineKeyboard().text("📋 Copy ALL", `dl:copyall:${orderId}`) } : {}),
-      });
+      }));
       await sendNav();
-      return;
+      return ids;
     } catch {
       // Fallback: if the file send fails, deliver the keys as text messages (chunked under Telegram's 4096 limit).
       const chunks: string[] = [];
@@ -3412,18 +3446,18 @@ async function deliverAll(ctx: Ctx, deliveries: DeliveredSecret[], orderNumber?:
         buf += row;
       }
       if (buf.trim()) chunks.push(buf);
-      for (const chunk of chunks) await ctx.reply(chunk).catch(() => undefined);
+      for (const chunk of chunks) keep(await ctx.reply(chunk).catch(() => undefined));
       await sendNav();
-      return;
+      return ids;
     }
   }
   // The combined message carried NO copy buttons; one per item + Copy ALL now.
   const copyKb = copyKeyboard(combinedDeliveryButtons(lines, orderId ?? ""));
   const markup = copyKb.inline_keyboard.length > 0 ? { reply_markup: copyKb } : {};
-  await ctx.reply(combined, { parse_mode: "HTML", ...markup }).catch(async () => {
-    await ctx.reply(combined.replace(/<[^>]+>/g, ""), markup).catch(() => ctx.reply(combined.replace(/<[^>]+>/g, "")).catch(() => undefined));
-  });
+  keep(await ctx.reply(combined, { parse_mode: "HTML", ...markup }).catch(async () =>
+    ctx.reply(combined.replace(/<[^>]+>/g, ""), markup).catch(() => ctx.reply(combined.replace(/<[^>]+>/g, "")).catch(() => undefined))));
   await sendNav();
+  return ids;
 }
 
 async function sendRevealed(
@@ -3434,7 +3468,9 @@ async function sendRevealed(
   payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string },
   activationGuide?: string | null,
   allowPwChange?: boolean,
-): Promise<void> {
+  opts: DeliverOpts = {},
+): Promise<number[]> {
+  const sentIds: number[] = [];
   const vn = variantName.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(variantName)}`;
   const lines = [`📦 <b>${escapeHtml(productName)}</b>${vn}`, ""];
   let shownCreds = false;
@@ -3493,6 +3529,10 @@ async function sendRevealed(
   // arrive with no copy button at all). Over-long values get a tap-to-copy
   // callback instead of a copy_text button Telegram would reject.
   const kb = copyKeyboard(copyButtonsFor(payload, orderItemId ? { orderItemId } : {}));
+  // The OTP button only ever REPLIES, so it is safe on the delivery itself —
+  // and it must survive when the navigation message is left out.
+  const otpOnDelivery = opts.nav === false && Boolean(rTwo && looksLikeTotpSecret(rTwo) && orderItemId);
+  if (otpOnDelivery) kb.row().add(sbtn("🔢 Get my login code (OTP)", cb("otp", "get", orderItemId), "success")).row();
   // Navigation is NOT on the delivery message. Views replace the message they
   // were tapped on, so "📦 My orders" under the credentials used to wipe the
   // credentials off the screen. They ride on a separate follow-up message;
@@ -3520,11 +3560,14 @@ async function sendRevealed(
     const text = parts[i]!;
     const last = i === parts.length - 1;
     const markup = last && kb.inline_keyboard.length > 0 ? { reply_markup: kb } : {};
-    await ctx.reply(text, { parse_mode: "HTML", ...markup }).catch(async () => {
-      await ctx.reply(text.replace(/<[^>]+>/g, ""), markup).catch(async () => {
-        await ctx.reply(text.replace(/<[^>]+>/g, "")).catch(() => undefined);
-      });
-    });
+    const m = await ctx.reply(text, { parse_mode: "HTML", ...markup }).catch(async () =>
+      ctx.reply(text.replace(/<[^>]+>/g, ""), markup).catch(async () =>
+        ctx.reply(text.replace(/<[^>]+>/g, "")).catch(() => undefined)));
+    if (m) sentIds.push(m.message_id);
   }
-  await ctx.reply("👆 Your items are in the message above — always saved in 📦 My Orders.", { parse_mode: "HTML", reply_markup: nav }).catch(() => undefined);
+  if (opts.nav !== false) {
+    const m = await ctx.reply("👆 Your items are in the message above — always saved in 📦 My Orders.", { parse_mode: "HTML", reply_markup: nav }).catch(() => undefined);
+    if (m) sentIds.push(m.message_id);
+  }
+  return sentIds;
 }

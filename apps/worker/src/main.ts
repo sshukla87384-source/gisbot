@@ -10,6 +10,8 @@ import {
   primeFxRate,
   getPromoFlags,
   enqueueTelegramDelete,
+  getRedis,
+  rememberChatClutter,
   splitTelegramHtml,
   capTelegramHtml,
   stripTelegramHtml,
@@ -62,6 +64,33 @@ async function main(): Promise<void> {
       }
       let replyMarkup: any;
       let sendFollowUp: () => Promise<void> = async () => undefined;
+      // Housekeeping for EVERY path that got the message out — the normal send
+      // and both 400 fallbacks. Only the normal path used to schedule the
+      // self-delete, so a copy block or celebration that went out through a
+      // fallback (e.g. premium emoji refused) stayed in the chat forever.
+      const afterSent = async (ids: number[]): Promise<void> => {
+        if (ids.length === 0) return;
+        if (job.data.clutter) {
+          for (const id of ids) await rememberChatClutter(job.data.telegramId, id).catch(() => undefined);
+        }
+        if (job.data.deleteAfterSec) {
+          for (const id of ids) await enqueueTelegramDelete(job.data.telegramId, id, job.data.deleteAfterSec * 1000).catch(() => undefined);
+        }
+        if (job.data.replaceTag) {
+          // One live message per tag per chat (e.g. the tap-to-copy block):
+          // a new one removes the previous instead of stacking them up.
+          try {
+            const redis = getRedis();
+            const k = `outbox:tag:${job.data.telegramId}:${job.data.replaceTag}`;
+            const prev = await redis.get(k);
+            await redis.set(k, ids.join(","), "EX", 48 * 3600);
+            for (const raw of (prev ?? "").split(",")) {
+              const old = Number(raw);
+              if (Number.isFinite(old) && old > 0 && !ids.includes(old)) await telegram.deleteMessage(job.data.telegramId, old).catch(() => undefined);
+            }
+          } catch { /* tidy-up only */ }
+        }
+      };
       try {
         const styled = config.BUTTON_STYLES_ENABLED;
         // Hoisted so the 400 fallback in the catch block can reuse the buttons.
@@ -109,9 +138,19 @@ async function main(): Promise<void> {
         sendFollowUp = async (): Promise<void> => {
           if (!job.data.followUp) return;
           const fu = job.data.followUp;
-          await telegram.sendMessage(job.data.telegramId, fu.text, { parse_mode: "HTML", reply_markup: toMarkup(fu.buttons) }).catch(async () => {
-            await telegram.sendMessage(job.data.telegramId, stripTelegramHtml(fu.text), { reply_markup: toMarkup(fu.buttons) }).catch(() => undefined);
-          });
+          const markup = toMarkup(fu.buttons);
+          // HTML → HTML without premium emoji (a shop owner without Premium
+          // gets those refused) → plain text. Never lose the closing card.
+          const noIcons = markup
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ? { inline_keyboard: (markup.inline_keyboard as any[][]).map((row) => row.map(({ icon_custom_emoji_id: _drop, ...b }) => b)) }
+            : undefined;
+          const unwrappedFu = fu.text.replace(/<tg-emoji[^>]*>([\s\S]*?)<\/tg-emoji>/gi, "$1");
+          const m = await telegram.sendMessage(job.data.telegramId, fu.text, { parse_mode: "HTML", reply_markup: markup })
+            .catch(() => telegram.sendMessage(job.data.telegramId, unwrappedFu, { parse_mode: "HTML", reply_markup: noIcons as never }))
+            .catch(() => telegram.sendMessage(job.data.telegramId, stripTelegramHtml(unwrappedFu), { reply_markup: noIcons as never }))
+            .catch(() => undefined);
+          if (m?.message_id && fu.clutter) await rememberChatClutter(job.data.telegramId, m.message_id).catch(() => undefined);
         };
         const reply_markup = replyMarkup;
         let msg;
@@ -145,11 +184,7 @@ async function main(): Promise<void> {
         }
         // Scheduled tidy-up: the ids only exist here, on the send.
         if (msg?.message_id && sentIds.length === 0) sentIds.push(msg.message_id);
-        if (job.data.deleteAfterSec) {
-          for (const id of sentIds) {
-            await enqueueTelegramDelete(job.data.telegramId, id, job.data.deleteAfterSec * 1000).catch(() => undefined);
-          }
-        }
+        await afterSent(sentIds);
         await sendFollowUp();
         if (job.data.pin && msg?.message_id) {
           // Pinning can fail (e.g. bot lacks rights in groups); never fail the job for it.
@@ -196,7 +231,8 @@ async function main(): Promise<void> {
             : undefined;
           if (unwrapped !== job.data.text && !job.data.document && !job.data.photo) {
             try {
-              await telegram.sendMessage(job.data.telegramId, unwrapped, { parse_mode: "HTML", reply_markup: noIconMarkup as never });
+              const m = await telegram.sendMessage(job.data.telegramId, unwrapped, { parse_mode: "HTML", reply_markup: noIconMarkup as never });
+              await afterSent(m?.message_id ? [m.message_id] : []);
               // eslint-disable-next-line no-console
               console.error("outbox: custom emoji rejected, sent with plain glyphs", { telegramId: job.data.telegramId, error: e.description });
               await sendFollowUp();
@@ -221,10 +257,13 @@ async function main(): Promise<void> {
           // with no buttons is still a delivery.
           for (const markup of [replyMarkup, undefined]) {
             try {
+              const ids: number[] = [];
               for (let i = 0; i < chunks.length; i++) {
                 // Buttons go on the last chunk so they sit under the full message.
-                await telegram.sendMessage(job.data.telegramId, chunks[i]!, i === chunks.length - 1 && markup ? ({ reply_markup: markup } as never) : {});
+                const m = await telegram.sendMessage(job.data.telegramId, chunks[i]!, i === chunks.length - 1 && markup ? ({ reply_markup: markup } as never) : {});
+                if (m?.message_id) ids.push(m.message_id);
               }
+              await afterSent(ids);
               // eslint-disable-next-line no-console
               console.error("outbox: HTML rejected, delivered as plain text", { telegramId: job.data.telegramId, chunks: chunks.length, buttons: markup ? "kept" : "dropped", error: e.description });
               await sendFollowUp();

@@ -51,7 +51,6 @@ export function errorCard(reason: string): string {
   return [HR, `${e("error")} ${bold("Error")}`, HR, "", reason, HR].join("\n");
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * The purchase animation, run ALONGSIDE the real work instead of before it.
@@ -84,9 +83,16 @@ export async function withPurchaseAnimation<T>(ctx: Context, work: () => Promise
     const sent = await ctx.reply(frame(0, pct), { parse_mode: "HTML" });
     msgId = sent.message_id;
   } catch { /* animation is best-effort */ }
+  // Interruptible wait: the moment the work finishes the loop stops — it used
+  // to sit out its 600 ms sleep (plus a 450 ms "confirmed" frame) before the
+  // keys could be sent, a second-plus of dead time on every wallet purchase.
+  let wake: (() => void) | undefined;
+  const nap = (ms: number) => new Promise<void>((r) => { const t = setTimeout(r, ms); wake = () => { clearTimeout(t); r(); }; });
   const loop = (async () => {
     while (!done && msgId && ctx.chat) {
-      await sleep(600);
+      // 1.2 s per frame: Telegram throttles edits per chat, and a flood-wait
+      // earned by the spinner would delay the delivery message right after it.
+      await nap(1200);
       if (done) break;
       tick++;
       // Ease towards 90 % — it never claims "done" before the work is.
@@ -94,20 +100,20 @@ export async function withPurchaseAnimation<T>(ctx: Context, work: () => Promise
       await ctx.api.editMessageText(ctx.chat.id, msgId, frame(tick, pct), { parse_mode: "HTML" }).catch(() => undefined);
     }
   })();
+  const stop = async (): Promise<void> => {
+    done = true;
+    wake?.();
+    await loop;
+    // Gone, not left behind: a stale "Processing…" card above the keys reads
+    // as a stuck order. Deleted in the background so delivery is not held up.
+    if (msgId && ctx.chat) void ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
+  };
   try {
     const result = await work();
-    done = true;
-    await loop;
-    if (msgId && ctx.chat) {
-      await ctx.api.editMessageText(ctx.chat.id, msgId, `✅ ${bold("Payment confirmed")}\n${"▰".repeat(10)} <b>${num(100)}%</b>\n🎉 Delivering now…`, { parse_mode: "HTML" }).catch(() => undefined);
-      await sleep(450);
-      await ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
-    }
+    await stop();
     return result;
   } catch (e) {
-    done = true;
-    await loop;
-    if (msgId && ctx.chat) await ctx.api.deleteMessage(ctx.chat.id, msgId).catch(() => undefined);
+    await stop();
     throw e;
   }
 }

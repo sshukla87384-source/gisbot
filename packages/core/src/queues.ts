@@ -46,6 +46,17 @@ export interface OutboxJob {
    * one clean way to schedule it.
    */
   deleteAfterSec?: number;
+  /**
+   * Keep only ONE live message with this tag per chat: sending a new one
+   * deletes the previous. For the tap-to-copy block, so tapping copy five
+   * times does not leave five secret-bearing messages in the chat.
+   */
+  replaceTag?: string;
+  /**
+   * Remember the sent message as chat clutter (cleared on the customer's next
+   * delivery) — for closing cards and banners that are stale after one use.
+   */
+  clutter?: boolean;
   photo?: string; // optional image URL → sent as photo with text as caption
   buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
   pin?: boolean; // pin the sent message in the chat
@@ -57,15 +68,19 @@ export interface OutboxJob {
    * can never edit the credentials away. Views replace the message they were
    * tapped on; a delivery must never be that message.
    */
-  followUp?: { text: string; buttons?: OutboxButton[] };
+  followUp?: { text: string; buttons?: OutboxButton[]; clutter?: boolean };
 }
 export interface OutboxOptions {
   photo?: string;
   buttons?: OutboxButton[];
-  followUp?: { text: string; buttons?: OutboxButton[] };
+  followUp?: { text: string; buttons?: OutboxButton[]; clutter?: boolean };
   pin?: boolean;
   /** Self-delete this message N seconds after sending (see OutboxJob). */
   deleteAfterSec?: number;
+  /** One live message per tag per chat — see OutboxJob.replaceTag. */
+  replaceTag?: string;
+  /** Clear this message on the next delivery — see OutboxJob.clutter. */
+  clutter?: boolean;
   /** Send later (ms). Used by the after-sale follow-up. */
   delayMs?: number;
 }
@@ -130,6 +145,8 @@ export async function enqueueTelegramMessage(
     ...(opts.followUp ? { followUp: opts.followUp } : {}),
     ...(opts.pin ? { pin: true } : {}),
     ...(opts.deleteAfterSec ? { deleteAfterSec: opts.deleteAfterSec } : {}),
+    ...(opts.replaceTag ? { replaceTag: opts.replaceTag } : {}),
+    ...(opts.clutter ? { clutter: true } : {}),
   } satisfies OutboxJob, opts.delayMs && opts.delayMs > 0 ? { delay: Math.min(opts.delayMs, 7 * 24 * 3600_000) } : undefined);
 }
 
@@ -193,7 +210,7 @@ export async function enqueueTelegramDocument(
   content: string,
   caption: string,
   buttons?: OutboxButton[],
-  followUp?: { text: string; buttons?: OutboxButton[] },
+  followUp?: { text: string; buttons?: OutboxButton[]; clutter?: boolean },
 ): Promise<void> {
   await getQueue(QUEUE_NAMES.outbox).add("send", {
     telegramId: telegramId.toString(),

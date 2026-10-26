@@ -12,6 +12,7 @@ import type { DeliveryPayload } from "./assign.js";
 import { assignAccountSlot, assignLicenseKey, buildDeliveryText, buildCombinedDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, couponLines, credsOf, deliveryExpiry, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, priceCart, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { resolveCartCouponTx, recordCouponUseTx, releaseCouponForOrderTx } from "./coupon.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
+import { sendDeliveredOrderMessages } from "./delivery-notify.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
@@ -477,7 +478,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
       await tx.order.update({ where: { id: order.id }, data: { status: finalStatus, ...(finalStatus === "COMPLETED" ? { completedAt: new Date() } : {}) } });
       await tx.auditLog.create({ data: { actorId, actorType: "ADMIN", action: "order.confirm.manual", entityType: "Order", entityId: order.id, after: { finalStatus, delivered: deliveries.length } } });
 
-      return { kind: "done" as const, orderId: order.id, userId: order.userId, telegramId: order.user.telegramId, buyerHandle: order.user.telegramHandle, buyerFirst: order.user.firstName, buyerReferral: order.user.referralCode, orderNumber: order.orderNumber, totalMinor: order.totalMinor, currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
+      return { kind: "done" as const, orderId: order.id, userId: order.userId, telegramId: order.user.telegramId, buyerHandle: order.user.telegramHandle, buyerFirst: order.user.firstName, buyerReferral: order.user.referralCode, orderNumber: order.orderNumber, totalMinor: order.totalMinor, valueMinor: Math.max(0, order.subtotalMinor - order.discountMinor), currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
     },
     { timeout: 20_000 },
   );
@@ -489,32 +490,29 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
   await clearChatClutter(outcome.telegramId).catch(() => undefined);
 
   if (outcome.telegramId !== null) {
-    const money = formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode);
-    await enqueueTelegramMessage(outcome.telegramId, `🎉 <b>Payment confirmed!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${money}. Delivering now… 🚀`);
+    // The order's value, not just the part a gateway collected — with some
+    // wallet balance applied, totalMinor alone under-stated what was paid.
+    const money = formatMinor(outcome.valueMinor, outcome.currency as CurrencyCode);
     const celeb = loadConfig().CELEBRATION_EMOJI;
     // Plays its fullscreen animation, then removes itself rather than sitting
     // between the customer and their keys.
     if (celeb) await enqueueTelegramMessage(outcome.telegramId, celeb, { deleteAfterSec: 120 });
-    if (outcome.deliveries.length === 1) {
-      const d = outcome.deliveries[0]!;
-      await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: copyButtonsFor(d.payload, { orderItemId: d.orderItemId, orderId }), followUp: DELIVERY_FOLLOWUP });
-    } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-      await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${orderId}` }], DELIVERY_FOLLOWUP);
-    } else if (outcome.deliveries.length > 1) {
-      await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId), followUp: DELIVERY_FOLLOWUP });
-    }
-    if (outcome.deliveries.length > 0) {
-      await enqueueTelegramMessage(outcome.telegramId, thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME));
-      // First delivery of the day only — see shouldSendReferralNudge.
-      if (await shouldSendReferralNudge(outcome.userId)) {
-        const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
-        if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
-      }
-      const instr = await deliveryInstructionsMessage();
-      if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
-    }
-    if (outcome.pendingManual > 0) await enqueueTelegramMessage(outcome.telegramId, `⏳ <b>${outcome.pendingManual} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`);
-    if (outcome.awaitingStock > 0) await enqueueTelegramMessage(outcome.telegramId, `⚠️ ${outcome.awaitingStock} item(s) are temporarily out of stock; our team will sort it out.`);
+    // Keys + ONE closing card, in a single ordered outbox job (it used to be up
+    // to eight separate messages arriving in random order).
+    await sendDeliveredOrderMessages({
+      telegramId: outcome.telegramId,
+      userId: outcome.userId,
+      orderId,
+      orderNumber: outcome.orderNumber,
+      money,
+      deliveries: outcome.deliveries,
+      pendingManual: outcome.pendingManual,
+      awaitingStock: outcome.awaitingStock,
+      buyerHandle: outcome.buyerHandle,
+      buyerFirst: outcome.buyerFirst,
+      buyerReferral: outcome.buyerReferral,
+      headline: "🎉 <b>Payment confirmed!</b>",
+    });
   }
   await notifyOrderToAdmins(outcome.orderId, "Payment confirmed");
   return { status: outcome.finalStatus, delivered: outcome.deliveries.length };

@@ -13,6 +13,8 @@ import { checkoutWithWallet, type CheckoutResult } from "./orders/checkout.servi
 import { listOrders, revealOrderDeliveries } from "./orders/order.service.js";
 import { copyButtonsFor, buildCombinedDeliveryText, buildDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./orders/assign.js";
 import { DELIVERY_FOLLOWUP, deliveryButtons, enqueueTelegramDocument, enqueueTelegramMessage } from "./queues.js";
+import { sendDeliveredOrderMessages } from "./orders/delivery-notify.js";
+import { clearChatClutter } from "./orders/pay-prompt.service.js";
 import { firstOrderAllowed, listMyGifts } from "./growth.service.js";
 import { getReferralConfig, milestoneProgress, referralEarnings } from "./referral.service.js";
 import { getReferralStats, setUserCurrency } from "./users/user.service.js";
@@ -342,7 +344,7 @@ export async function miniAppBuyWithWallet(
       if (code === "OUT_OF_STOCK" || code === "CART_ITEM_UNAVAILABLE") return { ok: false, reason: "stock", message: "Not enough stock for that right now — please pick another option." };
       return { ok: false, reason: "error", message: "Could not complete the purchase. Nothing was charged." };
     }
-    await dispatchDeliveriesToTelegram(user.telegramId, result).catch(() => undefined);
+    await dispatchDeliveriesToTelegram(user.telegramId, result, user.id).catch(() => undefined);
     return {
       ok: true,
       orderId: result.orderId,
@@ -357,19 +359,22 @@ export async function miniAppBuyWithWallet(
   }
 }
 
-async function dispatchDeliveriesToTelegram(telegramId: bigint, r: CheckoutResult): Promise<void> {
+async function dispatchDeliveriesToTelegram(telegramId: bigint, r: CheckoutResult, userId: string): Promise<void> {
   const money = formatMinor(r.totalMinor, r.currency as CurrencyCode);
   const lines: DeliveryLine[] = r.deliveries.map((d) => ({ orderItemId: d.orderItemId, productName: d.productName, variantName: d.variantName, payload: { kind: d.kind, ...d.secret }, activationGuide: d.activationGuide, allowPwChange: d.allowPwChange }));
-  if (lines.length === 1) {
-    const d = lines[0]!;
-    await enqueueTelegramMessage(telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: r.orderNumber }), { buttons: copyButtonsFor(d.payload, { orderItemId: d.orderItemId, orderId: r.orderId }), followUp: DELIVERY_FOLLOWUP });
-  } else if (lines.length > DELIVERY_FILE_THRESHOLD) {
-    await enqueueTelegramDocument(telegramId, `order-${r.orderNumber}.txt`, buildDeliveryTxt(lines, r.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${lines.length} items are in the attached file. 💾 Saved in 📦 My Orders.`, [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${r.orderId}` }], DELIVERY_FOLLOWUP);
-  } else if (lines.length > 1) {
-    await enqueueTelegramMessage(telegramId, buildCombinedDeliveryText(lines, r.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(lines, r.orderId), followUp: DELIVERY_FOLLOWUP });
-  } else if (r.pendingManualItems > 0) {
-    await enqueueTelegramMessage(telegramId, `🧾 <b>Order ${r.orderNumber}</b> — paid ${money} from your wallet (via the web shop).\n🕐 It is being prepared by hand; you'll get it here as soon as it is ready.`);
-  }
+  // Same shape as every other delivery: keys + one closing card, one job.
+  await clearChatClutter(telegramId).catch(() => undefined);
+  await sendDeliveredOrderMessages({
+    telegramId,
+    userId,
+    orderId: r.orderId,
+    orderNumber: r.orderNumber,
+    money: `${money} (💰 wallet, web shop)`,
+    deliveries: lines,
+    pendingManual: r.pendingManualItems,
+    awaitingStock: 0,
+    headline: "✅ <b>Order Success</b>",
+  });
 }
 
 export async function miniAppSetCurrency(userId: string, currency: Currency): Promise<void> {

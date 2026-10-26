@@ -55,3 +55,4 @@ export * from "./miniapp.service.js";
 export * from "./campaign-templates.service.js";
 export * from "./tg-html.js";
 export * from "./premium-emoji.service.js";
+export * from "./orders/delivery-notify.js";

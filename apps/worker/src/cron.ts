@@ -331,8 +331,16 @@ async function dailyMoneySummary(): Promise<void> {
  * was a lie: anyone who paid and waited had their order expire with their USDT
  * gone unless they pasted a transaction id by hand.
  */
-async function binancePoll(): Promise<void> {
+async function upiPoll(): Promise<void> {
   await pollUpiCredits().catch(() => 0);
+}
+
+/**
+ * Binance Pay auto-verify. Every 30 s (was 120 s, bundled with the UPI poll):
+ * a customer who has paid was waiting up to two minutes for the keys. It is a
+ * no-op with no open Binance order, so the faster cadence costs nothing idle.
+ */
+async function binancePoll(): Promise<void> {
   const n = await pollBinancePayments();
   if (n > 0) {
     await prisma.auditLog.create({
@@ -469,7 +477,8 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     // reseller statements simply never ran. The lock lives in Redis, so it
     // survives the restart the timer did not.
     every(3600, "reconcile", 86_390, reconcileWallets),
-    every(120, "binancepoll", 110, binancePoll),
+    every(30, "binancepoll", 120, binancePoll, true),
+    every(120, "upipoll", 110, upiPoll),
     every(60, "cryptopoll", 55, cryptoPoll, true),
     // Lock TTLs are generous on purpose: a poll walks up to 150 addresses with
     // 15 s RPC timeouts and a sweep waits for on-chain receipts. The lock is

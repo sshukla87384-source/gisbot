@@ -9,6 +9,7 @@ import { accrueCommissionTx } from "./commission.js";
 import { copyButtonsFor, assignAccountSlot, assignLicenseKey, buildDeliveryText, deliveryExpiry, buildCombinedDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, fulfillReusableItemTx, thankYouMessage, type DeliveryLine } from "./assign.js";
 import { notifyOrderToAdmins } from "./manual-pay.service.js";
 import { clearPaymentPrompts, clearChatClutter } from "./pay-prompt.service.js";
+import { sendDeliveredOrderMessages } from "./delivery-notify.js";
 import { logWallet } from "../logs.service.js";
 import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.service.js";
 import { deliveryInstructionsMessage } from "../admin.service.js";
@@ -408,6 +409,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         buyerReferral: order.user.referralCode,
         orderNumber: order.orderNumber,
         totalMinor: order.totalMinor,
+        valueMinor: Math.max(0, order.subtotalMinor - order.discountMinor),
         currency: order.currency,
         telegramId: order.user.telegramId,
         email: order.user.email,
@@ -455,43 +457,22 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
   } else if (outcome.kind === "fulfilled") {
     const money = formatMinor(outcome.totalMinor, outcome.currency as CurrencyCode);
     if (outcome.telegramId !== null) {
-      await enqueueTelegramMessage(
-        outcome.telegramId,
-        `🎉 <b>Payment received!</b> ✅\nOrder <b>${outcome.orderNumber}</b> — ${money}. Delivering now… 🚀`,
-      );
-      if (outcome.deliveries.length === 1) {
-        const d = outcome.deliveries[0]!;
-        await enqueueTelegramMessage(outcome.telegramId, buildDeliveryText(d.productName, d.variantName, d.payload, d.activationGuide, d.allowPwChange, { amountLabel: money, orderNumber: outcome.orderNumber }), { buttons: copyButtonsFor(d.payload, { orderItemId: d.orderItemId, orderId }), followUp: DELIVERY_FOLLOWUP });
-      } else if (outcome.deliveries.length > DELIVERY_FILE_THRESHOLD) {
-        await enqueueTelegramDocument(outcome.telegramId, `order-${outcome.orderNumber}.txt`, buildDeliveryTxt(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), `🎉 Your order is delivered! ${outcome.deliveries.length} items are in the attached file. 💾 Saved in 🔑 My Licenses.`, [{ text: "📋 Copy ALL", callbackData: `dl:copyall:${orderId}` }], DELIVERY_FOLLOWUP);
-      } else if (outcome.deliveries.length > 1) {
-        await enqueueTelegramMessage(outcome.telegramId, buildCombinedDeliveryText(outcome.deliveries, outcome.orderNumber, { amountLabel: money }), { buttons: combinedDeliveryButtons(outcome.deliveries, orderId), followUp: DELIVERY_FOLLOWUP });
-      }
-      if (outcome.deliveries.length > 0) {
-        await enqueueTelegramMessage(
-          outcome.telegramId,
-          thankYouMessage({ telegramHandle: outcome.buyerHandle, firstName: outcome.buyerFirst }, loadConfig().STORE_NAME),
-        );
-        // First delivery of the day only — see shouldSendReferralNudge.
-        if (await shouldSendReferralNudge(outcome.userId)) {
-          const nudge = referralNudgeMessage(outcome.buyerReferral, loadConfig().BOT_USERNAME);
-          if (nudge) await enqueueTelegramMessage(outcome.telegramId, nudge);
-        }
-        const instr = await deliveryInstructionsMessage();
-        if (instr) await enqueueTelegramMessage(outcome.telegramId, instr);
-      }
-      if (outcome.pendingManual > 0) {
-        await enqueueTelegramMessage(
-          outcome.telegramId,
-          `⏳ <b>${outcome.pendingManual} item(s) being prepared</b>\nThey arrive in this chat automatically — usually within a minute. Nothing more to do.`,
-        );
-      }
-      if (outcome.awaitingStock > 0) {
-        await enqueueTelegramMessage(
-          outcome.telegramId,
-          `⚠️ ${outcome.awaitingStock} item(s) went out of stock at the last moment. Our team will restock or refund you shortly.`,
-        );
-      }
+      // Keys + ONE closing card, in a single ordered outbox job.
+      await sendDeliveredOrderMessages({
+        telegramId: outcome.telegramId,
+        userId: outcome.userId,
+        orderId,
+        orderNumber: outcome.orderNumber,
+        // Order value: with wallet balance applied, the gateway part alone under-states it.
+        money: formatMinor(outcome.valueMinor, outcome.currency as CurrencyCode),
+        deliveries: outcome.deliveries,
+        pendingManual: outcome.pendingManual,
+        awaitingStock: outcome.awaitingStock,
+        buyerHandle: outcome.buyerHandle,
+        buyerFirst: outcome.buyerFirst,
+        buyerReferral: outcome.buyerReferral,
+        headline: "🎉 <b>Payment received!</b>",
+      });
     }
     await notifyOrderToAdmins(outcome.orderId, "Gateway");
     if (outcome.email && loadConfig().RESEND_API_KEY) {

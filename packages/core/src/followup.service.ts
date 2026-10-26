@@ -72,6 +72,10 @@ export async function scheduleFollowup(orderId: string, storeName: string): Prom
     // open would restore the spam, so a Redis error stays quiet instead.
     const first = await getRedis().set(`followup:sent:${orderId}`, "1", "EX", 30 * 86_400, "NX");
     if (first === null) return false;
+    // And one per CUSTOMER per day: a reseller placing ten orders an afternoon
+    // got ten "How was your order?" messages, ten minutes apart.
+    const today = await getRedis().set(`followup:user:${order.userId}`, "1", "EX", 86_400, "NX");
+    if (today === null) return false;
     const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const name = esc(order.user.firstName ?? (order.user.telegramHandle ? `@${order.user.telegramHandle}` : "there"));
     const products = [...new Set(order.items.map((i) => i.productNameSnap))];
@@ -82,7 +86,8 @@ export async function scheduleFollowup(orderId: string, storeName: string): Prom
     const buttons: OutboxButton[] = cfg.btnText && cfg.btnUrl
       ? [{ text: cfg.btnText, url: cfg.btnUrl, style: "success" }]
       : [{ text: "⭐ Leave a review", callbackData: `rev:new:${order.id}`, style: "success" }];
-    await enqueueTelegramMessage(order.user.telegramId, text, { buttons, delayMs: Math.max(0, cfg.delayMins) * 60_000 });
+    // Clutter: if they buy again before answering, the next delivery clears it.
+    await enqueueTelegramMessage(order.user.telegramId, text, { buttons, clutter: true, delayMs: Math.max(0, cfg.delayMins) * 60_000 });
     return true;
   } catch {
     return false;
