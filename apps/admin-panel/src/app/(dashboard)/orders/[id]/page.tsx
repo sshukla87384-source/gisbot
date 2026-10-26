@@ -24,6 +24,9 @@ interface Order {
   currency: string;
   subtotalMinor: number;
   discountMinor: number;
+  walletUsedMinor?: number;
+  bnplMinor?: number;
+  totalMinor?: number;
   createdAt: string;
   user?: { telegramHandle?: string | null; firstName?: string | null; email?: string | null };
   items: Item[];
@@ -75,8 +78,12 @@ export default function OrderDetail() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-mono text-lg font-semibold">{order.orderNumber}</h1>
-          <p className="text-sm text-slate-500">{formatDateTime(order.createdAt)}</p>
+          {/* Product first — the order number alone does not say what was bought. */}
+          <h1 className="text-lg font-semibold">
+            {order.items[0]?.productNameSnap ?? "Order"}
+            {order.items.length > 1 ? <span className="text-slate-500"> +{order.items.length - 1} more</span> : null}
+          </h1>
+          <p className="font-mono text-sm text-slate-500">{order.orderNumber} · {formatDateTime(order.createdAt)}</p>
         </div>
         <div className="flex items-center gap-3">
           <Badge tone={statusTone(order.status)}>{order.status}</Badge>
@@ -97,10 +104,13 @@ export default function OrderDetail() {
           <p className="text-xs uppercase text-slate-500">Total</p>
           <p className="mt-1 text-lg font-semibold">{formatMinor(order.subtotalMinor - order.discountMinor, order.currency)}</p>
           {order.discountMinor > 0 ? <p className="text-xs text-slate-400">Discount {formatMinor(order.discountMinor, order.currency)}</p> : null}
+          {(order.walletUsedMinor ?? 0) > 0 ? <p className="text-xs text-slate-500">💰 From wallet {formatMinor(order.walletUsedMinor ?? 0, order.currency)}</p> : null}
+          {(order.bnplMinor ?? 0) > 0 ? <p className="text-xs text-slate-500">🕒 Pay later {formatMinor(order.bnplMinor ?? 0, order.currency)}</p> : null}
+          {(order.totalMinor ?? 0) > 0 ? <p className="text-xs text-slate-500">💳 Via gateway {formatMinor(order.totalMinor ?? 0, order.currency)}</p> : null}
         </Card>
         <Card>
           <p className="text-xs uppercase text-slate-500">Payments</p>
-          {order.payments.length === 0 ? <p className="mt-1 text-sm text-slate-400">None</p> : order.payments.map((p, i) => (
+          {order.payments.length === 0 ? <p className="mt-1 text-sm text-slate-400">{(order.walletUsedMinor ?? 0) > 0 ? "💰 Paid from wallet" : (order.bnplMinor ?? 0) > 0 ? "🕒 Pay later" : "None"}</p> : order.payments.map((p, i) => (
             <p key={i} className="mt-1 text-sm">{p.provider} · <Badge tone={statusTone(p.status)}>{p.status}</Badge></p>
           ))}
         </Card>

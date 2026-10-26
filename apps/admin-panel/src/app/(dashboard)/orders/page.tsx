@@ -15,8 +15,27 @@ interface Order {
   currency: string;
   subtotalMinor: number;
   discountMinor: number;
+  walletUsedMinor?: number;
+  bnplMinor?: number;
+  totalMinor?: number;
   createdAt: string;
   user?: { telegramHandle?: string | null; firstName?: string | null };
+  items?: Array<{ productNameSnap: string; variantNameSnap: string; quantity: number }>;
+  _count?: { items: number };
+}
+
+/** Wallet orders have totalMinor 0 (nothing left for a gateway) — say how it was paid. */
+function paidVia(o: Order): string {
+  if ((o.bnplMinor ?? 0) > 0) return "🕒 Pay later";
+  if ((o.walletUsedMinor ?? 0) > 0) return (o.totalMinor ?? 0) > 0 ? "💰 Wallet + 💳" : "💰 Wallet";
+  return "💳 Gateway";
+}
+
+function productOf(o: Order): string {
+  const first = o.items?.[0];
+  if (!first) return "—";
+  const more = (o._count?.items ?? o.items?.length ?? 1) - 1;
+  return `${first.productNameSnap}${first.quantity > 1 ? ` ×${first.quantity}` : ""}${more > 0 ? ` +${more} more` : ""}`;
 }
 const STATUSES = ["", "PENDING_PAYMENT", "PAID", "PENDING_FULFILLMENT", "AWAITING_STOCK", "MANUAL_REVIEW", "COMPLETED", "REFUNDED", "CANCELLED", "EXPIRED"];
 
@@ -33,9 +52,11 @@ export default function OrdersPage() {
   });
 
   const columns: Column<Order>[] = [
-    { header: "Order", cell: (o) => <span className="font-mono text-xs">{o.orderNumber}</span> },
+    { header: "Product", cell: (o) => <span className="font-medium">{productOf(o)}</span> },
+    { header: "Order", cell: (o) => <span className="font-mono text-xs text-slate-500">{o.orderNumber}</span> },
     { header: "Customer", cell: (o) => o.user?.telegramHandle ? `@${o.user.telegramHandle}` : (o.user?.firstName ?? "—") },
     { header: "Total", cell: (o) => formatMinor(o.subtotalMinor - o.discountMinor, o.currency) },
+    { header: "Paid via", cell: (o) => <span className="text-xs">{paidVia(o)}</span> },
     { header: "Status", cell: (o) => <Badge tone={statusTone(o.status)}>{o.status}</Badge> },
     { header: "Created", cell: (o) => <span className="text-slate-500">{formatDateTime(o.createdAt)}</span> },
   ];
@@ -44,7 +65,7 @@ export default function OrdersPage() {
     <div className="space-y-4">
       <h1 className="text-xl font-semibold">Orders</h1>
       <div className="flex flex-wrap gap-3">
-        <div className="w-64"><Input placeholder="Search order number…" value={searchRaw} onChange={(e) => { setSearchRaw(e.target.value); setPage(1); }} /></div>
+        <div className="w-64"><Input placeholder="Search order number or product…" value={searchRaw} onChange={(e) => { setSearchRaw(e.target.value); setPage(1); }} /></div>
         <div className="flex flex-wrap gap-1">
           {STATUSES.map((s) => (
             <button

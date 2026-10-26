@@ -512,11 +512,22 @@ export function createBot(): Bot<Ctx> {
     if (!o) return "❌ No order with that number on your account. Check 📦 My orders for the exact number.";
     const st: Record<string, string> = { PENDING_PAYMENT: "⌛ Awaiting payment", PAID: "💳 Paid — delivering", PENDING_FULFILLMENT: "🕐 Paid — being prepared by our team", AWAITING_STOCK: "📦 Paid — waiting for stock", COMPLETED: "✅ Delivered", CANCELLED: "🚫 Cancelled", EXPIRED: "⌛ Expired (unpaid)", REFUNDED: "↩️ Refunded", MANUAL_REVIEW: "🔍 Under review" };
     const pay = o.payments[0];
+    const first = o.items[0];
+    // Product name first — the order number alone told the customer nothing.
+    const title = first
+      ? `${escapeHtml(first.productNameSnap)}${o.items.length > 1 ? ` +${o.items.length - 1} more` : ""}`
+      : "Order";
+    const value = Math.max(0, o.subtotalMinor - o.discountMinor);
+    const via = o.bnplMinor > 0 ? " via 🕒 Pay later"
+      : o.walletUsedMinor > 0 && o.walletUsedMinor >= value ? " via 💰 wallet"
+      : o.walletUsedMinor > 0 ? ` (💰 ${fmt(o.walletUsedMinor, o.currency)} from wallet${pay ? ` + ${pay.provider.toLowerCase()}` : ""})`
+      : pay ? ` via ${pay.provider.toLowerCase()}` : "";
     const lines = [
-      `🔎 <b>Order ${escapeHtml(o.orderNumber)}</b>`,
+      `📦 <b>${title}</b>`,
+      `🧾 Order: <code>${escapeHtml(o.orderNumber)}</code>`,
       `Status: <b>${st[o.status] ?? o.status}</b>`,
       `Placed: ${o.createdAt.toISOString().slice(0, 16).replace("T", " ")} UTC${o.paidAt ? ` · Paid: ${o.paidAt.toISOString().slice(0, 16).replace("T", " ")} UTC` : ""}`,
-      `Total: <b>${fmt(Math.max(0, o.subtotalMinor - o.discountMinor), o.currency)}</b>${pay ? ` via ${pay.provider.toLowerCase()}` : ""}`,
+      `Total: <b>${fmt(value, o.currency)}</b>${via}`,
       "",
       "<b>Items</b>",
       ...o.items.map((i) => `• ${escapeHtml(i.productNameSnap)}${i.variantNameSnap.toLowerCase() === "standard" ? "" : ` · ${escapeHtml(i.variantNameSnap)}`} ×${i.quantity} — ${i.fulfilledAt ? "✅ delivered" : "⏳ pending"}${i.expiresAt ? ` · valid till ${i.expiresAt.toISOString().slice(0, 10)}` : ""}`),

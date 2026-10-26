@@ -52,7 +52,15 @@ export class OrdersController {
     const where = {
       ...(filterValue(list, "status") ? { status: filterValue(list, "status") as never } : {}),
       ...(filterValue(list, "userId") ? { userId: filterValue(list, "userId") } : {}),
-      ...(list.search ? { orderNumber: { contains: list.search, mode: "insensitive" as const } } : {}),
+      // Search by order number OR product name — admins remember what was bought.
+      ...(list.search
+        ? {
+            OR: [
+              { orderNumber: { contains: list.search, mode: "insensitive" as const } },
+              { items: { some: { productNameSnap: { contains: list.search, mode: "insensitive" as const } } } },
+            ],
+          }
+        : {}),
     };
     const [total, rows] = await Promise.all([
       prisma.order.count({ where }),
@@ -61,7 +69,11 @@ export class OrdersController {
         orderBy: list.orderBy,
         skip: list.skip,
         take: list.take,
-        include: { user: { select: { telegramHandle: true, firstName: true } } },
+        include: {
+          user: { select: { telegramHandle: true, firstName: true } },
+          items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" }, take: 3 },
+          _count: { select: { items: true } },
+        },
       }),
     ]);
     return paginated(rows, list.page, list.perPage, total);

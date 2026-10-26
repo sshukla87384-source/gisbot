@@ -691,10 +691,32 @@ async function statsView(ctx: Ctx): Promise<void> {
   await show(ctx, text, new InlineKeyboard().text("↻ Refresh", cb("adm", "stats")).text("◀️ Back", cb("adm", "home")), true);
 }
 
+const ORDER_STATUS_ICON: Record<string, string> = {
+  COMPLETED: "✅", PAID: "💳", PENDING_FULFILLMENT: "🕐", AWAITING_STOCK: "📦", PENDING_PAYMENT: "⌛",
+  CANCELLED: "🚫", EXPIRED: "⌛", REFUNDED: "↩️", PARTIALLY_REFUNDED: "↩️", MANUAL_REVIEW: "🔍",
+};
+
+/** "Netflix +1" — first product, clipped, with a count of the rest. */
+function orderItemLabel(o: { firstItem: string; itemCount: number }, max = 24): string {
+  const n = o.firstItem.trim() || "Order";
+  const clipped = n.length > max ? `${n.slice(0, max - 1).trimEnd()}…` : n;
+  return `${clipped}${o.itemCount > 1 ? ` +${o.itemCount - 1}` : ""}`;
+}
+
+/** Leading icon of the paid-via label: 💰 wallet, 🕒 pay later, 💳 gateway. */
+function viaIcon(paidVia: string): string {
+  return paidVia.split(" ")[0] ?? "";
+}
+
 function orderRowsKb(orders: Awaited<ReturnType<typeof listPendingPaymentOrders>>): InlineKeyboard {
   const kb = new InlineKeyboard();
+  // Product first, then the order's VALUE (subtotal − discount). totalMinor is
+  // only what is left to pay through a gateway, so every wallet order showed 0.00.
   for (const o of orders) {
-    kb.text(`${o.orderNumber} · ${fmt(o.totalMinor, o.currency)} · ${o.status}`, cb("adm", "ord", o.id)).row();
+    kb.text(
+      `${ORDER_STATUS_ICON[o.status] ?? "•"} ${orderItemLabel(o)} · ${viaIcon(o.paidVia)} ${fmt(o.valueMinor, o.currency)} · ${o.orderNumber}`,
+      cb("adm", "ord", o.id),
+    ).row();
   }
   // These lists hold 10 rows; anything older needs a search box.
   kb.add(sbtn("🔎 Find an order", cb("adm", "osearch"), "primary")).row();
@@ -705,7 +727,9 @@ function orderRowsKb(orders: Awaited<ReturnType<typeof listPendingPaymentOrders>
 async function ordersView(ctx: Ctx, pending: boolean): Promise<void> {
   const orders = pending ? await listPendingPaymentOrders(10) : await listRecentOrders(10);
   const title = pending ? "⏳ <b>Pending payments</b>" : "🗂 <b>Recent orders</b>";
-  const body = orders.length === 0 ? `${title}\n\nNothing here.` : title;
+  const body = orders.length === 0
+    ? `${title}\n\nNothing here.`
+    : [title, "", "<i>📦 product · amount · order no.  —  💰 wallet · 🕒 pay later · 💳 gateway</i>"].join("\n");
   const kb = orderRowsKb(orders);
   await show(ctx, body, kb, true);
 }
@@ -715,13 +739,13 @@ async function orderSearchResults(ctx: Ctx, query: string): Promise<void> {
   const hits = await searchOrders(query, 12);
   const kb = new InlineKeyboard();
   for (const h of hits) {
-    kb.text(`${h.orderNumber} · ${h.userLabel.slice(0, 14)} · ${fmt(h.totalMinor, h.currency)}`, cb("adm", "ord", h.id)).row();
+    kb.text(`${ORDER_STATUS_ICON[h.status] ?? "•"} ${orderItemLabel(h, 20)} · ${viaIcon(h.paidVia)} ${fmt(h.valueMinor, h.currency)} · ${h.orderNumber}`, cb("adm", "ord", h.id)).row();
   }
   kb.text("🔎 Search again", cb("adm", "osearch")).row();
   kb.text("◀️ Back", cb("adm", "orders"));
   const lines = hits.length === 0
     ? [`🔎 <b>No order matches</b> “${escapeHtml(query)}”`, "", "Try the order number, the customer's @username or Telegram ID, or a product name."]
-    : [`🔎 <b>${hits.length} order(s)</b> for “${escapeHtml(query)}”`, "", ...hits.map((h) => `🧾 <b>${escapeHtml(h.orderNumber)}</b> — ${h.status}\n   👤 ${escapeHtml(h.userLabel)} · 📦 ${escapeHtml(h.firstItem.slice(0, 28))}${h.itemCount > 1 ? ` +${h.itemCount - 1}` : ""}`)];
+    : [`🔎 <b>${hits.length} order(s)</b> for “${escapeHtml(query)}”`, "", ...hits.map((h) => `📦 <b>${escapeHtml(orderItemLabel(h, 32))}</b> — ${fmt(h.valueMinor, h.currency)} ${h.paidVia}\n   🧾 <code>${escapeHtml(h.orderNumber)}</code> · ${h.status} · 👤 ${escapeHtml(h.userLabel)}`)];
   await show(ctx, lines.join("\n"), kb, true);
 }
 
@@ -813,12 +837,19 @@ async function orderDeliveriesView(ctx: Ctx, orderId: string): Promise<void> {
 async function orderView(ctx: Ctx, orderId: string): Promise<void> {
   const o = await getAdminOrder(orderId);
   if (!o) { await show(ctx, "Order not found.", new InlineKeyboard().text("◀️ Back", cb("adm", "orders")), true); return; }
+  // Value = subtotal − discount. totalMinor is only the gateway part, which is
+  // 0 for a wallet or pay-later order — the panel used to show "Total: 0.00".
+  const payLines: string[] = [];
+  if (o.walletUsedMinor > 0) payLines.push(`💰 From wallet: <b>${fmt(o.walletUsedMinor, o.currency)}</b>`);
+  if (o.bnplMinor > 0) payLines.push(`🕒 Pay later (BNPL): <b>${fmt(o.bnplMinor, o.currency)}</b>`);
+  if (o.totalMinor > 0) payLines.push(`💳 Via gateway: <b>${fmt(o.totalMinor, o.currency)}</b>${o.binanceAmount ? ` (= ${o.binanceAmount} USDT)` : ""}`);
   const lines = [
-    `🧾 <b>${o.orderNumber}</b> — ${o.status}`,
-    `Buyer: ${escapeHtml(o.userLabel)}`,
-    `Total: <b>${fmt(o.totalMinor, o.currency)}</b>${o.binanceAmount ? ` (= ${o.binanceAmount} USDT)` : ""}`,
+    ...o.items.map((i) => `📦 <b>${escapeHtml(i.name)}</b>${i.variant.trim().toLowerCase() === "standard" ? "" : ` · ${escapeHtml(i.variant)}`} ×${i.qty}`),
     "",
-    ...o.items.map((i) => `• ${escapeHtml(i.name)} · ${escapeHtml(i.variant)} ×${i.qty}`),
+    `🧾 Order: <code>${escapeHtml(o.orderNumber)}</code> — ${ORDER_STATUS_ICON[o.status] ?? ""} ${o.status}`,
+    `👤 Buyer: ${escapeHtml(o.userLabel)}`,
+    `💵 Order value: <b>${fmt(o.valueMinor, o.currency)}</b> · ${o.paidVia}`,
+    ...payLines,
   ];
   const kb = new InlineKeyboard();
   // Support's first question is always "what did they actually get?" — one tap.
@@ -1647,7 +1678,7 @@ async function userOrdersView(ctx: Ctx, userId: string, page: number): Promise<v
   const kb = new InlineKeyboard();
   for (const o of res.items) {
     const when = o.createdAt.toISOString().slice(0, 10);
-    kb.text(`${o.orderNumber} · ${fmt(o.totalMinor, o.currency)} · ${o.status.slice(0, 10)} · ${when}`, cb("adm", "ord", o.id)).row();
+    kb.text(`${ORDER_STATUS_ICON[o.status] ?? "•"} ${orderItemLabel(o, 20)} · ${viaIcon(o.paidVia)} ${fmt(o.valueMinor, o.currency)} · ${when}`, cb("adm", "ord", o.id)).row();
   }
   if (res.pages > 1) {
     const row: Array<[string, string]> = [];
@@ -1663,7 +1694,7 @@ async function userOrdersView(ctx: Ctx, userId: string, page: number): Promise<v
     : [
         `📦 <b>${escapeHtml(u?.label ?? "Customer")}</b> — ${res.total} order(s)`,
         "",
-        ...res.items.map((o) => `🧾 <b>${escapeHtml(o.orderNumber)}</b> — ${o.status}\n   📦 ${escapeHtml(o.firstItem.slice(0, 30))}${o.itemCount > 1 ? ` +${o.itemCount - 1}` : ""} · ${fmt(o.totalMinor, o.currency)}`),
+        ...res.items.map((o) => `📦 <b>${escapeHtml(orderItemLabel(o, 32))}</b> — ${fmt(o.valueMinor, o.currency)} ${o.paidVia}\n   🧾 <code>${escapeHtml(o.orderNumber)}</code> · ${o.status}`),
         "",
         "<i>Tap an order to see exactly what was delivered.</i>",
       ];
@@ -6478,7 +6509,7 @@ export async function notifyAdminsForApproval(ctx: Ctx, orderId: string, method:
   // an approve card now would only confuse — and a second approve is a no-op.
   if (o && !["PENDING_PAYMENT", "MANUAL_REVIEW"].includes(o.status)) return -1;
   const head = o
-    ? `🧾 <b>${method} payment to review</b>\nOrder <b>${o.orderNumber}</b> — ${fmt(o.totalMinor, o.currency)}\nBuyer: ${escapeHtml(o.userLabel)}`
+    ? `🧾 <b>${method} payment to review</b>\n📦 <b>${escapeHtml(orderItemLabel(o, 40))}</b>\nOrder <code>${o.orderNumber}</code> — due ${fmt(o.totalMinor, o.currency)}${o.walletUsedMinor > 0 ? ` (+ ${fmt(o.walletUsedMinor, o.currency)} from wallet)` : ""}\nBuyer: ${escapeHtml(o.userLabel)}`
     : `🧾 <b>${method} payment to review</b> (order ${orderId})`;
   const text = `${head}\nRef: <code>${escapeHtml(reference)}</code>`;
   const markup = { inline_keyboard: [[

@@ -61,11 +61,38 @@ export interface OrderBrief {
   id: string;
   orderNumber: string;
   status: string;
+  /** Amount still payable through a gateway. 0 for wallet / pay-later orders —
+   *  NOT the order's value; use valueMinor for "how much was this order". */
   totalMinor: number;
+  /** What the order is worth: subtotal − discount, however it was paid. */
+  valueMinor: number;
+  walletUsedMinor: number;
+  bnplMinor: number;
+  /** "💰 Wallet", "🕒 Pay later", "💰+💳 Wallet + gateway" or "💳 Gateway". */
+  paidVia: string;
   currency: string;
   binanceAmount: string | null;
   createdAt: Date;
   itemCount: number;
+  /** First product's name — shown before the order number in admin lists. */
+  firstItem: string;
+}
+
+/** How an order was (or is to be) paid, for admin labels. */
+export function orderPaidVia(o: { subtotalMinor: number; discountMinor: number; walletUsedMinor: number; bnplMinor: number; totalMinor: number }): string {
+  if (o.bnplMinor > 0) return o.walletUsedMinor > 0 ? "🕒 Pay later + 💰 wallet" : "🕒 Pay later";
+  if (o.walletUsedMinor > 0) return o.totalMinor > 0 ? "💰 Wallet + 💳 gateway" : "💰 Wallet";
+  if (o.subtotalMinor - o.discountMinor <= 0) return "🎁 Free";
+  return "💳 Gateway";
+}
+
+function moneyFields(o: { subtotalMinor: number; discountMinor: number; walletUsedMinor: number; bnplMinor: number; totalMinor: number }) {
+  return {
+    valueMinor: Math.max(0, o.subtotalMinor - o.discountMinor),
+    walletUsedMinor: o.walletUsedMinor,
+    bnplMinor: o.bnplMinor,
+    paidVia: orderPaidVia(o),
+  };
 }
 
 export async function listPendingPaymentOrders(limit = 10): Promise<OrderBrief[]> {
@@ -73,21 +100,23 @@ export async function listPendingPaymentOrders(limit = 10): Promise<OrderBrief[]
     where: { status: "PENDING_PAYMENT" },
     orderBy: { createdAt: "desc" },
     take: limit,
-    include: { _count: { select: { items: true } } },
+    include: { items: { select: { productNameSnap: true }, orderBy: { id: "asc" } } },
   });
   return rows.map((o) => ({
-    id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor,
-    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o._count.items,
+    id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o),
+    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
+    firstItem: o.items[0]?.productNameSnap ?? "",
   }));
 }
 
 export async function listRecentOrders(limit = 10): Promise<OrderBrief[]> {
   const rows = await prisma.order.findMany({
-    orderBy: { createdAt: "desc" }, take: limit, include: { _count: { select: { items: true } } },
+    orderBy: { createdAt: "desc" }, take: limit, include: { items: { select: { productNameSnap: true }, orderBy: { id: "asc" } } },
   });
   return rows.map((o) => ({
-    id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor,
-    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o._count.items,
+    id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o),
+    currency: o.currency, binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
+    firstItem: o.items[0]?.productNameSnap ?? "",
   }));
 }
 
@@ -98,14 +127,15 @@ export async function getAdminOrder(orderId: string): Promise<
   const o = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
-      items: { include: { variant: { include: { product: { select: { type: true } } } } } },
+      items: { include: { variant: { include: { product: { select: { type: true } } } } }, orderBy: { id: "asc" } },
       user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
     },
   });
   if (!o) return null;
   return {
-    id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, currency: o.currency,
+    id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o), currency: o.currency,
     binanceAmount: o.binanceAmount, createdAt: o.createdAt, itemCount: o.items.length,
+    firstItem: o.items[0]?.productNameSnap ?? "",
     items: o.items.map((i) => ({ id: i.id, name: i.productNameSnap, variant: i.variantNameSnap, qty: i.quantity, type: i.variant.product.type, fulfilled: i.fulfilledAt !== null })),
     userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
   };
@@ -187,13 +217,13 @@ export async function listUserOrders(userId: string, page = 1, pageSize = 8): Pr
     skip: (p - 1) * pageSize,
     take: pageSize,
     include: {
-      items: { select: { productNameSnap: true } },
+      items: { select: { productNameSnap: true }, orderBy: { id: "asc" } },
       user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
     },
   });
   return {
     items: rows.map((o) => ({
-      id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor,
+      id: o.id, orderNumber: o.orderNumber, status: o.status, totalMinor: o.totalMinor, ...moneyFields(o),
       currency: o.currency, createdAt: o.createdAt, itemCount: o.items.length,
       userLabel: o.user.telegramHandle ? `@${o.user.telegramHandle}` : (o.user.firstName ?? String(o.user.telegramId ?? "user")),
       firstItem: o.items[0]?.productNameSnap ?? "",
@@ -206,7 +236,13 @@ export interface OrderSearchHit {
   id: string;
   orderNumber: string;
   status: string;
+  /** Gateway amount still due — 0 for wallet / pay-later orders. */
   totalMinor: number;
+  /** Order value (subtotal − discount), whatever paid for it. */
+  valueMinor: number;
+  walletUsedMinor: number;
+  bnplMinor: number;
+  paidVia: string;
   currency: string;
   createdAt: Date;
   itemCount: number;
@@ -236,7 +272,7 @@ export async function searchOrders(query: string, limit = 10): Promise<OrderSear
     orderBy: { createdAt: "desc" },
     take: Math.min(limit, 25),
     include: {
-      items: { select: { productNameSnap: true } },
+      items: { select: { productNameSnap: true }, orderBy: { id: "asc" } },
       user: { select: { firstName: true, telegramHandle: true, telegramId: true } },
     },
   });
@@ -245,6 +281,7 @@ export async function searchOrders(query: string, limit = 10): Promise<OrderSear
     orderNumber: o.orderNumber,
     status: o.status,
     totalMinor: o.totalMinor,
+    ...moneyFields(o),
     currency: o.currency,
     createdAt: o.createdAt,
     itemCount: o.items.length,

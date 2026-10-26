@@ -28,6 +28,7 @@ import {
   getReferralConfig,
   listCategories,
   listOrders,
+  orderProductLabel,
   listOrderItems,
   listProducts,
   shopHomeTiles,
@@ -558,11 +559,14 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
     REFUNDED: "↩️",
   };
   const kb = new InlineKeyboard();
+  // Product first, order number last — a list of bare "GIS-2026-…" codes left
+  // customers unable to tell which order was which.
+  const listLines: string[] = [];
   for (const o of result.items) {
-    kb.text(
-      `${o.isReplacement ? "🔄" : (statusEmoji[o.status] ?? "•")} ${o.orderNumber} · ${o.isReplacement ? "Replacement" : fmt(o.totalPaidMinor, o.currency)}`,
-      cb("ord", "view", o.id),
-    ).row();
+    const icon = o.isReplacement ? "🔄" : (statusEmoji[o.status] ?? "•");
+    const amount = o.isReplacement ? "Replacement" : fmt(o.totalPaidMinor, o.currency);
+    kb.text(`${icon} ${orderProductLabel(o, 30)} · ${amount}`, cb("ord", "view", o.id)).row();
+    listLines.push(`${icon} <b>${escapeHtml(orderProductLabel(o, 40))}</b> — ${amount}\n      🧾 <code>${o.orderNumber}</code> · ${o.createdAt.toISOString().slice(0, 10)}`);
   }
   paginationRow(kb, "ord", "list", result.page, result.pages);
   backToMenuRow(kb);
@@ -578,6 +582,8 @@ export async function ordersView(user: BotUser, page: number): Promise<View> {
         `📄 <b>Page:</b>  <code>${result.page} of ${result.pages}</code>`,
         `✅ <b>Delivered:</b>  <code>${delivered} of ${onPage} shown</code>`,
         waiting > 0 ? `🕐 <b>In progress:</b>  <code>${waiting}</code>` : "",
+        HR,
+        ...listLines,
         HR,
         "<i>Tap any order to view or re-copy your delivered keys and accounts.</i>",
         "",
@@ -1027,7 +1033,7 @@ export async function apiOrdersView(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   const lines = [header(`📦 ${bold("API Orders")}`), "", "Recent orders on your account (including those placed via the API):", ""];
   if (result.items.length === 0) lines.push("No orders yet.");
-  for (const o of result.items.slice(0, 15)) lines.push(`${statusEmoji[o.status] ?? "•"} <code>${o.orderNumber}</code> · ${fmt(o.totalPaidMinor, o.currency)} · ${o.status}`);
+  for (const o of result.items.slice(0, 15)) lines.push(`${statusEmoji[o.status] ?? "•"} <b>${escapeHtml(orderProductLabel(o, 40))}</b> · ${fmt(o.totalPaidMinor, o.currency)} · ${o.status} · <code>${o.orderNumber}</code>`);
   navRow(kb, cb("api", "home"));
   return { text: lines.join("\n"), kb };
 }
@@ -1087,9 +1093,9 @@ export async function recentOrdersView(user: BotUser): Promise<View> {
   const kb = new InlineKeyboard();
   for (const o of items) {
     // Label replacements rather than showing a bare 0.00 with no explanation.
-    kb.text(`${o.isReplacement ? "🔄" : icon(o.status)} ${o.orderNumber} · ${o.isReplacement ? "Replacement" : fmt(o.totalPaidMinor, o.currency)}`, cb("ord", "view", o.id)).row();
+    kb.text(`${o.isReplacement ? "🔄" : icon(o.status)} ${orderProductLabel(o, 30)} · ${o.isReplacement ? "Replacement" : fmt(o.totalPaidMinor, o.currency)}`, cb("ord", "view", o.id)).row();
   }
-  if (items[0]) kb.add(sbtn(`⚡ Buy again — ${items[0].orderNumber}`, cb("ord", "again", items[0].id), "success")).row();
+  if (items[0]) kb.add(sbtn(`⚡ Buy again — ${orderProductLabel(items[0], 28)}`, cb("ord", "again", items[0].id), "success")).row();
   if (res.pages > 1) kb.add(sbtn("🗂 All orders", cb("ord", "list", 1), "primary")).row();
   kb.add(sbtn("🔄 Request a replacement", cb("rep", "home"), "success")).row();
   navRow(kb, cb("prf", "view"));
@@ -1172,14 +1178,42 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
     listOrderItems(user.id, orderId),
     prisma.order.findFirst({
       where: { id: orderId, userId: user.id },
-      select: { replacementOfOrderId: true, orderNumber: true },
+      select: {
+        replacementOfOrderId: true, orderNumber: true, status: true, currency: true, createdAt: true,
+        subtotalMinor: true, discountMinor: true, walletUsedMinor: true, bnplMinor: true,
+        items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } },
+      },
     }).catch(() => null),
   ]);
   const kb = new InlineKeyboard();
+  // Product name FIRST, order number underneath — customers recognise what they
+  // bought, not a "GIS-2026-…" code.
+  const productLines = (meta?.items ?? []).slice(0, 5).map((i) => {
+    const vn = i.variantNameSnap.trim();
+    const showV = vn && !/^(default|standard|-)$/i.test(vn) && !i.productNameSnap.toLowerCase().includes(vn.toLowerCase());
+    return `📦 <b>${escapeHtml(i.productNameSnap)}${showV ? ` · ${escapeHtml(vn)}` : ""}</b>${i.quantity > 1 ? ` ×${i.quantity}` : ""}`;
+  });
+  if ((meta?.items.length ?? 0) > 5) productLines.push(`➕ <i>and ${(meta?.items.length ?? 0) - 5} more</i>`);
+  const value = meta ? meta.subtotalMinor - meta.discountMinor : 0;
+  const paidVia = !meta ? "" : meta.bnplMinor > 0 ? " · 🕒 Pay later" : meta.walletUsedMinor > 0 && meta.walletUsedMinor >= value ? " · 💰 Wallet" : meta.walletUsedMinor > 0 ? ` · 💰 ${fmt(meta.walletUsedMinor, meta.currency)} from wallet` : "";
+  const orderLine = meta
+    ? `🧾 Order <code>${escapeHtml(meta.orderNumber)}</code> · ${meta.replacementOfOrderId ? "Replacement" : fmt(value, meta.currency)}${meta.replacementOfOrderId ? "" : paidVia} · ${meta.createdAt.toISOString().slice(0, 10)}`
+    : "";
   if (items.length === 0) {
     kb.text("◀️ Orders", cb("ord", "list", 1));
     backToMenuRow(kb);
-    return { text: "No delivered items in this order yet.", kb };
+    if (!meta) return { text: "Order not found.", kb };
+    const stateText: Record<string, string> = {
+      PENDING_PAYMENT: "⌛ Awaiting payment",
+      PAID: "💳 Paid — delivery starting",
+      PENDING_FULFILLMENT: "🕐 Being delivered — you'll get a message the moment it's ready",
+      CANCELLED: "🚫 Cancelled",
+      EXPIRED: "⌛ Expired (not paid in time)",
+      REFUNDED: "↩️ Refunded",
+      PARTIALLY_REFUNDED: "↩️ Partly refunded",
+      COMPLETED: "✅ Completed",
+    };
+    return { text: [...productLines, orderLine, "", stateText[meta.status] ?? meta.status, "", "<i>No delivered items in this order yet.</i>"].join("\n"), kb };
   }
 
   // If this IS a replacement order, name the order it replaces and the unit.
@@ -1218,7 +1252,7 @@ export async function orderDetailView(user: BotUser, orderId: string): Promise<V
         "📦 <b>Replacement item</b>",
         "",
       ]
-    : [`📦 <b>Delivered items</b>${meta?.orderNumber ? ` · ${escapeHtml(meta.orderNumber)}` : ""}`, ""];
+    : [...productLines, ...(orderLine ? [orderLine] : []), "", "🔑 <b>Delivered items</b>", ""];
 
   // EVERY unit on its own line — these used to be collapsed into "Licence Key ×5"
   // with one button. But Telegram caps a message at 4096 chars and each unit costs

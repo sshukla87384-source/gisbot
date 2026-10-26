@@ -11,6 +11,22 @@ export interface OrderListItem {
   totalPaidMinor: number;
   currency: string;
   createdAt: Date;
+  /** Name of the first product in the order — shown BEFORE the order number so
+   *  customers recognise what they bought instead of a bare "GIS-…" code. */
+  productName: string;
+  /** Number of distinct lines in the order (the label adds "+N more"). */
+  itemCount: number;
+  /** Units of the first line, so "Netflix ×3" reads right. */
+  firstQty: number;
+}
+
+/** "Netflix 1 Month ×2 +1 more" — the product-first label for an order. */
+export function orderProductLabel(o: { productName: string; itemCount: number; firstQty?: number }, max = 34): string {
+  let name = o.productName.trim() || "Order";
+  if (name.length > max) name = name.slice(0, max - 1).trimEnd() + "…";
+  const qty = o.firstQty && o.firstQty > 1 ? ` ×${o.firstQty}` : "";
+  const more = o.itemCount > 1 ? ` +${o.itemCount - 1} more` : "";
+  return `${name}${qty}${more}`;
 }
 
 export async function listOrders(userId: string, page: number, pageSize = 6): Promise<{
@@ -25,10 +41,16 @@ export async function listOrders(userId: string, page: number, pageSize = 6): Pr
     orderBy: { createdAt: "desc" },
     skip: (page - 1) * pageSize,
     take: pageSize,
+    include: {
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true }, orderBy: { id: "asc" } },
+    },
   });
   return {
     items: rows.map((o) => ({
       id: o.id,
+      productName: firstItemName(o.items),
+      itemCount: o.items.length,
+      firstQty: o.items[0]?.quantity ?? 1,
       orderNumber: o.orderNumber,
       status: o.status,
       totalPaidMinor: o.subtotalMinor - o.discountMinor,
@@ -41,6 +63,16 @@ export async function listOrders(userId: string, page: number, pageSize = 6): Pr
     page,
     pages,
   };
+}
+
+/** "Product · Variant" for the first line; variant dropped when it repeats the name or is a default. */
+export function firstItemName(items: Array<{ productNameSnap: string; variantNameSnap: string }>): string {
+  const it = items[0];
+  if (!it) return "Order";
+  const v = it.variantNameSnap.trim();
+  const p = it.productNameSnap.trim();
+  if (!v || /^(default|standard|-)$/i.test(v) || p.toLowerCase().includes(v.toLowerCase())) return p || "Order";
+  return `${p} · ${v}`;
 }
 
 export interface VaultItem {
@@ -244,8 +276,8 @@ export async function getOrderTracking(userId: string, orderNumber: string) {
   return prisma.order.findFirst({
     where: { orderNumber, userId },
     select: {
-      orderNumber: true, status: true, createdAt: true, paidAt: true, currency: true, subtotalMinor: true, discountMinor: true,
-      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, fulfilledAt: true, expiresAt: true } },
+      orderNumber: true, status: true, createdAt: true, paidAt: true, currency: true, subtotalMinor: true, discountMinor: true, walletUsedMinor: true, bnplMinor: true,
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, fulfilledAt: true, expiresAt: true }, orderBy: { id: "asc" } },
       payments: { select: { provider: true, status: true }, orderBy: { createdAt: "desc" }, take: 1 },
     },
   });
