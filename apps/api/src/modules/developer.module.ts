@@ -215,8 +215,8 @@ export class DeveloperController {
   @Get("products/:id")
   async product(@Param("id") id: string, @Query() query: Record<string, string>, @Req() req: DeveloperRequest) {
     try {
-      // Same shelf as the bot: a product in a hidden category is not offered.
-      const shown = await prisma.product.count({ where: { id, status: "ACTIVE", deletedAt: null, category: { isActive: true, deletedAt: null } } });
+      // Same shelf as the bot: only ACTIVE products are offered.
+      const shown = await prisma.product.count({ where: { id, status: "ACTIVE", deletedAt: null } });
       if (shown === 0) throw new Error("hidden");
       const owner = req.apiKey?.ownerUserId ?? undefined;
       const sell = owner ? (await resellerSellPriceMap(owner, [id], currencyOf(query))).get(id) : undefined;
@@ -466,7 +466,7 @@ export class DeveloperController {
     // Only what the bot shows can be bought here, and an old selling price
     // must not be charged as the reseller's cost.
     const onShelf = await prisma.productVariant.count({
-      where: { id: variantId, isActive: true, deletedAt: null, product: { status: "ACTIVE", deletedAt: null, category: { isActive: true, deletedAt: null } } },
+      where: { id: variantId, isActive: true, deletedAt: null, product: { status: "ACTIVE", deletedAt: null } },
     });
     if (onShelf === 0) throw notFound("Product");
     await migrateLegacySellPrices(userId).catch(() => undefined);

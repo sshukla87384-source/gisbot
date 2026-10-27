@@ -323,9 +323,9 @@ export async function listProducts(opts: {
     const where = {
       status: "ACTIVE" as const,
       deletedAt: null,
-      // A product in a hidden (or deleted) category is not on the shelf — not
-      // in the bot, not in search, not in the reseller API feed.
-      category: { isActive: true, deletedAt: null },
+      // NOT filtered by the category's 👁/🙈 flag: that flag hides the category
+      // TILE in the grid, nothing more. Filtering on it hid every product in
+      // "Uncategorized" — where all supplier imports land — from the shop.
       ...(categoryIds ? { categoryId: { in: categoryIds } } : categoryId ? { categoryId } : excludeIds ? { categoryId: { notIn: excludeIds } } : {}),
       ...(featuredOnly ? { isFeatured: true } : {}),
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
@@ -733,7 +733,6 @@ export async function listResellerPrices(
   const where = {
     status: "ACTIVE" as const,
     deletedAt: null,
-    category: { isActive: true, deletedAt: null },
     ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
   };
   const total = await prisma.product.count({ where });
