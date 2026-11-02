@@ -1468,6 +1468,14 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
       // (whatever they paid with) instead of waiting on a line that can't be
       // delivered — and the sweep never retries it.
       const refund = await refundUndeliverableItems(item.orderId, [orderItemId], `supplier rejected: ${r.reason ?? "unknown"}`).catch(() => ({ ok: false as const }));
+      // Off the shelf THIS second — not at the next sync — so nobody else buys
+      // what the vendor just refused. A stock-driven pause: the next sync puts
+      // it back by itself if the vendor really does have stock.
+      await prisma.product.updateMany({
+        where: { id: item.variant.productId, status: "ACTIVE" },
+        data: { supplierStock: 0, status: "PAUSED", supplierStockDrivenPause: true },
+      }).catch(() => undefined);
+      await invalidate("cat:*").catch(() => undefined);
       void syncSupplierProducts(supplierId).catch(() => undefined);
       if (!(await alertOnce(orderItemId, r.reason ?? "rejected"))) return { ok: false, reason: r.reason ?? "REJECTED" };
       await enqueueAdminAlert(

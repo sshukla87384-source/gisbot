@@ -480,7 +480,11 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     // so a handful of suppliers with real catalogues runs past the 290 s this
     // used to lock for. Same fix as the sweep: generous runtime cap, released
     // on completion so the 5-minute cadence stands.
-    every(300, "supsync", SUPSYNC_LOCK_TTL, async () => { await syncAllSuppliers(); }, true),
+    // Every MINUTE (was 5): a vendor's sell-out must leave the shop at once,
+    // not keep selling for five minutes. The lock is released when a run ends
+    // and a run still in progress makes the next tick skip, so a slow vendor
+    // never stacks syncs; unchanged products cost no writes.
+    every(60, "supsync", SUPSYNC_LOCK_TTL, async () => { await syncAllSuppliers(); }, true),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
     // The once-a-day jobs TICK hourly and are held to once a day by a ~24 h lock
     // instead of a 24 h setInterval. An interval that long never fires at all on
