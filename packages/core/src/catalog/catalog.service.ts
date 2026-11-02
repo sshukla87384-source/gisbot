@@ -177,7 +177,11 @@ export async function stockMapFor(
   const acctIds: string[] = [];
   for (const p of rows) {
     if (p.supplierId && p.supplierStock !== null && p.supplierStock !== undefined) {
-      for (const v of p.variantIds) map.set(v, p.supplierStock);
+      // An admin-set 🔢 Quantity caps what the vendor reports, so the operator
+      // can sell (and announce) a quantity of their own; never more than the
+      // vendor actually has.
+      const n = p.manualStock !== null && p.manualStock !== undefined ? Math.min(p.supplierStock, p.manualStock) : p.supplierStock;
+      for (const v of p.variantIds) map.set(v, n);
       continue;
     }
     // A reusable product (same link for everyone) and a MANUAL product are
@@ -215,7 +219,10 @@ async function variantStock(
 ): Promise<number> {
   // Supplier-backed products are stocked at the supplier, not locally.
   if (supplier?.supplierId && supplier.supplierStock !== null && supplier.supplierStock !== undefined) {
-    return supplier.supplierStock;
+    // Same cap as stockMapFor: an admin-set quantity limits the vendor's figure.
+    return supplier.manualStock !== null && supplier.manualStock !== undefined
+      ? Math.min(supplier.supplierStock, supplier.manualStock)
+      : supplier.supplierStock;
   }
   // Reusable / manual products are never unit-stocked.
   if (supplier?.reusableSecretEnc) return supplier.reusableStock ?? UNLIMITED_STOCK;

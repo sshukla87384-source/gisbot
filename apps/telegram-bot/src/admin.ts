@@ -934,7 +934,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text(`📌 Pin / position${p.pinRank ? ` (#${p.pinRank})` : ""}`, cb("adm", "cpin", p.id)).row();
   kb.add(sbtn(`♾ Same link for everyone: ${p.reusable ? "✅ ON" : "🚫 OFF"}`, cb("adm", "preuse", p.id), p.reusable ? "success" : "primary")).row();
   if (p.reusable) kb.text(`🔢 Quantity: ${p.reusableStock ?? "∞ unlimited"}`, cb("adm", "preuseqty", p.id)).row();
-  else if (p.fulfillmentMode === "MANUAL") kb.text(`🔢 Quantity: ${p.manualStock ?? "∞ unlimited"}`, cb("adm", "pmanqty", p.id)).row();
+  else if (p.fulfillmentMode === "MANUAL" || p.supplierId) kb.text(`🔢 ${p.supplierId ? "Set quantity (announces +stock)" : "Quantity"}: ${p.manualStock ?? (p.supplierId ? "vendor's stock" : "∞ unlimited")}`, cb("adm", "pmanqty", p.id)).row();
   kb.text("🎨 Button name & colour", cb("adm", "pbtn", p.id)).row();
   kb.text("🗑 Delete product", cb("adm", "pdel", p.id)).row();
   kb.text("◀️ Back", cb("adm", "prods"));
@@ -3617,11 +3617,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_manqty";
       await askStep(ctx, [
-        "🔢 <b>Quantity for this manual product</b>",
+        "🔢 <b>Quantity for this product</b>",
         "",
-        "Send a number (e.g. <code>25</code>) — it counts down with each sale and shows sold out at 0.",
+        "Send a number (e.g. <code>137</code>) — it counts down with each sale and shows sold out at 0.",
+        "If it is MORE than before, customers get “📣 N new stock added for …” automatically (product must be shown).",
+        "For a supplier product, customers see the lower of this and the vendor's stock.",
         "",
-        "Send <code>-</code> for <b>unlimited</b> (the default for manual products).",
+        "Send <code>-</code> for <b>unlimited</b> (supplier products: back to the vendor's stock).",
       ].join("\n"));
       return;
     }
@@ -6234,9 +6236,25 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await setProductManualStock(pid, null);
       await ctx.reply("♾ Quantity set to <b>unlimited</b> — this manual product never shows sold out.", { parse_mode: "HTML" });
     } else {
+      const before = await getProductBriefById(pid).catch(() => null);
       const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
-      await setProductManualStock(pid, Number.isFinite(n) ? n : 0);
-      await ctx.reply(`🔢 Quantity set to <b>${Number.isFinite(n) ? n : 0}</b>. It counts down with each sale.`, { parse_mode: "HTML" });
+      const qty = Number.isFinite(n) ? n : 0;
+      await setProductManualStock(pid, qty);
+      // Stock went UP → customers hear "📣 N new stock added for …" (with the
+      // live stock and any bulk deal), for own AND supplier products.
+      const prev = before?.manualStock ?? 0;
+      const added = qty - prev;
+      const ann = added > 0 && before?.status === "ACTIVE"
+        ? await announceRestock(pid, added, { createdById: "bot-admin" }).catch(() => ({ announced: false, targets: 0 }))
+        : { announced: false, targets: 0 };
+      await ctx.reply(
+        [
+          `🔢 Quantity set to <b>${qty}</b>. It counts down with each sale.`,
+          before?.supplierId ? "<i>Supplier product: customers see the lower of this and the vendor's own stock.</i>" : "",
+          ann.announced ? `📣 “${added} new stock added” sent to <b>${ann.targets ?? 0}</b> customers.` : added > 0 && before?.status !== "ACTIVE" ? "ℹ️ Not announced — the product is hidden. Show it, then use 📣 Announce restock." : "",
+        ].filter(Boolean).join("\n"),
+        { parse_mode: "HTML" },
+      );
     }
     await productView(ctx, pid);
     return true;
@@ -6247,8 +6265,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await setProductReusableStock(pid, null);
       await ctx.reply("♾ Quantity set to <b>unlimited</b> — it will never run out.", { parse_mode: "HTML" });
     } else {
+      const before = await getProductBriefById(pid).catch(() => null);
       const n = Number.parseInt(text.trim().replace(/[^0-9]/g, ""), 10);
       await setProductReusableStock(pid, Number.isFinite(n) ? n : 0);
+      const added = (Number.isFinite(n) ? n : 0) - (before?.reusableStock ?? 0);
+      if (added > 0 && before?.status === "ACTIVE") {
+        const ann = await announceRestock(pid, added, { createdById: "bot-admin" }).catch(() => ({ announced: false, targets: 0 }));
+        if (ann.announced) await ctx.reply(`📣 “${added} new stock added” sent to <b>${ann.targets ?? 0}</b> customers.`, { parse_mode: "HTML" });
+      }
       await ctx.reply(`🔢 Quantity set to <b>${Number.isFinite(n) ? n : 0}</b>. It counts down with each sale.`, { parse_mode: "HTML" });
     }
     await productView(ctx, pid);
