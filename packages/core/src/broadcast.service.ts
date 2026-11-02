@@ -452,6 +452,10 @@ export async function announceRestock(
         `${iconHtml}${nameDisp} — Stock: ${currentStock}`,
       ].join("\n")
     : `📣 <b>${qtyAdded} new stock added for</b> ${iconHtml}${nameDisp}`;
+  // A live quantity discount rides along: "BULK DISCOUNT ACTIVE · Buy 10+ →
+  // 2.50 USDT each" is the line that turns a restock into a bulk order.
+  const bulk = bulkLinesUsdt(view?.bulkLadder ?? []);
+  const fullBody = bulk.length > 0 ? `${body}\n\n<b>BULK DISCOUNT ACTIVE</b>\n${bulk.join("\n")}` : body;
   const rsSuffix = ` - ${usdt} USDT (Stock: ${currentStock})`;
   const rsHead = `${iconTxt}${stripLeadingEmoji(p.name)}`;
   const rsRoom = Math.max(8, 64 - rsSuffix.length);
@@ -460,10 +464,68 @@ export async function announceRestock(
   const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
   const res = await sendBroadcast({
     title: "",
-    body,
+    body: fullBody,
     bodyIsHtml: true,
     segment: "all",
     buttonText: buttonUrl ? btnLabel : undefined,
+    buttonUrl,
+    buttonStyle: "success",
+    buttonIcon: productEmojiId(p.nameHtml),
+    createdById: opts.createdById,
+  });
+  return { announced: true, targets: res.targets };
+}
+
+/** "• Buy 10+ → 2.50 USDT each", one line per rung (prices are USD = USDT). */
+export function bulkLinesUsdt(ladder: Array<{ minQty: number; unitPriceMinor: number }>): string[] {
+  return ladder.slice(0, 6).map((t) => `• Buy ${t.minQty}+ → <b>${(t.unitPriceMinor / 100).toFixed(2)} USDT</b> each`);
+}
+
+/**
+ * "BULK DISCOUNT ACTIVE" promo, sent when the operator sets a quantity
+ * discount on a product: the rungs in USDT and a buy button showing the
+ * normal price and live stock — the same shape as a restock post.
+ */
+export async function announceBulkDiscount(
+  productId: string,
+  opts: { createdById: string } = { createdById: "system" },
+): Promise<{ announced: boolean; targets?: number }> {
+  const p = await prisma.product.findUnique({ where: { id: productId } });
+  if (!p || p.status !== "ACTIVE" || p.deletedAt) return { announced: false };
+  const view = await getProductView(productId, "USD").catch(() => null);
+  if (!view || view.bulkLadder.length === 0) return { announced: false };
+  const cfg = loadConfig();
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const UNLIMITED = 1_000_000;
+  const stock = view.variants.reduce((n, v) => n + (v.stock >= UNLIMITED ? 0 : v.stock), 0);
+  const unlimited = view.variants.some((v) => v.stock >= UNLIMITED);
+  const prices = view.variants.map((v) => v.priceMinor).filter((n): n is number => n !== null);
+  const cheapest = prices.length > 0 ? Math.min(...prices) : null;
+  const emojiHtml = productEmojiHtml(p.iconEmoji, p.nameHtml, p.name);
+  const emoji = productEmoji(p.iconEmoji, p.name);
+  const nameDisp = stripLeadingEmoji(p.nameHtml ?? `<b>${esc(p.name)}</b>`);
+  const body = [
+    `🔥 <b>BULK DISCOUNT ACTIVE</b>`,
+    "",
+    `${emojiHtml ? `${emojiHtml} ` : ""}${nameDisp}`,
+    ...(cheapest !== null ? [`💲 Price: <b>${(cheapest / 100).toFixed(2)} USDT</b> each`] : []),
+    "",
+    ...bulkLinesUsdt(view.bulkLadder),
+    "",
+    unlimited ? "📦 In stock" : `📦 Stock: <b>${stock}</b>`,
+    "<i>Buy more, pay less — the discount applies automatically at checkout.</i>",
+  ].join("\n");
+  const suffix = ` - ${cheapest !== null ? (cheapest / 100).toFixed(2) : ""} USDT${unlimited ? "" : ` (Stock: ${stock})`}`;
+  const head = `${emoji ? `${emoji} ` : ""}${stripLeadingEmoji(p.name)}`;
+  const room = Math.max(8, 64 - suffix.length);
+  const btn = `${head.length > room ? `${[...head].slice(0, room - 1).join("")}…` : head}${suffix}`;
+  const buttonUrl = cfg.BOT_USERNAME ? `https://t.me/${cfg.BOT_USERNAME}?start=p_${p.slug}` : undefined;
+  const res = await sendBroadcast({
+    title: "",
+    body,
+    bodyIsHtml: true,
+    segment: "all",
+    buttonText: buttonUrl ? btn : undefined,
     buttonUrl,
     buttonStyle: "success",
     buttonIcon: productEmojiId(p.nameHtml),

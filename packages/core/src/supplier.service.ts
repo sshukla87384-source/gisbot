@@ -5,7 +5,7 @@ import { invalidate, getRedis } from "./redis.js";
 import { logWallet, logEvent } from "./logs.service.js";
 import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
-import { announceProduct, sendBroadcast } from "./broadcast.service.js";
+import { announceRestock } from "./broadcast.service.js";
 import { usdtRate } from "./fx.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -211,6 +211,94 @@ export async function listSuppliers(): Promise<Array<{ id: string; name: string;
  * still automatic but you decide what appears, in bulk.
  */
 const NEWVIS = (id: string) => `supplier.newvisible.${id}`;
+
+const RESTOCK_ANNOUNCE_KEY = "supplier.restock.announce";
+
+/** Announce vendor restocks of live products to customers? Default ON. */
+export async function getSupplierRestockAnnounce(): Promise<boolean> {
+  const row = await prisma.setting.findUnique({ where: { key: RESTOCK_ANNOUNCE_KEY } }).catch(() => null);
+  return (row?.value as { on?: boolean } | null)?.on !== false;
+}
+
+export async function setSupplierRestockAnnounce(on: boolean): Promise<void> {
+  await prisma.setting.upsert({ where: { key: RESTOCK_ANNOUNCE_KEY }, create: { key: RESTOCK_ANNOUNCE_KEY, value: { on } as never }, update: { value: { on } as never } });
+}
+
+/**
+ * Tell the admins about products a supplier just added — hidden until they
+ * approve. One alert per product (≤ 5) with ✅ Approve & publish / 🗑 Reject,
+ * otherwise a single summary with a 📂 review button.
+ */
+async function alertNewSupplierProducts(supplierId: string, supplierName: string, ids: string[]): Promise<void> {
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const rows = await prisma.product.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true, name: true, supplierStock: true,
+      variants: { take: 1, orderBy: { sortOrder: "asc" }, select: { prices: { where: { currency: "USD", tier: { name: "RETAIL" } }, take: 1, select: { amountMinor: true } } } },
+    },
+  });
+  const priceOf = (r: (typeof rows)[number]): string => {
+    const m = r.variants[0]?.prices[0]?.amountMinor;
+    return m === undefined ? "—" : `${(m / 100).toFixed(2)} USDT`;
+  };
+  const stockOf = (r: (typeof rows)[number]): string => (r.supplierStock === null ? "not reported" : String(r.supplierStock));
+  if (rows.length <= 5) {
+    for (const r of rows) {
+      await enqueueAdminAlert(
+        [
+          `🆕 <b>New product from ${esc(supplierName)}</b>`,
+          "",
+          `📦 <b>${esc(r.name)}</b>`,
+          `💲 Your price: <b>${priceOf(r)}</b> · 📊 Stock: <b>${stockOf(r)}</b>`,
+          "",
+          "<i>Hidden from the shop until you approve it.</i>",
+        ].join("\n"),
+        [
+          { text: "✅ Approve & publish", callbackData: `adm:spok:${r.id}`, style: "success" },
+          { text: "🗑 Reject", callbackData: `adm:spno:${r.id}`, style: "danger" },
+          { text: "⚙️ Open", callbackData: `adm:prod:${r.id}`, style: "primary" },
+        ],
+      ).catch(() => undefined);
+    }
+    return;
+  }
+  await enqueueAdminAlert(
+    [
+      `🆕 <b>${rows.length} new products from ${esc(supplierName)}</b>`,
+      "",
+      ...rows.slice(0, 12).map((r) => `• ${esc(r.name.slice(0, 60))} — ${priceOf(r)} · stock ${stockOf(r)}`),
+      rows.length > 12 ? `… and ${rows.length - 12} more` : "",
+      "",
+      "<i>All hidden until you approve them. Open the list to publish the ones you want.</i>",
+    ].filter(Boolean).join("\n"),
+    [{ text: `📂 Review ${rows.length} new products`, callbackData: `adm:supprods:${supplierId}`, style: "success" }],
+  ).catch(() => undefined);
+}
+
+/** Approve a pending supplier product: publish it (sync keeps it in step with stock). */
+export async function approveSupplierProduct(productId: string): Promise<{ ok: boolean; name?: string; inStock?: boolean }> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { name: true, supplierStock: true, deletedAt: true, supplierId: true } });
+  if (!p || p.deletedAt || !p.supplierId) return { ok: false };
+  const inStock = p.supplierStock === null || p.supplierStock > 0;
+  // Out of stock: published as a stock-driven pause, so it goes live by
+  // itself the moment the vendor has stock.
+  await prisma.product.update({
+    where: { id: productId },
+    data: inStock ? { status: "ACTIVE", supplierStockDrivenPause: false } : { status: "PAUSED", supplierStockDrivenPause: true },
+  });
+  await invalidate("cat:*");
+  return { ok: true, name: p.name, inStock };
+}
+
+/** Reject a pending supplier product: deleted, and sync will not bring it back. */
+export async function rejectSupplierProduct(productId: string): Promise<{ ok: boolean; name?: string }> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { name: true, supplierId: true } });
+  if (!p || !p.supplierId) return { ok: false };
+  await prisma.product.update({ where: { id: productId }, data: { deletedAt: new Date(), status: "ARCHIVED", supplierStockDrivenPause: false } });
+  await invalidate("cat:*");
+  return { ok: true, name: p.name };
+}
 
 export async function getSupplierNewVisible(supplierId: string): Promise<boolean> {
   const row = await prisma.setting.findUnique({ where: { key: NEWVIS(supplierId) } }).catch(() => null);
@@ -1011,11 +1099,14 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
   const rate = usdtRate("INR");
   let cat = await prisma.category.findFirst({ where: { slug: "uncategorized" } });
   if (!cat) cat = await prisma.category.create({ data: { name: "Uncategorized", slug: "uncategorized", sortOrder: 999 } });
-  // Auto-sync imports everything, but new items are HIDDEN unless the operator
-  // opted in — see getSupplierNewVisible.
-  const goLive = await getSupplierNewVisible(supplierId);
+  // Auto-sync imports everything, but a NEW product never goes live by itself:
+  // it waits, hidden, until the operator approves it from the alert below (or
+  // the 📂 review list). The shop owner asked for exactly this — supplier items
+  // were appearing in the shop before anyone had looked at them.
   let added = 0, updated = 0, skipped = 0, failed = 0;
   const newIds: string[] = [];
+  // Restocks of products already on sale: [productId, units added].
+  const restocked: Array<[string, number]> = [];
   for (const p of prods) {
     try {
     const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
@@ -1057,6 +1148,12 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
       const rowSame = existing.name === data.name && existing.description === data.description && existing.activationGuide === data.activationGuide
         && existing.supplierStock === data.supplierStock && existing.status === data.status && existing.supplierStockDrivenPause === data.supplierStockDrivenPause;
       if (rowSame && pricesSame) { unchanged++; continue; } // nothing changed — no writes
+      // The vendor added stock to something we sell: remember it so customers
+      // hear "N new stock added", like a restock of our own keys.
+      const prevStock = existing.supplierStock;
+      if (data.status === "ACTIVE" && p.stock !== null && prevStock !== null && p.stock > prevStock) {
+        restocked.push([existing.id, p.stock - prevStock]);
+      }
       if (!rowSame) { await prisma.product.update({ where: { id: existing.id }, data }); Object.assign(existing, data); }
       if (v && !pricesSame) for (const [currency, amt] of [["USD", priceMinor], ["INR", inrMinor]] as const) {
         const row = await prisma.variantPrice.upsert({ where: { variantId_tierId_currency: { variantId: v.id, tierId: retail.id, currency } }, create: { variantId: v.id, tierId: retail.id, currency, amountMinor: amt }, update: { amountMinor: amt } });
@@ -1070,11 +1167,10 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
       // list never matched what the vendor actually offers. Import everything —
       // visibility is the operator's decision, not the stock level's.
       const base = `sup-${s.id.slice(0, 6)}-${p.ref}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 52);
-      // A new product is only ACTIVE if the operator opted in AND it is sellable.
-      const status = goLive && inStock ? "ACTIVE" : "PAUSED";
-      // stock-driven ONLY when the operator wanted it live and stock is what
-      // stopped it. Anything else is a sticky hide that sync must not override.
-      const stockDriven = goLive && !inStock;
+      // Always hidden until approved; a sticky hide (not stock-driven), so a
+      // later sync cannot publish it on its own.
+      const status = "PAUSED" as const;
+      const stockDriven = false;
 
       let created: { id: string } | null = null;
       for (let attempt = 0; attempt < 5 && !created; attempt++) {
@@ -1100,8 +1196,7 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
       if (!created) throw new Error(`could not allocate a unique slug for ${p.ref}`);
       // The same ref twice in one catalogue must not create two products.
       seenNew.add(refKey);
-      // Only ACTIVE products are worth announcing.
-      if (status === "ACTIVE") newIds.push(created.id);
+      newIds.push(created.id);
       added++;
     }
     } catch (e) {
@@ -1111,22 +1206,23 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
     }
   }
   await invalidate("cat:*");
-  // Only announce what customers can actually see. Broadcasting products that are
-  // hidden would advertise things nobody can buy.
-  if (newIds.length > 0 && goLive) {
-    if (newIds.length <= 3) {
-      for (const pid of newIds) await announceProduct(pid, { createdById: "supplier-sync", force: true }).catch(() => undefined);
-    } else {
-      const uname = loadConfig().BOT_USERNAME;
-      await sendBroadcast({
-        title: "",
-        body: `🆕 <b>${newIds.length} new products just added!</b>\nBrowse the shop and grab them before they're gone. 🔥`,
-        bodyIsHtml: true,
-        segment: "all",
-        buttonText: uname ? "🛒 Browse shop" : undefined,
-        buttonUrl: uname ? `https://t.me/${uname}?start=menu` : undefined,
-        createdById: "supplier-sync",
-      }).catch(() => undefined);
+  // New products: ask the operator. Each one (up to 5) gets its own alert with
+  // ✅ Approve / 🗑 Reject; a bigger batch gets one summary with a review link.
+  if (newIds.length > 0) {
+    await alertNewSupplierProducts(s.id, s.name, newIds).catch(() => undefined);
+  }
+  // Vendor restocks of live products → "N new stock added" to customers. At
+  // most 5 per sync, and one per product per 3 hours, so a vendor that loads
+  // stock in small drips cannot flood everyone's chat.
+  if (restocked.length > 0 && (await getSupplierRestockAnnounce())) {
+    let sent = 0;
+    for (const [pid, qty] of restocked.sort((a, b) => b[1] - a[1])) {
+      if (sent >= 5) break;
+      if (qty < 1) continue;
+      const fresh = await getRedis().set(`suprestock:${pid}`, "1", "EX", 3 * 3600, "NX").catch(() => "OK");
+      if (fresh === null) continue;
+      const r = await announceRestock(pid, qty, { createdById: "supplier-sync" }).catch(() => ({ announced: false }));
+      if (r.announced) sent++;
     }
   }
   return { added, updated, skipped, failed, unchanged };

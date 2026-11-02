@@ -229,6 +229,12 @@ import {
   countSupplierProducts,
   countSupplierProductStates,
   getSupplierNewVisible,
+  getSupplierRestockAnnounce,
+  setSupplierRestockAnnounce,
+  approveSupplierProduct,
+  rejectSupplierProduct,
+  announceBulkDiscount,
+  announceRestock,
   setSupplierNewVisible,
   listRecentUsers,
   getUserSummary,
@@ -910,7 +916,8 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.add(sbtn(`🤖 Auto-announce: ${autoPromo.productIds.includes(p.id) ? "✅ ON" : "🚫 OFF"}`, cb("adm", "pauto", p.id), autoPromo.productIds.includes(p.id) ? "success" : "primary")).row();
   if (p.onSalePct) kb.text("🔥 End sale", cb("adm", "saleoff", p.id));
   else kb.text("🔥 Start flash sale", cb("adm", "sale", p.id));
-  kb.row().text("📦 Bulk discounts", cb("adm", "pbulk", p.id));
+  kb.row().text("📦 Bulk discounts", cb("adm", "pbulk", p.id)).text("🔥 Announce bulk deal", cb("adm", "pbulkann", p.id));
+  kb.row().text("📣 Announce restock (+qty)", cb("adm", "prestock", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
@@ -2443,7 +2450,11 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
       sbtn("🙈 Hide every product", cb("adm", "spall", `${supplierId}~hide`), "danger"),
     ).row();
   }
-  kb.add(sbtn(`🆕 New products arrive: ${newVis ? "👁 visible" : "🙈 hidden"}`, cb("adm", "spnewvis", supplierId), newVis ? "success" : "primary")).row();
+  // New products ALWAYS wait for approval now (alert with ✅ Approve / 🗑 Reject),
+  // so the old "arrive visible" switch is gone. Restock posts can be toggled.
+  void newVis;
+  const restockOn = await getSupplierRestockAnnounce();
+  kb.add(sbtn(`📣 Vendor restock posts: ${restockOn ? "✅ ON" : "🚫 OFF"}`, cb("adm", "sprestock", supplierId), restockOn ? "success" : "primary")).row();
   kb.text("🔄 Sync", cb("adm", "supsync", supplierId)).text("◀️ Back", cb("adm", "sups"));
 
   await show(ctx, [
@@ -3102,6 +3113,45 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         : `🗑 <b>${n} product(s) deleted.</b> Orders keep their history; restore from the 🗑 tab.`;
       return supplierProductsView(ctx, supId);
     }
+    case "sprestock": {
+      const next = !(await getSupplierRestockAnnounce());
+      await setSupplierRestockAnnounce(next);
+      ctx.session.supFlash = next
+        ? "📣 When a vendor adds stock to a live product, customers get a <b>“N new stock added”</b> post (max one per product every 3 h)."
+        : "📣 Vendor restock posts are <b>off</b>.";
+      return supplierProductsView(ctx, id);
+    }
+    case "spok": {
+      // ✅ Approve & publish — from the new-product alert.
+      const r = await approveSupplierProduct(id);
+      await ctx.editMessageReplyMarkup().catch(() => undefined);
+      if (!r.ok) { await ctx.reply("That product is no longer available to approve."); return; }
+      const ann = r.inStock ? await announceProduct(id, { createdById: "bot-admin", force: true }).catch(() => ({ announced: false, targets: 0 })) : { announced: false, targets: 0 };
+      await ctx.reply(
+        r.inStock
+          ? `✅ <b>${escapeHtml(r.name ?? "Product")}</b> is live.${ann.announced ? ` 📣 Announced to ${ann.targets ?? 0} customers.` : ""}`
+          : `✅ <b>${escapeHtml(r.name ?? "Product")}</b> approved — out of stock at the vendor right now, it goes live by itself when they restock.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Open product", cb("adm", "prod", id)) },
+      );
+      return;
+    }
+    case "spno": {
+      const r = await rejectSupplierProduct(id);
+      await ctx.editMessageReplyMarkup().catch(() => undefined);
+      await ctx.reply(r.ok ? `🗑 <b>${escapeHtml(r.name ?? "Product")}</b> rejected — it stays out of the shop and sync won't add it again. (Restore from 📂 Supplier products → 🗑 tab.)` : "That product is no longer there.", { parse_mode: "HTML" });
+      return;
+    }
+    case "pbulkann": {
+      const r = await announceBulkDiscount(id, { createdById: "bot-admin" }).catch(() => ({ announced: false, targets: 0 }));
+      flash(ctx, r.announced ? `🔥 Bulk deal announced to <b>${r.targets ?? 0}</b> customers.` : "⚠️ Nothing to announce — set 📦 Bulk discounts first (and the product must be shown).");
+      return productView(ctx, id);
+    }
+    case "prestock": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_restock_qty";
+      await askStep(ctx, "📣 How many units were added? Send a number (e.g. <code>50</code>) — customers get “📣 50 new stock added for …” with the live stock and any bulk discount.");
+      return;
+    }
     case "spnewvis": {
       const next = !(await getSupplierNewVisible(id));
       await setSupplierNewVisible(id, next);
@@ -3169,7 +3219,6 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
           const t = await testSupplier(id).catch(() => null);
           return { text: `ℹ️ <b>Nothing imported</b> — the supplier returned no products.\n\n${t ? escapeHtml(t.detail.slice(0, 900)) : "Usually the base URL or key is wrong."}`, kb: supFixKb(id) };
         }
-        const goLive = await getSupplierNewVisible(id);
         const kb = new InlineKeyboard()
           .add(sbtn(`📂 Review ${r.added > 0 ? `${r.added} new ` : ""}product(s)`, cb("adm", "supprods", id), "success")).row()
           .text("◀️ Suppliers", cb("adm", "sups"));
@@ -3183,11 +3232,9 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
             r.skipped > 0 ? `• 🗑 ${r.skipped} skipped (you deleted these)` : "",
             r.failed > 0 ? `• ⚠️ ${r.failed} could not be imported — see 🩺 Logs → Supplier` : "",
             "",
-            r.added > 0 && !goLive
-              ? "The new products are <b>hidden</b>. Nothing is in your shop until you publish it — open the review list and pick what goes live, one by one or in bulk."
-              : r.added > 0
-                ? "⚠️ This supplier is set to publish new products <b>immediately</b>, so they are already live. Change that in the review list."
-                : "Nothing new this time.",
+            r.added > 0
+              ? "The new products are <b>hidden</b> until you approve them — you got an alert for each with ✅ Approve / 🗑 Reject, or pick them in the review list."
+              : "Nothing new this time.",
           ].filter(Boolean).join("\n"),
           kb,
         };
@@ -6383,6 +6430,22 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     return true;
   }
 
+  if (awaiting === "admin_p_restock_qty") {
+    const pid = ctx.session.admProductId ?? "";
+    ctx.session.admProductId = undefined;
+    const qty = Number.parseInt(text.replace(/[^0-9]/g, ""), 10);
+    if (!pid) { await ctx.reply("Lost track of that product — open it again."); return true; }
+    if (!Number.isFinite(qty) || qty < 1 || qty > 1_000_000) {
+      ctx.session.admProductId = pid;
+      ctx.session.awaiting = "admin_p_restock_qty";
+      await ctx.reply("Send just the number of units added, e.g. 50.");
+      return true;
+    }
+    const r = await announceRestock(pid, qty, { createdById: "bot-admin" }).catch(() => ({ announced: false, targets: 0 }));
+    flash(ctx, r.announced ? `📣 “${qty} new stock added” sent to <b>${r.targets ?? 0}</b> customers.` : "⚠️ Couldn't announce — the product must be shown (👁) first.");
+    await handleAdminCallback(ctx, "prod", [pid]);
+    return true;
+  }
   if (awaiting === "admin_p_bulk") {
     const pid = ctx.session.admProductId ?? "";
     ctx.session.admProductId = undefined;
@@ -6415,8 +6478,10 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     const sorted = [...tiers].sort((a, b) => a.minQty - b.minQty);
     const regressions = sorted.filter((t, i) => i > 0 && t.percentBp < sorted[i - 1]!.percentBp);
     await setProductBulkTiers(pid, tiers);
+    // A new or changed deal is news: announce it ("🔥 BULK DISCOUNT ACTIVE").
+    const ann = await announceBulkDiscount(pid, { createdById: "bot-admin" }).catch(() => ({ announced: false, targets: 0 }));
     flash(ctx, [
-      `📦 <b>${tiers.length} bulk tier(s) saved</b>`,
+      `📦 <b>${tiers.length} bulk tier(s) saved</b>${ann.announced ? ` · 🔥 announced to ${ann.targets ?? 0} customers` : ""}`,
       ...sorted.map((t) => `• ${t.minQty}+ → ${(t.percentBp / 100).toFixed(t.percentBp % 100 === 0 ? 0 : 1)}% off`),
       ...(bad.length > 0 ? ["", `⚠️ Ignored: ${escapeHtml(bad.join(", ")).slice(0, 80)}`] : []),
       ...(regressions.length > 0 ? ["", "⚠️ A larger quantity has a smaller discount — buyers get the best tier they qualify for, so that rung will never apply."] : []),

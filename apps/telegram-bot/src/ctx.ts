@@ -9,6 +9,7 @@ export interface SessionData {
     | "admin_upi_auto_cap"
     | "admin_bp_value"
     | "admin_p_bulk"
+    | "admin_p_restock_qty"
     | "search"
     | "ticket"
     | "ticket_reply"
