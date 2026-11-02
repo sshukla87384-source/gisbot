@@ -242,6 +242,8 @@ export interface UpiTopupClaim {
   inrMinor: number;
   usdMinor: number;
   utr: string;
+  /** When the customer opened the top-up (ms) — a credit older than this can't be theirs. */
+  at?: number;
 }
 
 const TOPUP_PREFIX = "upitopup:";
@@ -265,4 +267,40 @@ export async function readUpiTopupClaim(id: string): Promise<UpiTopupClaim | nul
 
 export async function dropUpiTopupClaim(id: string): Promise<void> {
   try { await getRedis().del(`${TOPUP_PREFIX}${id}`); } catch { /* best effort */ }
+}
+
+
+/**
+ * Prove a UPI WALLET TOP-UP from the merchant account, the same way orders
+ * are proven: a credit read from BharatPe with this exact UTR, in rupees, for
+ * exactly the amount, arriving after the customer opened the top-up, not yet
+ * used for anything. Binding it (orderId = "topup:…") is the claim, so one
+ * payment can never credit two wallets or settle an order as well.
+ *
+ * Only runs when UPI auto-approval is ON and a provider is configured: with
+ * no provider nothing proves the money arrived, and a wallet credit is
+ * spendable money — that stays with the operator.
+ */
+export async function autoVerifyUpiTopup(claim: UpiTopupClaim): Promise<{ ok: true } | { ok: false; reason: "DISABLED" | "NO_PROVIDER" | "OVER_CAP" | "UNVERIFIED" | "AMOUNT_MISMATCH" | "CREDIT_USED" | "CREDIT_TOO_OLD" | "CURRENCY_MISMATCH" }> {
+  const policy = await getUpiAutoPolicy();
+  if (!policy.enabled) return { ok: false, reason: "DISABLED" };
+  const provider = await getUpiProvider();
+  if (!provider) return { ok: false, reason: "NO_PROVIDER" };
+  if (claim.inrMinor > policy.maxMinor) return { ok: false, reason: "OVER_CAP" };
+  let credit = await prisma.upiCredit.findUnique({ where: { utr: claim.utr } });
+  if (!credit) {
+    await pollUpiCredits().catch(() => 0);
+    credit = await prisma.upiCredit.findUnique({ where: { utr: claim.utr } });
+  }
+  if (!credit) return { ok: false, reason: "UNVERIFIED" };
+  if (credit.orderId) return { ok: false, reason: "CREDIT_USED" };
+  if (credit.currency !== "INR") return { ok: false, reason: "CURRENCY_MISMATCH" };
+  if (credit.amountMinor !== claim.inrMinor) return { ok: false, reason: "AMOUNT_MISMATCH" };
+  if (claim.at && credit.creditedAt.getTime() < claim.at - 2 * 60_000) return { ok: false, reason: "CREDIT_TOO_OLD" };
+  const bound = await prisma.upiCredit.updateMany({
+    where: { utr: claim.utr, orderId: null },
+    data: { orderId: `topup:${claim.userId}`, matchedAt: new Date() },
+  });
+  if (bound.count === 0) return { ok: false, reason: "CREDIT_USED" };
+  return { ok: true };
 }

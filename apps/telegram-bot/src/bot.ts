@@ -86,6 +86,9 @@ import {
   claimUpiUtrForOrder,
   markUpiUtrPending,
   stashUpiTopupClaim,
+  getUpiProvider,
+  getUpiAutoPolicy,
+  settleUpiTopup,
   enqueueAdminAlert,
   capTelegramHtml,
   entitiesToTelegramHtml,
@@ -1084,7 +1087,20 @@ export function createBot(): Bot<Ctx> {
         return flowStep(ctx, () => ctx.reply("Please send a valid amount in ₹, e.g. <code>500</code>", { parse_mode: "HTML" }));
       }
       const minor = Math.round(val * 100);
+      // Same ceiling as the UPI auto-approve limit: a top-up can't be bigger
+      // than what the shop lets UPI settle on its own.
+      const [upiPolicy, upiProv] = await Promise.all([getUpiAutoPolicy().catch(() => null), getUpiProvider().catch(() => null)]);
+      const cap = upiPolicy?.maxMinor ?? 0;
+      if (cap > 0 && minor > cap) {
+        ctx.session.awaiting = "wallet_inr_amount";
+        return flowStep(ctx, () => ctx.reply(
+          `📏 The maximum per UPI top-up is <b>₹${(cap / 100).toFixed(0)}</b>. Send a smaller amount — or add more in a second top-up, or use Binance / crypto for big amounts.`,
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
+        ));
+      }
+      const autoUpi = Boolean(upiPolicy?.enabled && upiProv);
       ctx.session.inrTopupMinor = minor;
+      ctx.session.inrTopupAt = Date.now();
       const fxRate = await getInrPerUsdt();
       ctx.session.awaiting = "wallet_inr_utr";
       const upiId = config.UPI_ID ?? "";
@@ -1112,8 +1128,10 @@ export function createBot(): Bot<Ctx> {
         "",
         "✅ After paying, paste your <b>UTR number</b> here.",
         "",
-        "🕐 <b>Please note:</b> UPI is verified <b>manually by our team</b>, so crediting can be delayed.",
-        "⚡ Need it instantly? Use <b>Binance (USDT)</b> — that is credited automatically.",
+        ...(autoUpi
+          ? ["⚡ <b>Verified automatically</b> from your UTR — usually credited within a minute."]
+          : ["🕐 <b>Please note:</b> UPI is verified <b>manually by our team</b>, so crediting can be delayed.",
+             "⚡ Need it instantly? Use <b>Binance (USDT)</b> — that is credited automatically."]),
       ].join("\n");
       const kb = new InlineKeyboard()
         .copyText(`📋 Copy amount — ₹${rupees}`, rupees).row()
@@ -1165,8 +1183,32 @@ export function createBot(): Bot<Ctx> {
         ));
       }
       await markUpiUtrPending(digits);
-      const claimId = await stashUpiTopupClaim({ userId: ctx.user.id, inrMinor: minor, usdMinor, utr: digits });
+      const topupClaim = { userId: ctx.user.id, inrMinor: minor, usdMinor, utr: digits, at: ctx.session.inrTopupAt ?? Date.now() };
+      const claimId = await stashUpiTopupClaim(topupClaim);
       ctx.session.inrTopupMinor = undefined;
+      ctx.session.inrTopupAt = undefined;
+      // Auto-verify from BharatPe first (same proof as UPI orders). Proven →
+      // credited now, no admin needed. Not visible yet → the admin card below
+      // goes out, and the UPI poll keeps retrying it for a day.
+      await flowStep(ctx, () => ctx.reply("🔎 <b>Verifying your UPI payment…</b>", { parse_mode: "HTML" }));
+      const auto = await settleUpiTopup(claimId, topupClaim).catch(() => ({ ok: false as const, reason: "ERROR" }));
+      if (auto.ok) {
+        return flowEnd(ctx, () => ctx.reply(
+          [
+            "✅ <b>Payment verified — wallet topped up!</b>",
+            "",
+            `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b> · UTR <code>${escapeHtml(digits)}</code>`,
+            `💰 Credited: <b>${fmt(auto.creditMinor, auto.currency)}</b>`,
+            `💳 New balance: <b>${fmt(Number(auto.balance), auto.currency)}</b>`,
+          ].join("\n"),
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🛍 Shop now", cb("shp", "home", 1)).text("💳 Wallet", cb("wal", "view")) },
+        ));
+      }
+      const autoNote = !auto.ok && auto.reason === "AMOUNT_MISMATCH" ? "⚠️ Auto-check: the amount in BharatPe doesn't match."
+        : !auto.ok && auto.reason === "CREDIT_USED" ? "⚠️ Auto-check: that UTR already settled something else."
+        : !auto.ok && auto.reason === "CREDIT_TOO_OLD" ? "⚠️ Auto-check: that payment is older than this top-up."
+        : !auto.ok && auto.reason === "UNVERIFIED" ? "🔄 Auto-check: not in BharatPe yet — the bot keeps checking every 2 min."
+        : "";
       const who = ctx.user.telegramHandle ? `@${ctx.user.telegramHandle}` : (ctx.user.firstName ?? "customer");
       await enqueueAdminAlert(
         [
@@ -1176,6 +1218,7 @@ export function createBot(): Bot<Ctx> {
           `💵 Paid: <b>₹${(minor / 100).toFixed(2)}</b>`,
           `💰 Credit: <b>${creditLabel}</b>${topupWalletCur === "INR" ? " <i>(INR wallet)</i>" : `  <i>(${rate} INR = 1 USD)</i>`}`,
           `🧾 UTR: <code>${escapeHtml(utr)}</code>`,
+          ...(autoNote ? [autoNote] : []),
           "",
           `Check the UTR in your UPI app, then approve to credit their wallet (${topupWalletCur}).`,
         ].join("\n"),
@@ -1194,7 +1237,9 @@ export function createBot(): Bot<Ctx> {
           `💰 You'll receive: <b>${creditLabel}</b>`,
           `🧾 UTR: <code>${escapeHtml(digits)}</code>`,
           "",
-          "🧑‍💼 Our team is verifying it now — UPI is approved by hand, so please allow a little time. Your wallet is credited as soon as it clears and you'll get a message here. 🙏",
+          !auto.ok && auto.reason === "UNVERIFIED"
+            ? "🔄 Your payment hasn't shown up in our bank feed yet — we keep checking automatically and credit it the moment it does (usually a few minutes). You'll get a message here. 🙏"
+            : "🧑‍💼 Our team is verifying it now. Your wallet is credited as soon as it clears and you'll get a message here. 🙏",
           "",
           "⚡ <i>Tip: Binance (USDT) deposits are credited automatically, with no waiting.</i>",
         ].join("\n"),
@@ -2684,8 +2729,9 @@ export function createBot(): Bot<Ctx> {
             break;
           }
           ctx.session.awaiting = "wallet_inr_amount";
+          const upiCap = (await getUpiAutoPolicy().catch(() => ({ maxMinor: 0 }))).maxMinor;
           const askAmt = await ctx.reply(
-            "🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).\n\n<i>Your wallet is held in USD and credited at the store rate.</i>",
+            `🇮🇳 <b>Add INR to your wallet</b>\n\nHow much do you want to add? Send the amount in ₹ (e.g. <code>500</code>).${upiCap > 0 ? `\n\n📏 Max per UPI top-up: <b>₹${(upiCap / 100).toFixed(0)}</b>` : ""}\n\n<i>Credited to your wallet at the store rate.</i>`,
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✖️ Cancel", "wal:view") },
           );
           await flowStart(ctx, askAmt, { card: false });

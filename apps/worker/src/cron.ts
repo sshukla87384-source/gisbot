@@ -10,6 +10,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   sendResellerStatements,
   pollBinancePayments,
   pollUpiCredits,
+  settlePendingUpiTopups,
   pollCryptoPayments,
   pollTerminalPayments,
   sweepTerminalPayments,
@@ -342,6 +343,8 @@ async function dailyMoneySummary(): Promise<void> {
  */
 async function upiPoll(): Promise<void> {
   await pollUpiCredits().catch(() => 0);
+  // Top-ups pasted before BharatPe showed the payment get credited now.
+  await settlePendingUpiTopups().catch(() => 0);
 }
 
 /**

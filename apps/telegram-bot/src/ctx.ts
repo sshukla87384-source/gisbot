@@ -205,6 +205,8 @@ export interface SessionData {
   payRetries?: number;
   /** INR wallet top-up being requested (minor units). */
   inrTopupMinor?: number;
+  /** When the UPI top-up was opened (ms) — a bank credit older than this isn't theirs. */
+  inrTopupAt?: number;
   /** Crypto wallet deposit being requested (minor units, user currency). */
   cryptoTopupMinor?: number;
   /** NOWPayments API key held between the two admin prompts. */
