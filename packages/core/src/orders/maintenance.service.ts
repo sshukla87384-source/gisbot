@@ -40,8 +40,11 @@ async function refundPaidOrderTx(
   const already = await tx.walletTransaction.findFirst({ where: { idempotencyKey: { in: [`refund:order:${o.id}`, `refund:stock:${o.id}`, `refund:admin:${o.id}`] } }, select: { id: true } });
   if (already) return { ok: false, reason: "ALREADY" };
 
-  const undelivered = o.items.filter((i) => i.fulfilledAt === null);
-  const full = mode === "admin" || undelivered.length === o.items.length;
+  // Lines already refunded one by one (refundUndeliverableItems) are paid out:
+  // they are neither "undelivered" here nor part of a full refund again.
+  const refundedTotal = o.items.filter((i) => i.refundedAt !== null).reduce((n, i) => n + i.totalMinor, 0);
+  const undelivered = o.items.filter((i) => i.fulfilledAt === null && i.refundedAt === null);
+  const full = mode === "admin" || undelivered.length === o.items.filter((i) => i.refundedAt === null).length;
   if (mode === "stock" && undelivered.length === 0) {
     await tx.order.update({ where: { id: o.id }, data: { status: "COMPLETED", completedAt: new Date() } });
     return { ok: false, reason: "NOTHING" };
@@ -49,7 +52,9 @@ async function refundPaidOrderTx(
   // What the customer actually paid us (wallet + gateway, net of coupon).
   const paidMinor = o.walletUsedMinor + (o.paidAt !== null ? o.totalMinor : 0);
   const subtotal = o.subtotalMinor > 0 ? o.subtotalMinor : 1;
-  const share = full ? 1 : Math.min(1, undelivered.reduce((sum, i) => sum + i.totalMinor, 0) / subtotal);
+  const share = full
+    ? Math.max(0, 1 - refundedTotal / subtotal)
+    : Math.min(1, undelivered.reduce((sum, i) => sum + i.totalMinor, 0) / subtotal);
   const refundMinor = Math.min(paidMinor, Math.round(paidMinor * share));
   let credited = 0;
   let creditCur: string = o.currency;
@@ -134,4 +139,92 @@ export async function adminRefundOrder(orderId: string, adminId?: string): Promi
     }
   }
   return { ok: true, refundedMinor: r.refundedMinor, currency: r.currency };
+}
+
+/**
+ * Refund specific order lines that cannot be delivered (the supplier rejected
+ * the order, it is out of stock there, the vendor never sent a key) — at
+ * once, to the buyer's WALLET, whatever they paid with. Each line is paid out
+ * exactly once (idempotency key per line) and marked refundedAt, so the
+ * retry sweep stops trying it. The order closes when nothing is left to
+ * deliver: REFUNDED if no line was delivered, PARTIALLY_REFUNDED otherwise.
+ */
+export async function refundUndeliverableItems(
+  orderId: string,
+  itemIds: string[],
+  reason: string,
+): Promise<{ ok: boolean; refundedMinor?: number; currency?: string; telegramId?: bigint | null; orderNumber?: string; names?: string[] }> {
+  const r = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
+    const o = await tx.order.findUnique({ where: { id: orderId }, include: { items: true, user: { select: { id: true, telegramId: true, currency: true } } } });
+    if (!o) return { ok: false as const };
+    if (["REFUNDED", "CANCELLED", "EXPIRED", "PENDING_PAYMENT"].includes(o.status)) return { ok: false as const };
+    // A full order refund already happened — nothing left to pay per line.
+    const whole = await tx.walletTransaction.findFirst({ where: { idempotencyKey: { in: [`refund:order:${o.id}`] } }, select: { id: true } });
+    if (whole) return { ok: false as const };
+    const targets = o.items.filter((i) => itemIds.includes(i.id) && i.fulfilledAt === null && i.refundedAt === null);
+    if (targets.length === 0) return { ok: false as const };
+    const paidMinor = o.walletUsedMinor + (o.paidAt !== null ? o.totalMinor : 0);
+    const subtotal = o.subtotalMinor > 0 ? o.subtotalMinor : 1;
+    const wal = await tx.wallet.findUnique({ where: { userId: o.userId }, select: { currency: true } });
+    const creditCur = (wal?.currency ?? o.currency) as Currency;
+    let credited = 0;
+    let bnplReduced = 0;
+    for (const it of targets) {
+      const share = Math.min(1, it.totalMinor / subtotal);
+      const minor = Math.round(paidMinor * share);
+      const inWallet = creditCur === o.currency ? minor : convertMinor(minor, o.currency as Currency, creditCur);
+      if (inWallet > 0) {
+        await creditWalletTx(tx, {
+          userId: o.userId, amountMinor: BigInt(inWallet), type: "REFUND",
+          note: `Auto-refund — could not be delivered: ${it.productNameSnap} (order ${o.orderNumber})`,
+          idempotencyKey: `refund:item:${it.id}`, orderId: o.id,
+        });
+        credited += inWallet;
+      }
+      if (o.bnplMinor > 0) {
+        const owe = Math.round(o.bnplMinor * share);
+        const userCur = o.user.currency as Currency;
+        bnplReduced += userCur === o.currency ? owe : convertMinor(owe, o.currency as Currency, userCur);
+      }
+      await tx.orderItem.update({ where: { id: it.id }, data: { refundedAt: new Date() } });
+      await tx.commissionEntry.updateMany({ where: { orderItemId: it.id, releasedAt: null, clawedBackAt: null }, data: { clawedBackAt: new Date() } });
+    }
+    if (bnplReduced > 0) {
+      const u = await tx.user.findUnique({ where: { id: o.userId }, select: { bnplOutstandingMinor: true } });
+      await tx.user.update({ where: { id: o.userId }, data: { bnplOutstandingMinor: Math.max(0, (u?.bnplOutstandingMinor ?? 0) - bnplReduced) } });
+    }
+    // Close the order once nothing is left to deliver.
+    const refundedIds = new Set([...o.items.filter((i) => i.refundedAt !== null).map((i) => i.id), ...targets.map((t) => t.id)]);
+    const pending = o.items.filter((i) => i.fulfilledAt === null && !refundedIds.has(i.id));
+    const delivered = o.items.filter((i) => i.fulfilledAt !== null);
+    if (pending.length === 0) {
+      const allRefunded = delivered.length === 0;
+      await tx.order.update({ where: { id: o.id }, data: allRefunded ? { status: "REFUNDED", cancelledAt: new Date() } : { status: "PARTIALLY_REFUNDED" } });
+      if (allRefunded) await tx.referralReward.updateMany({ where: { orderId: o.id, status: "PENDING_HOLD" }, data: { status: "WITHHELD", withheldReason: "order refunded" } });
+    }
+    await tx.auditLog.create({ data: { actorType: "SYSTEM", action: "order.refund.undeliverable", entityType: "Order", entityId: o.id, after: { items: targets.map((t) => t.id), credited, creditCur, bnplReduced, reason: reason.slice(0, 200) } } });
+    return { ok: true as const, refundedMinor: credited, currency: creditCur as string, telegramId: o.user.telegramId, orderNumber: o.orderNumber, names: targets.map((t) => t.productNameSnap), bnplReduced };
+  });
+  if (!r.ok) return { ok: false };
+  if (r.telegramId != null) {
+    const names = [...new Set(r.names)].slice(0, 3).join(", ");
+    const parts = [
+      (r.refundedMinor ?? 0) > 0 ? `<b>${formatMinor(r.refundedMinor ?? 0, (r.currency ?? "USD") as CurrencyCode)}</b> is back in your 💰 wallet` : "",
+      (r.bnplReduced ?? 0) > 0 ? "your Pay Later balance was reduced" : "",
+    ].filter(Boolean);
+    await enqueueTelegramMessage(
+      r.telegramId,
+      [
+        `↩️ <b>Order cancelled &amp; refunded</b>`,
+        "",
+        `📦 ${names.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")} — couldn't be delivered (our supplier is out of stock or unavailable right now).`,
+        `🧾 Order <code>${r.orderNumber}</code>`,
+        parts.length > 0 ? `✅ ${parts.join(" and ")} — instantly, use it on your next order.` : "",
+        "",
+        "We're sorry for the trouble! 🙏",
+      ].filter(Boolean).join("\n"),
+    ).catch(() => undefined);
+  }
+  return { ok: true, refundedMinor: r.refundedMinor, currency: r.currency, telegramId: r.telegramId, orderNumber: r.orderNumber, names: r.names };
 }

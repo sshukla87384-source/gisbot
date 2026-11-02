@@ -5,6 +5,7 @@ import { invalidate, getRedis } from "./redis.js";
 import { logWallet, logEvent } from "./logs.service.js";
 import { enqueueAdminAlert } from "./queues.js";
 import { manualFulfillItem } from "./orders/manual-pay.service.js";
+import { refundUndeliverableItems } from "./orders/maintenance.service.js";
 import { announceRestock } from "./broadcast.service.js";
 import { usdtRate } from "./fx.js";
 
@@ -1428,6 +1429,8 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
   // Already delivered — buying a second unit for it spends real money on a key
   // manualFulfillItem would then refuse to attach.
   if (item.fulfilledAt) return { ok: false, reason: "ALREADY_FULFILLED" };
+  // Already refunded as undeliverable — never buy it now.
+  if (item.refundedAt) return { ok: false, reason: "REFUNDED" };
   const { supplierId, supplierRef } = item.variant.product;
   if (!supplierId || !supplierRef) return { ok: false, reason: "NOT_SUPPLIER" };
   // One purchase at a time per order line. The post-checkout auto-fulfil is
@@ -1461,11 +1464,15 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
       // supply (out of stock, our credit with them exhausted) stops being sold
       // for the next five minutes until the scheduled sync notices.
       void logWallet("supplier.fulfil", `Supplier rejected the order: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
+      // Instant clearance: the customer is refunded to their wallet right away
+      // (whatever they paid with) instead of waiting on a line that can't be
+      // delivered — and the sweep never retries it.
+      const refund = await refundUndeliverableItems(item.orderId, [orderItemId], `supplier rejected: ${r.reason ?? "unknown"}`).catch(() => ({ ok: false as const }));
+      void syncSupplierProducts(supplierId).catch(() => undefined);
       if (!(await alertOnce(orderItemId, r.reason ?? "rejected"))) return { ok: false, reason: r.reason ?? "REJECTED" };
       await enqueueAdminAlert(
-        `⛔ <b>Supplier REJECTED the order — not charged</b>\nProduct: ${esc(item.productNameSnap)}\nVendor says: <code>${esc(r.reason ?? "unknown")}</code>\n\nDeliver this order manually or refund it. If the reason is a balance / limit, top up your account with the vendor. Their catalogue is being re-synced now.`,
+        `⛔ <b>Supplier REJECTED the order — not charged</b>\nProduct: ${esc(item.productNameSnap)}\nVendor says: <code>${esc(r.reason ?? "unknown")}</code>\n\n${refund.ok ? "✅ The customer was refunded to their wallet automatically and told." : "⚠️ Automatic refund did not go through — refund or deliver it manually."} If the reason is a balance / limit, top up your account with the vendor. Their catalogue is being re-synced now.`,
       ).catch(() => undefined);
-      void syncSupplierProducts(supplierId).catch(() => undefined);
       return { ok: false, reason: r.reason ?? "REJECTED" };
     }
     // We could not get a key. Only ACCEPTED_NO_KEY means the vendor took the
@@ -1473,6 +1480,23 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
     // nothing was bought — and the 60 s sweep will try again by itself.
     const accepted = r.reason === "ACCEPTED_NO_KEY";
     void logWallet("supplier.fulfil", `${accepted ? "Supplier accepted but no key parsed" : "Supplier order not placed"}: ${item.productNameSnap}`, { orderItemId, reason: r.reason ?? "unknown" });
+    // Clearance instead of endless retries: an order that could not be placed
+    // is refunded on its second failed attempt (about a minute later — one
+    // retry covers a network blip); one the vendor accepted without sending a
+    // key gets 10 minutes for the key to turn up, then is refunded.
+    const ageMs = Date.now() - item.createdAt.getTime();
+    const fails = await getRedis().incr(`supfailn:${orderItemId}`).catch(() => 1);
+    await getRedis().expire(`supfailn:${orderItemId}`, 86_400).catch(() => undefined);
+    const giveUp = accepted ? ageMs > 10 * 60_000 : fails >= 2 || ageMs > 3 * 60_000;
+    if (giveUp) {
+      const refund = await refundUndeliverableItems(item.orderId, [orderItemId], `supplier: ${r.reason ?? "no key"}`).catch(() => ({ ok: false as const }));
+      if (refund.ok) {
+        await enqueueAdminAlert(
+          `↩️ <b>Supplier order failed — customer refunded</b>\nProduct: ${esc(item.productNameSnap)}\nReason: <code>${esc(r.reason ?? "unknown")}</code>\nThe customer got their money back in their wallet and was told.${accepted ? "\n⚠️ The vendor had ACCEPTED this order — check with them; you may have been charged." : ""}`,
+        ).catch(() => undefined);
+        return { ok: false, reason: "REFUNDED" };
+      }
+    }
     if (await alertOnce(orderItemId, r.reason ?? "unknown")) {
       await enqueueAdminAlert(
         accepted
@@ -1713,6 +1737,7 @@ export async function retryPendingSupplierFulfilment(maxOrders = 20): Promise<{ 
   const items = await prisma.orderItem.findMany({
     where: {
       fulfilledAt: null,
+      refundedAt: null,
       variant: { product: { supplierId: { not: null } } },
       order: { status: { in: ["PAID", "PENDING_FULFILLMENT"] } },
       createdAt: { lt: new Date(Date.now() - 60_000) }, // give the first attempt a minute

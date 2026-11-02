@@ -605,6 +605,9 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
   if (item.fulfilledAt) return { ok: false, reason: "ALREADY_DELIVERED", orderNumber: item.order.orderNumber };
+  // Refunded as undeliverable: the customer has their money back — delivering
+  // now would give the item away for free.
+  if (item.refundedAt) return { ok: false, reason: "REFUNDED", orderNumber: item.order.orderNumber };
 
   const clean = secretText.trim();
   if (!clean) return { ok: false, reason: "EMPTY" };
@@ -613,7 +616,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   // moment both passed the earlier check and both messaged the customer, who
   // then held two different secrets while the vault showed only one.
   const claimed = await prisma.orderItem.updateMany({
-    where: { id: item.id, fulfilledAt: null },
+    where: { id: item.id, fulfilledAt: null, refundedAt: null },
     data: {
       fulfilledAt: new Date(),
       warrantyStartAt: item.warrantyStartAt ?? new Date(),
@@ -627,9 +630,11 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   await accrueCommission(item.id).catch(() => undefined);
 
   // Recompute remaining manual items on the order.
-  const remainingItems = await prisma.orderItem.count({ where: { orderId: item.orderId, fulfillmentMode: "MANUAL", fulfilledAt: null } });
-  const allDone = (await prisma.orderItem.count({ where: { orderId: item.orderId, fulfilledAt: null } })) === 0;
-  if (allDone) await prisma.order.update({ where: { id: item.orderId }, data: { status: "COMPLETED", completedAt: new Date() } });
+  // Refunded lines are settled — they don't keep the order open.
+  const remainingItems = await prisma.orderItem.count({ where: { orderId: item.orderId, fulfillmentMode: "MANUAL", fulfilledAt: null, refundedAt: null } });
+  const allDone = (await prisma.orderItem.count({ where: { orderId: item.orderId, fulfilledAt: null, refundedAt: null } })) === 0;
+  const anyRefunded = allDone && (await prisma.orderItem.count({ where: { orderId: item.orderId, refundedAt: { not: null } } })) > 0;
+  if (allDone) await prisma.order.update({ where: { id: item.orderId }, data: anyRefunded ? { status: "PARTIALLY_REFUNDED", completedAt: new Date() } : { status: "COMPLETED", completedAt: new Date() } });
 
   const tgId = item.order.user.telegramId;
   if (tgId !== null) {
