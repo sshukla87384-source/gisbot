@@ -73,6 +73,13 @@ import { iconId, networkIconId } from "./emoji.js";
 import { sbtn } from "./keyboard.js";
 
 /**
+ * Shop LISTS (category tiles, product rows, search) use plain buttons — only
+ * the icons stand out, like the shops customers compare us with. Colour is
+ * kept for actions: ⚡ Buy now, 🛒 Add to cart, payment and confirm buttons.
+ */
+const LIST_STYLE: undefined = undefined;
+
+/**
  * Shorten by characters, not UTF-16 units: `.slice()` could cut an emoji in
  * half and leave a broken glyph (or an invalid string Telegram rejects) at the
  * end of a button label.
@@ -133,7 +140,7 @@ export async function soldOutView(user: BotUser, page: number): Promise<View> {
   const result = await listProducts({ currency: user.currency as Currency, page, pageSize: 20, userId: user.id, locale: user.locale, soldOutOnly: true });
   const kb = new InlineKeyboard();
   for (const p of result.items) {
-    kb.add(sbtn(withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId), cb("shp", "prod", p.id), "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId), cb("shp", "prod", p.id), LIST_STYLE, p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "soldout", result.page, result.pages);
   kb.row().text("🛍 Back to shop", cb("shp", "home", 1));
@@ -156,7 +163,7 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
   if (page <= 1 && home.tiles.length > 0) {
     home.tiles.forEach((t, i) => {
       const label = `${t.iconCustomEmojiId ? "" : `${t.emoji ?? "📂"} `}${t.name} (${t.count})`;
-      kb.add(sbtn(label, cb("shp", t.hasChildren ? "sub" : "cat", t.id, 1), "primary", t.iconCustomEmojiId ?? undefined));
+      kb.add(sbtn(label, cb("shp", t.hasChildren ? "sub" : "cat", t.id, 1), LIST_STYLE, t.iconCustomEmojiId ?? undefined));
       if (i % 2 === 1) kb.row();
     });
     kb.row();
@@ -165,10 +172,10 @@ export async function shopHomeView(user: BotUser, page: number): Promise<View> {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
     const label = `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`;
-    kb.add(sbtn(label, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(label, cb("shp", "prod", p.id), LIST_STYLE, p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "home", result.page, result.pages);
-  kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
+  kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), LIST_STYLE)).row();
   // "😴 Sold out (N)" and "📂 All Categories" were removed from this screen at
   // the operator's request. Both destinations still exist — sold-out items
   // are reachable through search and the category grid from the main menu —
@@ -203,10 +210,10 @@ export async function productListView(
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), LIST_STYLE, p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "shp", "cat", page, result.pages, categoryId);
-  kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), "primary")).row();
+  kb.row().add(sbtn("🔍 Search products", cb("shp", "find"), LIST_STYLE)).row();
   kb.text("◀️ Back to shop", cb("shp", "home", 1));
   backToMenuRow(kb);
   const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true, emoji: true } }).catch(() => null);
@@ -220,10 +227,10 @@ export async function searchResultsView(user: BotUser, query: string, page: numb
   for (const p of result.items) {
     const price = p.fromPriceMinor === null ? "—" : fmt(p.fromPriceMinor, user.currency);
     const sale = p.onSale ? "🔥 " : "";
-    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger", p.iconCustomEmojiId ?? undefined)).row();
+    kb.add(sbtn(`${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`, cb("shp", "prod", p.id), LIST_STYLE, p.iconCustomEmojiId ?? undefined)).row();
   }
   paginationRow(kb, "src", "pg", page, result.pages);
-  kb.row().add(sbtn("🔍 Search again", cb("shp", "find"), "primary")).row();
+  kb.row().add(sbtn("🔍 Search again", cb("shp", "find"), LIST_STYLE)).row();
   kb.text("🛍 All products", cb("shp", "home", 1));
   backToMenuRow(kb);
   return {
@@ -800,7 +807,7 @@ export async function categoryGridView(user: BotUser): Promise<View> {
   const tiles = await listCategoryTiles();
   const kb = new InlineKeyboard();
   if (tiles.length === 0) {
-    kb.add(sbtn("🛍 Browse everything", cb("shp", "home", 1), "success")).row();
+    kb.add(sbtn("🛍 Browse everything", cb("shp", "home", 1), LIST_STYLE)).row();
     backToMenuRow(kb);
     return {
       text: [header(`🗂 ${bold("Shop by Category")}`), "", "No categories yet — tap below to browse the whole shop."].join("\n"),
@@ -812,11 +819,11 @@ export async function categoryGridView(user: BotUser): Promise<View> {
     for (const t of tiles.slice(i, i + 3)) {
       const label = clip(`${t.hot ? "🔥 " : ""}${t.emoji ? `${t.emoji} ` : ""}${t.name}`, 24);
       // Sold-out tiles are styled danger so they read differently at a glance.
-      kb.add(sbtn(label, cb("cat", "open", t.id), t.inStock ? "success" : "danger"));
+      kb.add(sbtn(label, cb("cat", "open", t.id), LIST_STYLE));
     }
     kb.row();
   }
-  kb.add(sbtn("🛍 Browse everything", cb("shp", "home", 1), "primary")).row();
+  kb.add(sbtn("🛍 Browse everything", cb("shp", "home", 1), LIST_STYLE)).row();
   backToMenuRow(kb);
   const soldOut = tiles.filter((t) => !t.inStock).length;
   return {
@@ -850,7 +857,7 @@ export async function categoryProductsView(user: BotUser, categoryId: string, pa
     kb.add(sbtn(
       `${sale}${outMark(p)}${withIcon(p.iconEmoji, p.name, p.iconCustomEmojiId)} — ${price}${stockTag(p)}`,
       cb("shp", "prod", p.id),
-      p.inStock ? ((p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success") : "danger",
+      LIST_STYLE,
       p.iconCustomEmojiId ?? undefined,
     )).row();
   }
