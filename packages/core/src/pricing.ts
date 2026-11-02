@@ -18,7 +18,14 @@ export interface SaleFields {
 
 export interface BulkTier {
   minQty: number;
+  /** % off each unit (basis points). 0 on a fixed-price tier. */
   percentBp: number;
+  /**
+   * A fixed price per unit instead of a percentage — "10+ → $2.50 each".
+   * Stored in both shop currencies (converted when the operator saves it), so
+   * it stays put when the product's normal price moves (supplier sync).
+   */
+  fixed?: { USD?: number; INR?: number };
 }
 
 /**
@@ -33,9 +40,17 @@ export function bulkTiersOf(p: SaleFields): BulkTier[] {
   const tiers: BulkTier[] = [];
   for (const t of raw) {
     const minQty = Number((t as { minQty?: unknown })?.minQty);
-    const percentBp = Number((t as { percentBp?: unknown })?.percentBp);
-    if (!Number.isFinite(minQty) || !Number.isFinite(percentBp)) continue;
-    if (minQty < 2 || percentBp <= 0 || percentBp > 9000) continue;
+    const percentBp = Number((t as { percentBp?: unknown })?.percentBp ?? 0);
+    const fx = (t as { fixed?: { USD?: unknown; INR?: unknown } })?.fixed;
+    const fUsd = Number(fx?.USD);
+    const fInr = Number(fx?.INR);
+    const fixed: { USD?: number; INR?: number } = {};
+    if (Number.isFinite(fUsd) && fUsd > 0) fixed.USD = Math.round(fUsd);
+    if (Number.isFinite(fInr) && fInr > 0) fixed.INR = Math.round(fInr);
+    const hasFixed = fixed.USD !== undefined || fixed.INR !== undefined;
+    if (!Number.isFinite(minQty) || minQty < 2) continue;
+    if (hasFixed) { tiers.push({ minQty: Math.round(minQty), percentBp: 0, fixed }); continue; }
+    if (!Number.isFinite(percentBp) || percentBp <= 0 || percentBp > 9000) continue;
     tiers.push({ minQty: Math.round(minQty), percentBp: Math.round(percentBp) });
   }
   if (tiers.length === 0 && p.bulkMinQty && p.bulkPercentBp && p.bulkPercentBp > 0) {
@@ -54,13 +69,24 @@ export function bulkTiersOf(p: SaleFields): BulkTier[] {
  */
 export function bulkBpFor(p: SaleFields, qty: number): number {
   let best = 0;
-  for (const t of bulkTiersOf(p)) if (qty >= t.minQty && t.percentBp > best) best = t.percentBp;
+  for (const t of bulkTiersOf(p)) if (!t.fixed && qty >= t.minQty && t.percentBp > best) best = t.percentBp;
+  return best;
+}
+
+/** The lowest fixed bulk price this quantity earns in `currency`, or null. */
+export function bulkFixedFor(p: SaleFields, qty: number, currency: string | undefined): number | null {
+  if (currency !== "USD" && currency !== "INR") return null;
+  let best: number | null = null;
+  for (const t of bulkTiersOf(p)) {
+    const v = t.fixed?.[currency];
+    if (t.fixed && v !== undefined && qty >= t.minQty && (best === null || v < best)) best = v;
+  }
   return best;
 }
 
 /** Does this quantity qualify for any bulk tier? */
 export function isBulkActive(p: SaleFields, qty: number): boolean {
-  return bulkBpFor(p, qty) > 0;
+  return bulkBpFor(p, qty) > 0 || bulkTiersOf(p).some((t) => t.fixed && qty >= t.minQty);
 }
 
 export function isSaleActive(p: SaleFields, now: Date = new Date()): boolean {
@@ -76,6 +102,8 @@ export function effectivePriceMinor(
   p: SaleFields,
   now: Date = new Date(),
   qty = 1,
+  /** The currency of amountMinor — needed for a fixed-price bulk tier. */
+  currency?: string,
 ): number {
   const saleBp = isSaleActive(p, now) ? (p.salePercentBp ?? 0) : 0;
   const bulkBp = bulkBpFor(p, qty);
@@ -83,6 +111,10 @@ export function effectivePriceMinor(
   // would sell at a quarter price, which no operator setting either of those
   // numbers intends.
   const bp = Math.min(Math.max(Math.max(saleBp, bulkBp), 0), 9000); // cap at 90% off
-  if (bp === 0) return amountMinor;
-  return Math.round((amountMinor * (10000 - bp)) / 10000);
+  const pctPrice = bp === 0 ? amountMinor : Math.round((amountMinor * (10000 - bp)) / 10000);
+  // A fixed bulk price ("10+ → $2.50") competes the same way: the lowest wins,
+  // and it never RAISES the price above the normal one.
+  const fixed = bulkFixedFor(p, qty, currency);
+  if (fixed === null) return pctPrice;
+  return Math.min(pctPrice, fixed, amountMinor);
 }

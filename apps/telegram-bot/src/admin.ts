@@ -167,6 +167,7 @@ import {
   setProductButton,
   setProductStatus,
   setProductBulkTiers,
+  convertMinor,
   testBinanceApi,
   setBinanceCreds,
   CRYPTO_NETWORKS,
@@ -4749,12 +4750,14 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, [
         "📦 <b>Bulk discounts</b>",
         "",
-        "Send one tier per line as <code>QTY PERCENT</code>:",
-        "<code>10 5</code>",
-        "<code>20 6</code>",
-        "<code>50 8</code>",
+        "One tier per line — either a <b>% off</b> or a <b>fixed price per unit</b>:",
         "",
-        "That means 5% off each unit from 10, 6% from 20, 8% from 50. Add as many tiers as you like.",
+        "<code>10 5%</code>  → 5% off each unit from 10",
+        "<code>20 8%</code>  → 8% off each unit from 20",
+        "<code>10 $2.5</code>  → from 10, each costs <b>$2.50</b>",
+        "<code>50 ₹180</code>  → from 50, each costs <b>₹180</b>",
+        "",
+        "You can mix them. A plain number (<code>10 5</code>) means percent. A fixed price stays put when the normal price changes, and never goes above it.",
         "",
         "Send <code>off</code> to remove them all.",
       ].join("\n"));
@@ -6482,31 +6485,49 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     // One tier per line. Bad lines are reported rather than silently dropped —
     // an operator who mistypes a rung should not discover it from a customer.
-    const tiers: Array<{ minQty: number; percentBp: number }> = [];
+    // "10 5" / "10 5%" = percent; "10 $2.5", "10 2.5$", "10 usd 2.5" = fixed
+    // USD price; "10 ₹150", "10 rs 150" = fixed INR price (the other currency
+    // is filled in at today's rate).
+    const tiers: Array<{ minQty: number; percentBp: number; fixed?: { USD?: number; INR?: number } }> = [];
     const bad: string[] = [];
     for (const line of text.split(/[\n,;]+/).map((l) => l.trim()).filter(Boolean)) {
-      const m = line.match(/^(\d+)\s*\D{0,3}\s*(\d+(?:\.\d+)?)\s*%?$/);
+      const m = line.match(/^(\d+)\s*\+?\s*(?:[-=:→>@x]+\s*)?(\$|usdt?|₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(%|\$|usdt?|₹|rs\.?|inr)?\s*(?:each|\/\s*unit)?$/i);
       const qty = m ? Number.parseInt(m[1]!, 10) : NaN;
-      const pct = m ? Number.parseFloat(m[2]!) : NaN;
-      if (!Number.isFinite(qty) || qty < 2 || !Number.isFinite(pct) || pct <= 0 || pct > 90) { bad.push(line); continue; }
-      tiers.push({ minQty: qty, percentBp: Math.round(pct * 100) });
+      const num = m ? Number.parseFloat(m[3]!) : NaN;
+      const unit = ((m?.[2] ?? m?.[4] ?? "") as string).toLowerCase();
+      if (!Number.isFinite(qty) || qty < 2 || !Number.isFinite(num) || num <= 0) { bad.push(line); continue; }
+      const isUsd = unit === "$" || unit.startsWith("usd");
+      const isInr = unit === "₹" || unit.startsWith("rs") || unit === "inr";
+      if (isUsd || isInr) {
+        const minor = Math.round(num * 100);
+        const fixed = isUsd
+          ? { USD: minor, INR: convertMinor(minor, "USD", "INR") }
+          : { INR: minor, USD: convertMinor(minor, "INR", "USD") };
+        tiers.push({ minQty: qty, percentBp: 0, fixed });
+        continue;
+      }
+      if (num > 90) { bad.push(line); continue; }
+      tiers.push({ minQty: qty, percentBp: Math.round(num * 100) });
     }
     if (tiers.length === 0) {
       ctx.session.admProductId = pid;
       ctx.session.awaiting = "admin_p_bulk";
-      await ctx.reply("None of those lines looked like a tier. Use <code>QTY PERCENT</code>, one per line — e.g. <code>10 5</code>. Quantity 2 or more, discount between 0 and 90%.", { parse_mode: "HTML" });
+      await ctx.reply("None of those lines looked like a tier. Use <code>10 5%</code> for a percent or <code>10 $2.5</code> for a fixed price per unit — one per line, quantity 2 or more.", { parse_mode: "HTML" });
       return true;
     }
     // Later rungs must not be worth less than earlier ones, or a bulk buyer
     // would pay more than a smaller order.
     const sorted = [...tiers].sort((a, b) => a.minQty - b.minQty);
-    const regressions = sorted.filter((t, i) => i > 0 && t.percentBp < sorted[i - 1]!.percentBp);
+    const pctOnly = sorted.filter((t) => !t.fixed);
+    const regressions = pctOnly.filter((t, i) => i > 0 && t.percentBp < pctOnly[i - 1]!.percentBp);
     await setProductBulkTiers(pid, tiers);
     // A new or changed deal is news: announce it ("🔥 BULK DISCOUNT ACTIVE").
     const ann = await announceBulkDiscount(pid, { createdById: "bot-admin" }).catch(() => ({ announced: false, targets: 0 }));
     flash(ctx, [
       `📦 <b>${tiers.length} bulk tier(s) saved</b>${ann.announced ? ` · 🔥 announced to ${ann.targets ?? 0} customers` : ""}`,
-      ...sorted.map((t) => `• ${t.minQty}+ → ${(t.percentBp / 100).toFixed(t.percentBp % 100 === 0 ? 0 : 1)}% off`),
+      ...sorted.map((t) => t.fixed
+        ? `• ${t.minQty}+ → <b>$${((t.fixed.USD ?? 0) / 100).toFixed(2)}</b> each (₹${((t.fixed.INR ?? 0) / 100).toFixed(2)})`
+        : `• ${t.minQty}+ → ${(t.percentBp / 100).toFixed(t.percentBp % 100 === 0 ? 0 : 1)}% off`),
       ...(bad.length > 0 ? ["", `⚠️ Ignored: ${escapeHtml(bad.join(", ")).slice(0, 80)}`] : []),
       ...(regressions.length > 0 ? ["", "⚠️ A larger quantity has a smaller discount — buyers get the best tier they qualify for, so that rung will never apply."] : []),
     ].join("\n"));

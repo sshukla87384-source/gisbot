@@ -546,11 +546,11 @@ async function getProductViewUncached(productId: string, currency: Currency, use
     bulkLadder: (() => {
       const b = p.variants[0]?.prices[0]?.amountMinor ?? null;
       if (b === null) return [];
-      return bulkTiersOf(p).map((t) => ({
-        minQty: t.minQty,
-        percentBp: t.percentBp,
-        unitPriceMinor: effectivePriceMinor(b, p, new Date(), t.minQty),
-      }));
+      return bulkTiersOf(p).map((t) => {
+        const unit = effectivePriceMinor(b, p, new Date(), t.minQty, currency);
+        // A fixed-price rung reports the equivalent % so lists can say "−29%".
+        return { minQty: t.minQty, percentBp: t.fixed ? Math.max(0, Math.round((1 - unit / b) * 10000)) : t.percentBp, unitPriceMinor: unit };
+      });
     })(),
     saleEndsAt: p.saleEndsAt,
     type: p.type,
@@ -688,7 +688,8 @@ export async function categoryIdsUnder(categoryId: string): Promise<string[]> {
 /** Replace a product's whole discount ladder. */
 export async function setProductBulkTiers(productId: string, tiers: BulkTier[]): Promise<void> {
   const clean = tiers
-    .filter((t) => t.minQty >= 2 && t.percentBp > 0 && t.percentBp <= 9000)
+    .filter((t) => t.minQty >= 2 && ((t.fixed && ((t.fixed.USD ?? 0) > 0 || (t.fixed.INR ?? 0) > 0)) || (t.percentBp > 0 && t.percentBp <= 9000)))
+    .map((t) => (t.fixed ? { minQty: t.minQty, percentBp: 0, fixed: t.fixed } : { minQty: t.minQty, percentBp: t.percentBp }))
     .sort((a, b) => a.minQty - b.minQty);
   await prisma.product.update({
     where: { id: productId },
