@@ -299,7 +299,7 @@ export async function reconcile(hours = 24): Promise<Reconciliation> {
   const unfulfilled = await prisma.order.findMany({
     where: {
       status: { in: ["PAID", "PENDING_FULFILLMENT", "AWAITING_STOCK"] },
-      items: { some: { fulfilledAt: null } },
+      items: { some: { fulfilledAt: null, refundedAt: null } },
       replacementOfOrderId: null,
     },
     select: { totalMinor: true, walletUsedMinor: true, currency: true },

@@ -1484,10 +1484,15 @@ export async function fulfillFromSupplier(orderItemId: string): Promise<{ ok: bo
     // is refunded on its second failed attempt (about a minute later — one
     // retry covers a network blip); one the vendor accepted without sending a
     // key gets 10 minutes for the key to turn up, then is refunded.
-    const ageMs = Date.now() - item.createdAt.getTime();
-    const fails = await getRedis().incr(`supfailn:${orderItemId}`).catch(() => 1);
-    await getRedis().expire(`supfailn:${orderItemId}`, 86_400).catch(() => undefined);
-    const giveUp = accepted ? ageMs > 10 * 60_000 : fails >= 2 || ageMs > 3 * 60_000;
+    // Timed from the FIRST failure, not from checkout: a crypto/UPI order is
+    // often paid long after it was created.
+    const redis = getRedis();
+    await redis.set(`supfail1st:${orderItemId}`, String(Date.now()), "EX", 86_400, "NX").catch(() => undefined);
+    const firstAt = Number(await redis.get(`supfail1st:${orderItemId}`).catch(() => null)) || Date.now();
+    const sinceFirst = Date.now() - firstAt;
+    const fails = await redis.incr(`supfailn:${orderItemId}`).catch(() => 1);
+    await redis.expire(`supfailn:${orderItemId}`, 86_400).catch(() => undefined);
+    const giveUp = accepted ? sinceFirst > 10 * 60_000 : fails >= 2 || sinceFirst > 3 * 60_000;
     if (giveUp) {
       const refund = await refundUndeliverableItems(item.orderId, [orderItemId], `supplier: ${r.reason ?? "no key"}`).catch(() => ({ ok: false as const }));
       if (refund.ok) {

@@ -46,7 +46,7 @@ async function refundPaidOrderTx(
   const undelivered = o.items.filter((i) => i.fulfilledAt === null && i.refundedAt === null);
   const full = mode === "admin" || undelivered.length === o.items.filter((i) => i.refundedAt === null).length;
   if (mode === "stock" && undelivered.length === 0) {
-    await tx.order.update({ where: { id: o.id }, data: { status: "COMPLETED", completedAt: new Date() } });
+    await tx.order.update({ where: { id: o.id }, data: { status: refundedTotal > 0 ? "PARTIALLY_REFUNDED" : "COMPLETED", completedAt: new Date() } });
     return { ok: false, reason: "NOTHING" };
   }
   // What the customer actually paid us (wallet + gateway, net of coupon).
@@ -158,9 +158,9 @@ export async function refundUndeliverableItems(
     await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${orderId} FOR UPDATE`;
     const o = await tx.order.findUnique({ where: { id: orderId }, include: { items: true, user: { select: { id: true, telegramId: true, currency: true } } } });
     if (!o) return { ok: false as const };
-    if (["REFUNDED", "CANCELLED", "EXPIRED", "PENDING_PAYMENT"].includes(o.status)) return { ok: false as const };
-    // A full order refund already happened — nothing left to pay per line.
-    const whole = await tx.walletTransaction.findFirst({ where: { idempotencyKey: { in: [`refund:order:${o.id}`] } }, select: { id: true } });
+    if (["REFUNDED", "PARTIALLY_REFUNDED", "CANCELLED", "EXPIRED", "PENDING_PAYMENT"].includes(o.status)) return { ok: false as const };
+    // An order-level refund already happened (any of its keys) — nothing left to pay per line.
+    const whole = await tx.walletTransaction.findFirst({ where: { idempotencyKey: { in: [`refund:order:${o.id}`, `refund:stock:${o.id}`, `refund:admin:${o.id}`] } }, select: { id: true } });
     if (whole) return { ok: false as const };
     const targets = o.items.filter((i) => itemIds.includes(i.id) && i.fulfilledAt === null && i.refundedAt === null);
     if (targets.length === 0) return { ok: false as const };
@@ -170,7 +170,13 @@ export async function refundUndeliverableItems(
     const creditCur = (wal?.currency ?? o.currency) as Currency;
     let credited = 0;
     let bnplReduced = 0;
+    const claimedIds: string[] = [];
     for (const it of targets) {
+      // Claim the line FIRST: an admin delivering it at this very moment wins,
+      // and then no money moves for it.
+      const claim = await tx.orderItem.updateMany({ where: { id: it.id, fulfilledAt: null, refundedAt: null }, data: { refundedAt: new Date() } });
+      if (claim.count === 0) continue;
+      claimedIds.push(it.id);
       const share = Math.min(1, it.totalMinor / subtotal);
       const minor = Math.round(paidMinor * share);
       const inWallet = creditCur === o.currency ? minor : convertMinor(minor, o.currency as Currency, creditCur);
@@ -187,24 +193,24 @@ export async function refundUndeliverableItems(
         const userCur = o.user.currency as Currency;
         bnplReduced += userCur === o.currency ? owe : convertMinor(owe, o.currency as Currency, userCur);
       }
-      await tx.orderItem.update({ where: { id: it.id }, data: { refundedAt: new Date() } });
       await tx.commissionEntry.updateMany({ where: { orderItemId: it.id, releasedAt: null, clawedBackAt: null }, data: { clawedBackAt: new Date() } });
     }
+    if (claimedIds.length === 0) return { ok: false as const };
     if (bnplReduced > 0) {
       const u = await tx.user.findUnique({ where: { id: o.userId }, select: { bnplOutstandingMinor: true } });
       await tx.user.update({ where: { id: o.userId }, data: { bnplOutstandingMinor: Math.max(0, (u?.bnplOutstandingMinor ?? 0) - bnplReduced) } });
     }
     // Close the order once nothing is left to deliver.
-    const refundedIds = new Set([...o.items.filter((i) => i.refundedAt !== null).map((i) => i.id), ...targets.map((t) => t.id)]);
-    const pending = o.items.filter((i) => i.fulfilledAt === null && !refundedIds.has(i.id));
-    const delivered = o.items.filter((i) => i.fulfilledAt !== null);
+    const now = await tx.orderItem.findMany({ where: { orderId: o.id }, select: { fulfilledAt: true, refundedAt: true } });
+    const pending = now.filter((i) => i.fulfilledAt === null && i.refundedAt === null);
+    const delivered = now.filter((i) => i.fulfilledAt !== null);
     if (pending.length === 0) {
       const allRefunded = delivered.length === 0;
       await tx.order.update({ where: { id: o.id }, data: allRefunded ? { status: "REFUNDED", cancelledAt: new Date() } : { status: "PARTIALLY_REFUNDED" } });
       if (allRefunded) await tx.referralReward.updateMany({ where: { orderId: o.id, status: "PENDING_HOLD" }, data: { status: "WITHHELD", withheldReason: "order refunded" } });
     }
-    await tx.auditLog.create({ data: { actorType: "SYSTEM", action: "order.refund.undeliverable", entityType: "Order", entityId: o.id, after: { items: targets.map((t) => t.id), credited, creditCur, bnplReduced, reason: reason.slice(0, 200) } } });
-    return { ok: true as const, refundedMinor: credited, currency: creditCur as string, telegramId: o.user.telegramId, orderNumber: o.orderNumber, names: targets.map((t) => t.productNameSnap), bnplReduced };
+    await tx.auditLog.create({ data: { actorType: "SYSTEM", action: "order.refund.undeliverable", entityType: "Order", entityId: o.id, after: { items: claimedIds, credited, creditCur, bnplReduced, reason: reason.slice(0, 200) } } });
+    return { ok: true as const, refundedMinor: credited, currency: creditCur as string, telegramId: o.user.telegramId, orderNumber: o.orderNumber, names: targets.filter((t) => claimedIds.includes(t.id)).map((t) => t.productNameSnap), bnplReduced };
   });
   if (!r.ok) return { ok: false };
   if (r.telegramId != null) {

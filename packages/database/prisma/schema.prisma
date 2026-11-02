@@ -822,11 +822,11 @@ model OrderItem {
   /// Cost of the unit actually delivered, snapshotted at delivery in USD minor
   /// units. Snapshotted because supplier costs change and history must not.
   costMinor       Int?
-  /// Set when this unit was replaced. The original payload below is NOT cleared —
-  /// the customer must always be able to see what they were originally given.
   /// Refunded to the buyer's wallet because it could not be delivered (e.g.
   /// the supplier rejected the order). A refunded line is never retried.
   refundedAt      DateTime?
+  /// Set when this unit was replaced. The original payload below is NOT cleared —
+  /// the customer must always be able to see what they were originally given.
   replacedAt      DateTime?
   /// The unit that superseded this one (lives on the replacement order).
   replacedByItemId String?  @unique

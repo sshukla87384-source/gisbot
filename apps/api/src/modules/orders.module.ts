@@ -91,7 +91,7 @@ export class OrdersController {
       take: 200,
       include: {
         user: { select: { telegramHandle: true, firstName: true } },
-        items: { where: { fulfilledAt: null }, include: { variant: { include: { product: { select: { name: true, type: true } } } } } },
+        items: { where: { fulfilledAt: null, refundedAt: null }, include: { variant: { include: { product: { select: { name: true, type: true } } } } } },
       },
     });
   }
@@ -124,6 +124,8 @@ export class OrdersController {
     const item = await prisma.orderItem.findFirst({ where: { id: itemId, orderId: id } });
     if (!item) throw notFound("Order item");
     if (item.fulfilledAt) throw conflict("ALREADY_FULFILLED", "This item is already fulfilled.");
+    // Refunded as undeliverable: the customer has their money back.
+    if (item.refundedAt) throw conflict("REFUNDED", "This item was refunded to the customer — it can't be delivered now.");
 
     const payload: Record<string, string | undefined> = { kind: data.kind };
     if (data.kind === "LICENSE_KEY") payload.key = data.key;
@@ -132,15 +134,18 @@ export class OrdersController {
       payload.password = data.password;
     } else payload.text = data.text;
 
-    await prisma.orderItem.update({
-      where: { id: itemId },
+    // Conditional claim: never over a line delivered or refunded meanwhile.
+    const claimed = await prisma.orderItem.updateMany({
+      where: { id: itemId, fulfilledAt: null, refundedAt: null },
       data: { fulfilledAt: new Date(), deliveryPayloadEncrypted: encryptSecret(JSON.stringify(payload), master) },
     });
+    if (claimed.count === 0) throw conflict("ALREADY_FULFILLED", "This item was delivered or refunded meanwhile.");
 
-    // Complete the order once all its items are fulfilled.
-    const remaining = await prisma.orderItem.count({ where: { orderId: id, fulfilledAt: null } });
+    // Complete the order once nothing is left to deliver (refunded lines are settled).
+    const remaining = await prisma.orderItem.count({ where: { orderId: id, fulfilledAt: null, refundedAt: null } });
     if (remaining === 0) {
-      await prisma.order.update({ where: { id }, data: { status: "COMPLETED", completedAt: new Date() } });
+      const anyRefunded = (await prisma.orderItem.count({ where: { orderId: id, refundedAt: { not: null } } })) > 0;
+      await prisma.order.update({ where: { id }, data: { status: anyRefunded ? "PARTIALLY_REFUNDED" : "COMPLETED", completedAt: new Date() } });
     }
 
     const order = await prisma.order.findUnique({ where: { id }, include: { user: true } });

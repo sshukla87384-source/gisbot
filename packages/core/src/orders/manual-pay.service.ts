@@ -589,7 +589,7 @@ export async function listPendingManualItems(orderId: string): Promise<{ orderNu
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { items: true } });
   if (!order) return { orderNumber: "?", items: [] };
   const items = order.items
-    .filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null)
+    .filter((i) => i.fulfillmentMode === "MANUAL" && i.fulfilledAt === null && i.refundedAt === null)
     .map((i) => ({ id: i.id, productName: i.productNameSnap, variantName: i.variantNameSnap }));
   return { orderNumber: order.orderNumber, items };
 }
