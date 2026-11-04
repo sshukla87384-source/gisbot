@@ -50,6 +50,12 @@ export default function DeveloperPage() {
     onError: (e) => toast(errorMessage(e), "error"),
   });
 
+  const resetPrices = useMutation({
+    mutationFn: (id: string) => apiData<{ ok: boolean; reset: number }>(`/apikeys/${id}/reset-prices`, { method: "POST" }),
+    onSuccess: (r) => toast(r.ok ? `${r.reset} selling price(s) reset` : "This key has no customer"),
+    onError: (e) => toast(errorMessage(e), "error"),
+  });
+
   const reactivate = useMutation({
     mutationFn: (id: string) => apiData<{ ok: boolean; reason?: string }>(`/apikeys/${id}/reactivate`, { method: "POST" }),
     onSuccess: (r) => {
@@ -154,6 +160,11 @@ export default function DeveloperPage() {
                 <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-3">
                   {k.owner ? <a className="text-sm text-indigo-600 hover:underline" href={`/users/${k.owner.id}`}>Open customer →</a> : null}
                   <span className="text-xs text-slate-400">Scopes: {k.scopes.join(", ")}</span>
+                  {k.owner ? (
+                    <Button variant="secondary" disabled={resetPrices.isPending} onClick={() => { if (confirm(`Reset every selling price ${k.owner?.label ?? "this reseller"} set? Their API shows your normal prices again.`)) resetPrices.mutate(k.id); }}>
+                      Reset all selling prices
+                    </Button>
+                  ) : null}
                   {!k.revokedAt ? (
                     <>
                       <Button variant="secondary" disabled={setScopesM.isPending} onClick={() => setScopesM.mutate({ id: k.id, scopes: k.canPurchase ? READ_SCOPES : BUY_SCOPES })}>

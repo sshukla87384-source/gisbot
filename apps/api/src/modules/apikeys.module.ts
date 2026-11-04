@@ -1,4 +1,4 @@
-import { API_SCOPES, createApiKey, listApiKeys, reactivateApiKey, revokeApiKey, setApiKeyScopes } from "@gis/core";
+import { API_SCOPES, createApiKey, getApiKeyAdmin, listApiKeys, reactivateApiKey, resetResellerSellPrices, revokeApiKey, setApiKeyScopes } from "@gis/core";
 import { Body, Controller, Get, Module, Param, Post, Query, Req } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { z } from "zod";
@@ -64,6 +64,17 @@ export class ApiKeysController {
     await setApiKeyScopes(id, data.scopes);
     await writeAudit(req, "apikey.scopes", "ApiKey", id, undefined, { scopes: data.scopes });
     return { ok: true };
+  }
+
+  @RequirePermission("apikeys.manage")
+  @Post(":id/reset-prices")
+  async resetPrices(@Param("id") id: string, @Req() req: ApiRequest) {
+    // Every selling price the key's reseller set, in one go.
+    const k = await getApiKeyAdmin(id);
+    if (!k?.ownerUserId) return { ok: false, reset: 0 };
+    const reset = await resetResellerSellPrices(k.ownerUserId);
+    await writeAudit(req, "apikey.resetPrices", "ApiKey", id, undefined, { reset });
+    return { ok: true, reset };
   }
 
   @RequirePermission("apikeys.manage")

@@ -101,6 +101,7 @@ import {
   type ButtonLabelKey,
   revokeApiKey,
   getApiKeyAdmin,
+  resetResellerSellPrices,
   reactivateApiKey,
   announceProduct,
   announceFlashSale,
@@ -1099,6 +1100,7 @@ async function apiKeyDetailView(ctx: Ctx, id: string): Promise<void> {
     kb.add(sbtn("♻️ Re-activate", cb("adm", "apireact", k.id), "success")).row();
   }
   if (o) {
+    if (k.sellPrices > 0) kb.add(sbtn(`♻️ Reset all ${k.sellPrices} selling price(s)`, cb("adm", "apiprq", k.id), "danger")).row();
     kb.text("👤 Customer profile", cb("adm", "uinfo", o.id)).text("📦 Their orders", cb("adm", "uord", o.id)).row();
   }
   kb.text("◀️ API keys", cb("adm", "apikeys"));
@@ -5093,6 +5095,22 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         .text("✖️ No", cb("adm", "apik", id));
       await show(ctx, `Revoke the key of <b>${escapeHtml(k?.owner?.label ?? k?.name ?? "this reseller")}</b>?\n\nTheir apps stop working at once. You can re-activate it later.`, kb, true);
       return;
+    }
+    case "apiprq": {
+      const k = await getApiKeyAdmin(id);
+      if (!k?.owner) { flash(ctx, "This key has no customer, so there are no selling prices to reset."); return apiKeyDetailView(ctx, id); }
+      const kb = new InlineKeyboard()
+        .add(sbtn(`♻️ Yes, reset all ${k.sellPrices}`, cb("adm", "apipr", id), "danger"))
+        .text("✖️ No", cb("adm", "apik", id));
+      await show(ctx, `Reset <b>every</b> selling price <b>${escapeHtml(k.owner.label)}</b> set?\n\nTheir API will show our normal price on all ${k.sellPrices} product(s) again. What they pay us does not change.`, kb, true);
+      return;
+    }
+    case "apipr": {
+      const k = await getApiKeyAdmin(id);
+      if (!k?.ownerUserId) { flash(ctx, "This key has no customer."); return apiKeyDetailView(ctx, id); }
+      const n = await resetResellerSellPrices(k.ownerUserId);
+      flash(ctx, `♻️ <b>${n}</b> selling price(s) reset — their API shows our price again.`);
+      return apiKeyDetailView(ctx, id);
     }
     case "apireact": {
       const r = await reactivateApiKey(id);

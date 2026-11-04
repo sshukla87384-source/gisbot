@@ -826,6 +826,16 @@ export async function migrateLegacySellPrices(_userId?: string): Promise<void> {
   sellMigrated = true;
 }
 
+/**
+ * Admin: wipe EVERY selling price a reseller set (🏷 My Selling Price), so
+ * their API shows our price again on all products. Returns how many went.
+ */
+export async function resetResellerSellPrices(userId: string): Promise<number> {
+  const { count } = await prisma.resellerSellPrice.deleteMany({ where: { userId } });
+  await invalidate("cat:*");
+  return count;
+}
+
 /** Set or clear a reseller's own API selling price for one product (display only). */
 export async function setResellerPrice(
   userId: string,
