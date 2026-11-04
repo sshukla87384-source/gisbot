@@ -110,6 +110,8 @@ export interface View {
   text: string;
   kb: InlineKeyboard;
   photo?: string; // optional image URL → product card / broadcast image
+  /** Set by the renderer: show this image as a large link preview above a text message. */
+  linkPreview?: string;
 }
 
 export async function menuView(user: BotUser): Promise<View> {
@@ -253,6 +255,36 @@ function timeLeft(until: Date): string {
   return `${m}m left`;
 }
 
+/**
+ * One product-page section (How to use / Terms & Conditions) as its own quote
+ * card under the description: a bold title, then one line per point. Lines the
+ * operator numbered or marked themselves (1. / ✅ / • …) are kept exactly as
+ * written; otherwise steps are numbered and terms get a bullet. A long terms
+ * card is expandable, so it never pushes the Buy button off the screen.
+ */
+function sectionBlock(title: string, html: string | null, kind: "steps" | "bullets"): string {
+  if (!html) return "";
+  const lines = html
+    .replace(/<\/?blockquote[^>]*>/gi, "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  // The operator often types the heading themselves — ours is already there.
+  const heading = /^(?:<[^>]+>|[\p{Extended_Pictographic}\uFE0F\s])*(?:how\s*to\s*use|terms?\s*(?:&amp;|&|and)?\s*conditions?|t\s*&amp;\s*c)\s*:?\s*(?:<\/[^>]+>|\s)*$/iu;
+  if (lines[0] && heading.test(lines[0])) lines.shift();
+  if (lines.length === 0) return "";
+  const own = /^(?:<[^>]+>)*\s*(?:\d{1,2}\s*[.)\-:]|[•▪▫◾◽‣·*]|[\p{Extended_Pictographic}])/u;
+  const anyOwn = lines.some((l) => own.test(l));
+  let n = 0;
+  const body = lines.map((l) => {
+    if (anyOwn) return l.replace(/^-\s+/, "• ");
+    const t = l.replace(/^-\s+/, "");
+    return kind === "steps" ? `<b>${++n}.</b> ${t}` : `• ${t}`;
+  });
+  const open = kind === "bullets" && lines.length > 4 ? "<blockquote expandable>" : "<blockquote>";
+  return `${open}${title}\n${body.join("\n")}</blockquote>`;
+}
+
 export async function productView(user: BotUser, productId: string): Promise<View> {
   const [p, rating, store, quotes, watchingStock, watchingPrice] = await Promise.all([
     getProductView(productId, user.currency as Currency, user.id, "DIRECT", user.locale),
@@ -301,6 +333,8 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
   const descBlock = descLines.length > 0
     ? `<blockquote>${descLines.map((l) => (anyMarked || marked.test(l) ? l : `✅ ${l}`)).join("\n")}</blockquote>`
     : "";
+  const howBlock = sectionBlock("📋 <b>How to use</b>", p.howToUse, "steps");
+  const termsBlock = sectionBlock("📜 <b>Terms &amp; Conditions</b>", p.terms, "bullets");
   const stockLine = priced.some((v) => v.stock >= UNLIMITED)
     ? "📊 <b>Stock:</b> Available"
     : anyStock
@@ -317,6 +351,8 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       ? [`📦 <b>Bulk:</b> ` + p.bulkLadder.map((t) => `${t.minQty}+ → <b>${fmt(t.unitPriceMinor, user.currency)}</b>`).join(" · ")]
       : []),
     ...(descBlock ? ["", descBlock] : []),
+    ...(howBlock ? ["", howBlock] : []),
+    ...(termsBlock ? ["", termsBlock] : []),
     "",
     stockLine,
     ...(totalStock > 0 && totalStock <= 5 && !p.onSale ? ["⚡ <i>Selling fast — only a few left.</i>"] : []),

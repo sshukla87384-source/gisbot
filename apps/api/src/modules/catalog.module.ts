@@ -28,6 +28,9 @@ function normalizeProduct<T extends Record<string, unknown>>(data: T): T {
   if (d.imageUrl === "") d.imageUrl = null;
   else if (typeof d.imageUrl === "string" && !/^https?:\/\/\S+$/i.test(d.imageUrl.trim())) delete d.imageUrl;
   if (d.iconEmoji === "") d.iconEmoji = null;
+  for (const k of ["howToUse", "terms"] as const) {
+    if (typeof d[k] === "string") d[k] = (d[k] as string).trim() === "" ? null : (d[k] as string).trim();
+  }
   for (const k of ["saleStartsAt", "saleEndsAt"] as const) {
     if (!(k in d)) continue; // absent → leave unchanged
     if (d[k] === "" || d[k] == null) d[k] = null; // explicit clear
@@ -48,6 +51,9 @@ const createProduct = z.object({
   categoryId: z.string().min(1),
   fulfillmentMode: fulfillMode.default("AUTOMATIC"),
   activationGuide: z.string().max(4000).optional(),
+  // Product page sections. "" = follow the shop default; "__off__" = hidden.
+  howToUse: z.string().max(3000).optional(),
+  terms: z.string().max(3000).optional(),
   sourcingNote: z.string().max(1000).optional(),
   isFeatured: z.boolean().optional(),
   // A photo uploaded in the bot can be stored as a Telegram file id (when it

@@ -14,6 +14,7 @@ interface Variant { id: string; name: string; sku: string; isActive: boolean; pr
 interface Product {
   id: string; name: string; description: string | null; status: string; fulfillmentMode: string;
   imageUrl: string | null; iconEmoji: string | null;
+  howToUse: string | null; terms: string | null;
   salePercentBp: number | null; saleStartsAt: string | null; saleEndsAt: string | null;
   variants: Variant[];
 }
@@ -34,11 +35,13 @@ export default function ProductDetail() {
   const [fields, setFields] = useState({
     name: "", description: "", status: "DRAFT", fulfillmentMode: "AUTOMATIC",
     imageUrl: "", iconEmoji: "", salePercent: "", saleStartsAt: "", saleEndsAt: "",
+    howToUse: "", terms: "",
   });
   useEffect(() => {
     if (data) setFields({
       name: data.name, description: data.description ?? "", status: data.status, fulfillmentMode: data.fulfillmentMode,
       imageUrl: data.imageUrl ?? "", iconEmoji: data.iconEmoji ?? "",
+      howToUse: data.howToUse ?? "", terms: data.terms ?? "",
       salePercent: data.salePercentBp ? String(data.salePercentBp / 100) : "",
       saleStartsAt: toLocal(data.saleStartsAt), saleEndsAt: toLocal(data.saleEndsAt),
     });
@@ -50,6 +53,7 @@ export default function ProductDetail() {
       const body: Record<string, unknown> = {
         name: fields.name, description: fields.description, status: fields.status,
         fulfillmentMode: fields.fulfillmentMode, imageUrl: fields.imageUrl, iconEmoji: fields.iconEmoji,
+        howToUse: fields.howToUse, terms: fields.terms,
         salePercentBp: Number.isFinite(pct) ? pct : 0,
         saleStartsAt: toIso(fields.saleStartsAt), saleEndsAt: toIso(fields.saleEndsAt),
       };
@@ -84,6 +88,9 @@ export default function ProductDetail() {
           <div><Label>Status</Label><Select value={fields.status} onChange={(e) => setFields({ ...fields, status: e.target.value })}>{STATUSES.map((s) => <option key={s}>{s}</option>)}</Select></div>
           <div><Label>Fulfillment</Label><Select value={fields.fulfillmentMode} onChange={(e) => setFields({ ...fields, fulfillmentMode: e.target.value })}><option>AUTOMATIC</option><option>MANUAL</option></Select></div>
           <div className="md:col-span-2"><Label>Description</Label><Textarea rows={3} value={fields.description} onChange={(e) => setFields({ ...fields, description: e.target.value })} /></div>
+          <div><Label>📋 How to use (one step per line)</Label><Textarea rows={4} value={fields.howToUse} onChange={(e) => setFields({ ...fields, howToUse: e.target.value })} placeholder={"Enter the email address\nEnter the password\nUse the 2FA key to get the OTP"} /></div>
+          <div><Label>📜 Terms &amp; Conditions (one per line)</Label><Textarea rows={4} value={fields.terms} onChange={(e) => setFields({ ...fields, terms: e.target.value })} placeholder={"No refund after delivery\nWarranty: 25 days"} /></div>
+          <p className="md:col-span-2 -mt-1 text-xs text-slate-400">Leave empty to use the shop-wide default (set in the bot: Admin → Content &amp; Style). Type <code>__off__</code> to hide a section on this product.</p>
 
           <div className="md:col-span-2">
             <Label>Product image (optional)</Label>

@@ -459,7 +459,19 @@ export function createBot(): Bot<Ctx> {
   const stripEmoji = (html: string): string => html.replace(/<tg-emoji[^>]*>(.*?)<\/tg-emoji>/g, "$1");
 
   const render = async (ctx: Ctx, view: View, edit: boolean): Promise<number | undefined> => {
-    const opts = { parse_mode: "HTML" as const, reply_markup: view.kb };
+    // A photo caption holds only 1024 characters, so a product page with its
+    // description, How to use and Terms was cut off mid-sentence. When the text
+    // would not fit and the image is a web link, send it as a normal message
+    // with the image as a large preview ABOVE the text: same look, 4096 chars.
+    if (view.photo && view.text.length > 1024 && /^https?:\/\//i.test(view.photo)) {
+      const url = view.photo;
+      view = { ...view, photo: undefined, linkPreview: url };
+    }
+    const opts = {
+      parse_mode: "HTML" as const,
+      reply_markup: view.kb,
+      ...(view.linkPreview ? { link_preview_options: { url: view.linkPreview, show_above_text: true, prefer_large_media: true } } : {}),
+    };
     let sentId: number | undefined;
     // Tag-aware: slicing raw HTML cut through <a>/<tg-emoji>, Telegram refused
     // the caption and the fallbacks below lost the photo and the buttons.

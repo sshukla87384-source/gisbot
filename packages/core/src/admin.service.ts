@@ -424,6 +424,43 @@ export async function setProductActivationGuide(productId: string, guide: string
   await invalidate("cat:*");
 }
 
+// ───────────── Product page: How to use / Terms & Conditions ─────────────
+
+/** Stored on a product to hide a section there even when a shop default exists. */
+export const PRODUCT_SECTION_OFF = "__off__";
+export type ProductSection = "howto" | "terms";
+const SECTION_DEFAULT_KEY: Record<ProductSection, string> = { howto: "product.howto.default", terms: "product.terms.default" };
+
+/**
+ * Set a product's How to use / Terms section. `value` null = follow the shop
+ * default, PRODUCT_SECTION_OFF = hide it on this product, otherwise the text
+ * (plain, or Telegram HTML from a formatted message — rendered like a description).
+ */
+export async function setProductSection(productId: string, section: ProductSection, value: string | null): Promise<void> {
+  const v = value === null ? null : value === PRODUCT_SECTION_OFF ? PRODUCT_SECTION_OFF : value.trim().slice(0, 3000) || null;
+  await prisma.product.update({ where: { id: productId }, data: section === "howto" ? { howToUse: v } : { terms: v } });
+  await invalidate("cat:*");
+}
+
+export async function getProductSections(productId: string): Promise<{ howto: string | null; terms: string | null }> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { howToUse: true, terms: true } });
+  return { howto: p?.howToUse ?? null, terms: p?.terms ?? null };
+}
+
+/** Shop-wide defaults, shown on every product that has no section of its own. */
+export async function getProductSectionDefaults(): Promise<{ howto: string; terms: string }> {
+  const rows = await prisma.setting.findMany({ where: { key: { in: Object.values(SECTION_DEFAULT_KEY) } } });
+  const val = (k: string) => { const r = rows.find((x) => x.key === k); return typeof r?.value === "string" ? r.value : ""; };
+  return { howto: val(SECTION_DEFAULT_KEY.howto), terms: val(SECTION_DEFAULT_KEY.terms) };
+}
+
+export async function setProductSectionDefault(section: ProductSection, value: string): Promise<void> {
+  const key = SECTION_DEFAULT_KEY[section];
+  const v = value.trim().slice(0, 3000);
+  await prisma.setting.upsert({ where: { key }, create: { key, value: v }, update: { value: v } });
+  await invalidate("cat:*");
+}
+
 // ───────────── Customisable button labels ─────────────
 
 export const BUTTON_LABEL_KEYS = ["shop", "categories", "orders", "wallet", "account", "support", "referral", "currency", "language", "developer"] as const;

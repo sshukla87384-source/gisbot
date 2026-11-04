@@ -165,6 +165,11 @@ import {
   setProductName,
   setProductDescription,
   setProductActivationGuide,
+  setProductSection,
+  getProductSections,
+  getProductSectionDefaults,
+  setProductSectionDefault,
+  PRODUCT_SECTION_OFF,
   setProductButton,
   setProductStatus,
   setProductBulkTiers,
@@ -593,6 +598,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
     m_content: { title: "🎨 <b>Content & Style</b>", subtitle: "Customise how the bot looks & reads", rows: [
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
+      [["📋 How to use (all products)", cb("adm", "defhow"), "primary"], ["📜 Terms (all products)", cb("adm", "defterms"), "primary"]],
       [["😴 Sold-out products", cb("adm", "hidesold"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
@@ -921,6 +927,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("📦 Bulk discounts", cb("adm", "pbulk", p.id)).text("🔥 Announce bulk deal", cb("adm", "pbulkann", p.id));
   kb.row().text("📣 Announce restock (+qty)", cb("adm", "prestock", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
+  kb.text("📋 How to use", cb("adm", "phow", p.id)).text("📜 Terms & Conditions", cb("adm", "pterms", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
@@ -4794,6 +4801,46 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "✏️ Send the new <b>description</b> (one feature per line looks best):");
       return;
     }
+    case "phow":
+    case "pterms": {
+      const section = action === "phow" ? "howto" : "terms";
+      const [own, defs] = await Promise.all([getProductSections(id), getProductSectionDefaults()]);
+      const cur = section === "howto" ? own.howto : own.terms;
+      const def = section === "howto" ? defs.howto : defs.terms;
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = section === "howto" ? "admin_p_howto" : "admin_p_terms";
+      const label = section === "howto" ? "📋 <b>How to use</b>" : "📜 <b>Terms &amp; Conditions</b>";
+      await askStep(ctx, [
+        `${label} — shown on the product page under the description, as its own card.`,
+        "",
+        cur === PRODUCT_SECTION_OFF
+          ? "Now: <b>hidden</b> on this product."
+          : cur
+            ? `Now (this product):\n<blockquote>${escapeHtml(cur.slice(0, 700))}</blockquote>`
+            : def ? `Now: the shop default —\n<blockquote>${escapeHtml(def.slice(0, 700))}</blockquote>` : "Now: not set.",
+        "",
+        section === "howto"
+          ? "Send the steps, <b>one per line</b> — they are numbered for you:\n<code>Enter the email address\nEnter the password\nUse the 2FA key to get the OTP\nEnter the OTP and log in</code>"
+          : "Send the terms, <b>one per line</b> — each gets a bullet:\n<code>No refund after delivery\nDo not change the password\nWarranty: 25 days</code>",
+        "",
+        "Bold / premium emoji are kept. Send <code>-</code> to use the shop default, or <code>off</code> to hide it on this product.",
+      ].join("\n"));
+      return;
+    }
+    case "defhow":
+    case "defterms": {
+      const section = action === "defhow" ? "howto" : "terms";
+      const defs = await getProductSectionDefaults();
+      const cur = section === "howto" ? defs.howto : defs.terms;
+      ctx.session.awaiting = section === "howto" ? "admin_def_howto" : "admin_def_terms";
+      await askStep(ctx, [
+        section === "howto" ? "📋 <b>How to use — all products</b>" : "📜 <b>Terms &amp; Conditions — all products</b>",
+        "Shown on every product page that has no text of its own (a product can override it or hide it from its own screen).",
+        cur ? `\nCurrent:\n<blockquote>${escapeHtml(cur.slice(0, 900))}</blockquote>` : "\nNone set yet.",
+        "\nSend the text, <b>one point per line</b>, or <code>-</code> to clear.",
+      ].join("\n"));
+      return;
+    }
     case "pguide": {
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_guide";
@@ -5380,6 +5427,41 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       .text("⚪️ Default", cb("adm", "pbtncol", `${pid}~default`)).row();
     await ctx.reply(text.trim() === "-" ? "Label kept. Pick the button colour:" : "✅ Label saved. Pick the button colour:", { parse_mode: "HTML", reply_markup: kb });
     ctx.session.awaiting = null;
+    return true;
+  }
+  if (awaiting === "admin_p_howto" || awaiting === "admin_p_terms") {
+    const pid = ctx.session.admProductId ?? ""; ctx.session.admProductId = undefined;
+    if (!pid) { await ctx.reply("That product expired — open it again and tap the button."); return true; }
+    const section = awaiting === "admin_p_howto" ? "howto" : "terms";
+    const t = text.trim();
+    const name = section === "howto" ? "How to use" : "Terms & Conditions";
+    if (t === "-") {
+      await setProductSection(pid, section, null);
+      await ctx.reply(`↩️ ${name}: this product now uses the shop default.`);
+    } else if (/^off$/i.test(t)) {
+      await setProductSection(pid, section, PRODUCT_SECTION_OFF);
+      await ctx.reply(`🙈 ${name} hidden on this product.`);
+    } else {
+      const d = descriptionFromMessage(ctx, text);
+      await setProductSection(pid, section, d.descriptionHtml ?? d.description);
+      await ctx.reply(`✅ ${name} saved — customers see it on the product page.`);
+    }
+    await productView(ctx, pid);
+    return true;
+  }
+  if (awaiting === "admin_def_howto" || awaiting === "admin_def_terms") {
+    const section = awaiting === "admin_def_howto" ? "howto" : "terms";
+    const name = section === "howto" ? "How to use" : "Terms & Conditions";
+    if (text.trim() === "-") {
+      await setProductSectionDefault(section, "");
+      await ctx.reply(`🧹 Default ${name} cleared.`);
+    } else {
+      const d = descriptionFromMessage(ctx, text);
+      await setProductSectionDefault(section, d.descriptionHtml ?? d.description);
+      await ctx.reply(`✅ Default ${name} saved — shown on every product without its own.`);
+    }
+    ctx.session.awaiting = null;
+    await sendPanel(ctx, false);
     return true;
   }
   if (awaiting === "admin_p_guide") {

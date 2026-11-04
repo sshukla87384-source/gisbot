@@ -1,4 +1,4 @@
-import { plainDescription } from "../tg-html.js";
+import { plainDescription, richDescription } from "../tg-html.js";
 import { prisma, type Currency } from "@gis/database";
 import { sha256Hex } from "@gis/shared";
 import { CoreError, effectiveHours, PAGE_SIZE } from "@gis/shared";
@@ -77,6 +77,11 @@ export interface ProductView {
   type: string;
   fulfillmentMode: string;
   activationGuide: string | null;
+  /** "📋 How to use" for the product page — Telegram HTML, already resolved
+   *  against the shop default (null = no section). */
+  howToUse: string | null;
+  /** "📜 Terms & Conditions" for the product page — same rules as howToUse. */
+  terms: string | null;
   isPlatform: boolean;
   supplierBacked: boolean;
   warranty: boolean;
@@ -522,13 +527,31 @@ async function getProductViewUncached(productId: string, currency: Currency, use
   // Translation works on the plain text: markup in an imported description
   // would otherwise come back mangled by the translator.
   const plainDesc = plainDescription(p.description, null);
+  // How to use / Terms: the product's own text, else the shop default; a
+  // product can switch a section off ("__off__") even when a default exists.
+  const defs = await prisma.setting.findMany({ where: { key: { in: ["product.howto.default", "product.terms.default"] } } }).catch(() => []);
+  const defOf = (k: string): string => { const r = defs.find((x) => x.key === k); return typeof r?.value === "string" ? r.value.trim() : ""; };
+  const sectionSrc = (own: string | null, def: string): string | null =>
+    own === "__off__" ? null : (own?.trim() || def || null);
+  const howSrc = sectionSrc(p.howToUse, defOf("product.howto.default"));
+  const termsSrc = sectionSrc(p.terms, defOf("product.terms.default"));
+  const plainHow = howSrc ? plainDescription(howSrc, null) : "";
+  const plainTerms = termsSrc ? plainDescription(termsSrc, null) : "";
   const tr = locale === "en"
-    ? [p.name, p.description ?? ""]
+    ? [p.name, p.description ?? "", plainHow, plainTerms]
     : (await Promise.race([
-        translateMany([p.name, plainDesc], locale),
+        translateMany([p.name, plainDesc, plainHow, plainTerms], locale),
         new Promise<null>((res) => setTimeout(() => res(null), 1500)),
-      ]).catch(() => null)) ?? [p.name, plainDesc];
-  const [trName, trDesc] = tr;
+      ]).catch(() => null)) ?? [p.name, plainDesc, plainHow, plainTerms];
+  const [trName, trDesc, trHow, trTerms] = tr;
+  const escT = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // English keeps the operator's formatting / premium emoji; a translation is
+  // plain text, so it is escaped.
+  const sectionOut = (src: string | null, translated: string | undefined): string | null => {
+    if (!src) return null;
+    const html = locale === "en" ? richDescription(src, null, { dropTags: ["blockquote"] }) : escT(translated || plainDescription(src, null));
+    return html.trim() || null;
+  };
   return {
     id: p.id,
     name: trName || p.name,
@@ -556,6 +579,8 @@ async function getProductViewUncached(productId: string, currency: Currency, use
     type: p.type,
     fulfillmentMode: p.fulfillmentMode,
     activationGuide: p.activationGuide,
+    howToUse: sectionOut(howSrc, trHow),
+    terms: sectionOut(termsSrc, trTerms),
     isPlatform: p.resellerId === null,
     supplierBacked: p.supplierId !== null,
     warranty: p.warranty,
