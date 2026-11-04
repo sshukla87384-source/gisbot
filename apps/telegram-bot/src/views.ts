@@ -1107,6 +1107,8 @@ export async function resellerPricesView(user: BotUser, page = 1, search?: strin
     if (res.page < res.pages) kb.text("Next ▶️", cb("api", "prices", res.page + 1));
     kb.row();
   }
+  // The reseller can undo every custom price themselves — no need to ask us.
+  if (res.customCount > 0) kb.add(sbtn(`♻️ Reset all my prices (${res.customCount})`, cb("api", "prstq"), "danger")).row();
   navRow(kb, cb("api", "home"));
   const list = res.items.map((r) => {
     const sell = r.myPriceMinor !== null ? `<b>${fmt(r.myPriceMinor, r.currency)}</b>` : "<i>our price</i>";
@@ -1125,7 +1127,7 @@ export async function resellerPricesView(user: BotUser, page = 1, search?: strin
       "",
       ...list,
       "",
-      "<i>Tap a product to set or change its price. Only products shown in this bot are listed — and only those appear in your API.</i>",
+      "<i>Tap a product to set or change its price (send <code>off</code> there to undo one). ♻️ Reset puts every product back to our price. Only products shown in this bot are listed — and only those appear in your API.</i>",
     ].filter((l) => l !== null).join("\n"),
     kb,
   };

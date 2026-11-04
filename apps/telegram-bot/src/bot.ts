@@ -46,6 +46,7 @@ import {
   revokeApiKeyOwned,
   regenerateApiKeyForOwner,
   revokeAllApiKeysForOwner,
+  resetResellerSellPrices,
   getActiveApiKeyForOwner,
   setResellerPrice,
   createTicket,
@@ -2846,6 +2847,28 @@ export function createBot(): Bot<Ctx> {
           ctx.session.rpPage = 1;
           await render(ctx, await views.resellerPricesView(user, 1), true);
           break;
+        case "api:prstq": {
+          await ctx.answerCallbackQuery();
+          await ctx.reply([
+            "♻️ <b>Reset all your selling prices?</b>",
+            "",
+            "Every product goes back to <b>our price</b> in your API feed — your custom prices are removed. You can set them again any time.",
+          ].join("\n"), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("♻️ Yes, reset all", cb("api", "prstok")).text("❌ No", cb("api", "prices", ctx.session.rpPage ?? 1)),
+          });
+          break;
+        }
+        case "api:prstok": {
+          const n = await resetResellerSellPrices(user.id);
+          await ctx.answerCallbackQuery({ text: n > 0 ? `♻️ ${n} price(s) reset` : "Nothing to reset" });
+          await ctx.reply(n > 0
+            ? `♻️ <b>Done — ${n} custom price(s) removed.</b> Your API now shows our price for every product.`
+            : "You had no custom prices — your API already shows our prices.", { parse_mode: "HTML" });
+          ctx.session.rpPage = 1;
+          await render(ctx, await views.resellerPricesView(user, 1, ctx.session.rpSearch), false);
+          break;
+        }
         case "api:setprice": {
           await ctx.answerCallbackQuery();
           ctx.session.priceProductId = args[0] ?? "";

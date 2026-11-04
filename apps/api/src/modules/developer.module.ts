@@ -228,6 +228,9 @@ export class DeveloperController {
         id: p.id,
         name: p.name,
         description: p.description,
+        // Product-page sections (Telegram HTML; null when not set).
+        howToUse: p.howToUse,
+        terms: p.terms,
         emoji: p.iconEmoji,
         imageUrl: p.imageUrl,
         currency: "USDT",
