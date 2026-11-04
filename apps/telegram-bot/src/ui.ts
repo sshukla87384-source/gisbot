@@ -38,14 +38,13 @@ export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: st
   kb
     .add(sbtn(L("shop", t(loc, "b_shopnow")), cb("shp", "home", 1), "success", I("shop")))
     .row()
-    .add(sbtn(L("categories", "🗂 Shop by Category"), cb("cat", "home"), "success", I("categories")))
-    .row()
-    .add(sbtn(L("orders", t(loc, "b_orders")), cb("ord", "list", 1), "primary", I("orders")), sbtn(L("wallet", t(loc, "b_wallet")), cb("wal", "view"), "primary", I("wallet")))
+    // "🗂 Shop by Category" and the outer "📦 My Orders" were removed at the
+    // operator's request: categories are tiles inside Shop Now, and My Orders
+    // lives inside 👤 My Account. Their handlers stay, so old buttons still work.
+    .add(sbtn(L("wallet", t(loc, "b_wallet")), cb("wal", "view"), "primary", I("wallet")), sbtn(L("account", "👤 My Account"), cb("prf", "view"), "primary", I("account")))
     .row()
     .add(sbtn("🎯 Today’s Deals", cb("dls", "home"), "danger")).row()
-    .add(sbtn(L("account", "👤 My Account"), cb("prf", "view"), "primary", I("account")), sbtn(L("support", t(loc, "b_helpsupport")), cb("sup", "home"), "primary", I("support")))
-    .row()
-    .add(sbtn(L("referral", t(loc, "b_referral")), cb("ref", "view"), "primary", I("referral")))
+    .add(sbtn(L("support", t(loc, "b_helpsupport")), cb("sup", "home"), "primary", I("support")), sbtn(L("referral", t(loc, "b_referral")), cb("ref", "view"), "primary", I("referral")))
     .row()
     .add(sbtn(L("currency", t(loc, "b_currency", { cur: user.currency })), cb("cur", "home"), "primary", I("currency")), sbtn(L("language", t(loc, "b_language")), cb("lang", "home"), "primary", I("language")))
     .row()
