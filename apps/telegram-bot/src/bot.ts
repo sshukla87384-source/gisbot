@@ -45,6 +45,7 @@ import {
   createApiKey,
   revokeApiKeyOwned,
   regenerateApiKeyForOwner,
+  revokeAllApiKeysForOwner,
   getActiveApiKeyForOwner,
   setResellerPrice,
   createTicket,
@@ -2906,6 +2907,31 @@ export function createBot(): Bot<Ctx> {
             "",
             "<i>You have one key. Tap 🔄 Regenerate Key any time — the old one stops working immediately.</i>",
           ].join("\n"), { parse_mode: "HTML" });
+          await render(ctx, await views.apiKeysView(user), false);
+          break;
+        }
+        case "api:revq": {
+          await ctx.answerCallbackQuery();
+          const cur = await getActiveApiKeyForOwner(user.id);
+          if (!cur) { await render(ctx, await views.apiKeysView(user), true); break; }
+          await ctx.reply([
+            "🗑 <b>Revoke your API key?</b>",
+            "",
+            `Key <code>${cur.prefix}</code> stops working <u>immediately</u> and no new key is created — any app or script using it stops until you generate a new one.`,
+            "",
+            "You can tap 🔑 Generate API key again any time.",
+          ].join("\n"), {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🗑 Yes, revoke", "api:revokeok").text("❌ No, keep it", "api:home"),
+          });
+          break;
+        }
+        case "api:revokeok": {
+          const n = await revokeAllApiKeysForOwner(user.id);
+          await ctx.answerCallbackQuery({ text: n > 0 ? "🗑 API key revoked" : "No active key" });
+          await ctx.reply(n > 0
+            ? "🗑 <b>API key revoked.</b> It no longer works anywhere. Tap 🔑 Generate API key whenever you want a new one."
+            : "You have no active API key.", { parse_mode: "HTML" });
           await render(ctx, await views.apiKeysView(user), false);
           break;
         }

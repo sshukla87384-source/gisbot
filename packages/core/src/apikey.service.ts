@@ -213,6 +213,12 @@ export async function listApiKeysByOwner(ownerUserId: string): Promise<
   });
 }
 
+/** The customer switches their API access OFF: every live key of theirs stops at once. */
+export async function revokeAllApiKeysForOwner(ownerUserId: string): Promise<number> {
+  const res = await prisma.apiKey.updateMany({ where: { ownerUserId, revokedAt: null }, data: { revokedAt: new Date() } });
+  return res.count;
+}
+
 /** Revoke a key only if it belongs to this owner. Returns true if revoked. */
 export async function revokeApiKeyOwned(id: string, ownerUserId: string): Promise<boolean> {
   const res = await prisma.apiKey.updateMany({
