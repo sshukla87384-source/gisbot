@@ -238,6 +238,7 @@ export async function checkoutWithWallet(
           walletUsedMinor: totalMinor,
           totalMinor: 0, // nothing owed via gateway
           paidAt: new Date(),
+          channel,
         },
       });
       if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);
@@ -409,6 +410,7 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
           orderNumber, userId, status: "PAID", currency,
           subtotalMinor, discountMinor, couponId: coupon?.couponId ?? null,
           walletUsedMinor: 0, bnplMinor: totalMinor, totalMinor: 0, paidAt: new Date(),
+          channel,
         },
       });
       if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);

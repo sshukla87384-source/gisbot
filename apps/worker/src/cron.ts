@@ -28,6 +28,7 @@ import { adjustWallet, autoRefundStuckStock, dispatchDueBroadcasts, enqueueAdmin
   releaseCouponForOrderTx,
   resetPricesForSoldOut,
   syncAllSuppliers,
+  dispatchApiDeliveryWebhooks,
 } from "@gis/core";
 import { prisma } from "@gis/database";
 
@@ -486,6 +487,9 @@ export function startCronJobs(): Array<ReturnType<typeof setInterval>> {
     // never stacks syncs; unchanged products cost no writes.
     every(60, "supsync", SUPSYNC_LOCK_TTL, async () => { await syncAllSuppliers(); }, true),
     every(1800, "refundstock", 1790, async () => { await autoRefundStuckStock(); }),
+    // API orders delivered after the purchase (manual / supplier / restock):
+    // pushed to the reseller's delivery webhook, so their customer gets it.
+    every(20, "apiwebhook", 300, async () => { await dispatchApiDeliveryWebhooks(); }, true),
     // The once-a-day jobs TICK hourly and are held to once a day by a ~24 h lock
     // instead of a 24 h setInterval. An interval that long never fires at all on
     // a service that is redeployed more often than once a day: every restart put

@@ -135,6 +135,8 @@ export class CatalogController {
     const list = parseList(query, ["createdAt", "name", "sortOrder"]);
     const where = {
       deletedAt: null,
+      // Vendor products not added to the shop are listed only under that supplier.
+      supplierPending: false,
       ...(filterValue(list, "status") ? { status: filterValue(list, "status") as never } : {}),
       ...(filterValue(list, "categoryId") ? { categoryId: filterValue(list, "categoryId") } : {}),
       ...(list.search ? { name: { contains: list.search, mode: "insensitive" as const } } : {}),

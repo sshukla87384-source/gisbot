@@ -1,5 +1,6 @@
 import {
   alsoBought,
+  getApiWebhook,
   availableCryptoNetworks,
   binanceOffered,
   firstOrderAllowed,
@@ -1031,7 +1032,7 @@ export async function apiKeysView(user: BotUser): Promise<View> {
   const key = active[0];
   if (!key) kb.add(sbtn("🔑 Generate API key", cb("api", "new"), "success")).row();
   if (key) kb.text("💰 API Balance", cb("api", "balance")).text("📦 API Orders", cb("api", "orders")).row();
-  if (key) kb.text("🏷 My Selling Price", cb("api", "prices")).row();
+  if (key) kb.text("🏷 My Selling Price", cb("api", "prices")).text("🔔 Delivery webhook", cb("api", "wh")).row();
   if (key) kb.add(sbtn("🔄 Regenerate Key", cb("api", "regen"), "primary"), sbtn("🗑 Revoke Key", cb("api", "revq"), "danger")).row();
   kb.text("📖 API Documentation", cb("api", "docs")).row();
   if (active.length > 0) kb.add(sbtn("🛠 Fix permissions (403 errors)", cb("api", "fixscopes"), "primary")).row();
@@ -1057,6 +1058,36 @@ export async function apiKeysView(user: BotUser): Promise<View> {
             "Use the buttons below to manage your API access.",
           ].join("\n")
         : "📊 <b>Status:</b>  NO KEY\n\nTap 🔑 Generate API key to create your first key. You get one key, and you can regenerate it any time.",
+    ].join("\n"),
+    kb,
+  };
+}
+
+/**
+ * Where items delivered AFTER an API order (manual / supplier) are pushed, so
+ * they reach the reseller's own customer instead of only their Telegram chat.
+ */
+export async function apiWebhookView(user: BotUser, note?: string): Promise<View> {
+  const hook = await getApiWebhook(user.id);
+  const kb = new InlineKeyboard();
+  kb.add(sbtn(hook ? "✏️ Change URL" : "➕ Set webhook URL", cb("api", "whset"), "success")).row();
+  if (hook) {
+    kb.text("🧪 Send test", cb("api", "whtest")).text("🔄 New secret", cb("api", "whsec")).row();
+    kb.add(sbtn("🗑 Remove webhook", cb("api", "whdel"), "danger")).row();
+  }
+  navRow(kb, cb("api", "home"));
+  return {
+    text: [
+      header(`🔔 ${bold("Delivery webhook")}`),
+      "",
+      "Some items are delivered by our team or a supplier a few minutes <b>after</b> your API order. The moment that happens we <b>POST</b> the delivery to your server, so your customer gets it automatically.",
+      "",
+      hook
+        ? [`🌐 <b>URL:</b> <code>${escapeHtml(hook.url)}</code>`, `🔐 <b>Signing secret:</b> <tg-spoiler><code>${hook.secret}</code></tg-spoiler>`].join("\n")
+        : "🌐 <b>URL:</b> not set — deliveries are still in <code>GET /orders/{orderNumber}</code> (<code>deliveries</code>).",
+      "",
+      "<i>Body: <code>{\"event\":\"order.delivered\",\"orderNumber\",\"items\",\"deliveryText\",\"pendingItems\"}</code>. Header <code>X-Signature: sha256=HMAC(secret, body)</code>. Reply 2xx — we retry otherwise. Full details in 📖 API Documentation.</i>",
+      ...(note ? ["", note] : []),
     ].join("\n"),
     kb,
   };

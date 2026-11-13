@@ -538,6 +538,10 @@ model Product {
   /// True when a PAUSED status came from the supplier being out of stock, rather
   /// than from the operator hiding it. Sync may unpause the former, never the latter.
   supplierStockDrivenPause Boolean @default(false)
+  /// In the vendor's catalogue but NOT added to this shop by the operator. Such
+  /// rows never show anywhere (shop, admin lists, restock posts) until the
+  /// operator taps ➕ Add in the supplier's product list.
+  supplierPending Boolean @default(false)
   reusableSecretEnc String? // one value delivered to EVERY buyer (shared redemption link) — AES-GCM
   reusableStock     Int?     // how many times it may still be sold; null = unlimited
   manualStock       Int?     // optional sellable quantity for MANUAL products; null = unlimited
@@ -783,6 +787,9 @@ model Order {
   /// Binance Pay transactionId that settled this order. @unique so one payment
   /// can never settle two orders, whatever races upstream.
   binanceTxnId   String? @unique
+  /// "API" when a reseller placed it through the developer API, so a later
+  /// (manual / supplier) delivery is pushed back to their API, not just Telegram.
+  channel        String      @default("DIRECT")
   items          OrderItem[]
   payments       Payment[]
   refunds        Refund[]
@@ -811,6 +818,9 @@ model OrderItem {
   totalMinor      Int
   fulfillmentMode FulfillmentMode
   fulfilledAt     DateTime?
+  /// When this delivery was handed to the reseller's API (in the purchase
+  /// response or by the delivery webhook). null = not yet.
+  apiNotifiedAt   DateTime?
   /// When the FIRST delivery happened. A replacement does not reset this, so the
   /// warranty window continues from the original purchase.
   warrantyStartAt DateTime?

@@ -47,6 +47,10 @@ import {
   regenerateApiKeyForOwner,
   revokeAllApiKeysForOwner,
   resetResellerSellPrices,
+  setApiWebhook,
+  clearApiWebhook,
+  rotateApiWebhookSecret,
+  sendTestApiWebhook,
   getActiveApiKeyForOwner,
   setResellerPrice,
   createTicket,
@@ -1564,6 +1568,15 @@ export function createBot(): Bot<Ctx> {
         { reply_markup: new InlineKeyboard().text("💳 Wallet", cb("wal", "view")).text("🏠 Menu", "mnu:home") },
       ));
     }
+    if (awaiting === "api_webhook_url") {
+      const r = await setApiWebhook(ctx.user.id, ctx.message.text.trim());
+      if (!r.ok) {
+        ctx.session.awaiting = "api_webhook_url";
+        await ctx.reply(`❌ ${escapeHtml(r.reason)}\nSend the URL again, or tap 🏠 Menu to cancel.`, { parse_mode: "HTML" });
+        return;
+      }
+      return render(ctx, await views.apiWebhookView(ctx.user, "✅ <b>Webhook saved.</b> Tap 🧪 Send test to check your server answers."), false);
+    }
     if (awaiting === "reseller_price_search") {
       ctx.session.rpSearch = ctx.message.text.trim().slice(0, 40) || undefined;
       ctx.session.rpPage = 1;
@@ -2846,6 +2859,32 @@ export function createBot(): Bot<Ctx> {
           ctx.session.rpSearch = undefined;
           ctx.session.rpPage = 1;
           await render(ctx, await views.resellerPricesView(user, 1), true);
+          break;
+        case "api:wh":
+          await ctx.answerCallbackQuery();
+          await render(ctx, await views.apiWebhookView(user), true);
+          break;
+        case "api:whset":
+          await ctx.answerCallbackQuery();
+          ctx.session.awaiting = "api_webhook_url";
+          await ctx.reply("🔔 Send your webhook URL (must start with <code>https://</code>), e.g. <code>https://yourshop.com/hooks/delivery</code>", { parse_mode: "HTML" });
+          break;
+        case "api:whtest": {
+          await ctx.answerCallbackQuery({ text: "Sending test…" });
+          const t = await sendTestApiWebhook(user.id);
+          await render(ctx, await views.apiWebhookView(user, `${t.ok ? "✅" : "❌"} <b>Test:</b> ${escapeHtml(t.detail)}`), true);
+          break;
+        }
+        case "api:whsec": {
+          await rotateApiWebhookSecret(user.id);
+          await ctx.answerCallbackQuery({ text: "🔄 New secret created" });
+          await render(ctx, await views.apiWebhookView(user, "🔄 <b>New signing secret</b> — update it on your server; the old one no longer verifies."), true);
+          break;
+        }
+        case "api:whdel":
+          await clearApiWebhook(user.id);
+          await ctx.answerCallbackQuery({ text: "Webhook removed" });
+          await render(ctx, await views.apiWebhookView(user, "🗑 Webhook removed. Deliveries are still available from GET /orders/{orderNumber}."), true);
           break;
         case "api:prstq": {
           await ctx.answerCallbackQuery();

@@ -1,4 +1,4 @@
-import { migrateLegacySellPrices, resellerSellPriceMap, addToCart, checkoutWithWallet, checkoutWithBnpl, getBnplStatus, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
+import { apiOrderDetail, formatApiDeliveryItem, formatApiDeliveryText, markApiDelivered, migrateLegacySellPrices, resellerSellPriceMap, addToCart, checkoutWithWallet, checkoutWithBnpl, getBnplStatus, clearCart, getLedger, resellerDay, getProductView, getRedis, getWallet, listCategories, listProducts, productRating, productRatings, revealOrderDeliveries, toUsdt, usdtRate, UNLIMITED_STOCK } from "@gis/core";
 import { loadConfig } from "@gis/config";
 import { randomUUID } from "node:crypto";
 import { prisma, type Currency } from "@gis/database";
@@ -64,36 +64,10 @@ const purchaseSchema = z.object({
  * `username|password[|2fa]` for an account, one line per unit. The default
  * variant ("Standard") is omitted rather than repeated on every line.
  */
-function apiDeliveryItem(d: { productName: string; variantName: string; payload: { kind: string; key?: string; username?: string; password?: string; twofa?: string; expiresAt?: string }; activationGuide?: string | null }) {
-  const p = d.payload;
-  const values: string[] = [];
-  if (p.key) values.push(...p.key.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
-  if (p.username || p.password) values.push([p.username ?? "", p.password ?? "", p.twofa ?? ""].filter(Boolean).join("|"));
-  const isDefaultVariant = d.variantName.trim().toLowerCase() === "standard";
-  return {
-    product: d.productName,
-    ...(isDefaultVariant ? {} : { variant: d.variantName }),
-    kind: p.kind,
-    value: values.join("\n"),
-    values,
-    ...(p.expiresAt ? { expiresAt: p.expiresAt } : {}),
-    secret: p as unknown,
-    ...(d.activationGuide ? { activationGuide: d.activationGuide } : {}),
-  };
-}
-
-/** Plain, numbered text a storefront can show as-is: `1.` then the value, product name once. */
-function apiDeliveryText(items: Array<ReturnType<typeof apiDeliveryItem>>): string {
-  const out: string[] = [];
-  let n = 0;
-  let lastProduct = "";
-  for (const it of items) {
-    const label = it.variant ? `${it.product} — ${it.variant}` : it.product;
-    if (label !== lastProduct) { out.push(`${out.length ? "\n" : ""}${label}`); lastProduct = label; }
-    for (const v of it.values) { n += 1; out.push(`${n}.`, v); }
-  }
-  return out.join("\n");
-}
+// The delivery shape lives in core so the delivery webhook sends exactly what
+// the purchase response and GET /orders/{n} return.
+const apiDeliveryItem = formatApiDeliveryItem;
+const apiDeliveryText = formatApiDeliveryText;
 
 @ApiTags("developer")
 @ApiSecurity("apiKey")
@@ -305,10 +279,12 @@ export class DeveloperController {
       where: { userId: ownerId },
       orderBy: { createdAt: "desc" },
       take: limit,
-      include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true } } },
+      include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, fulfilledAt: true, refundedAt: true } } },
     });
     return {
       items: rows.map((o) => ({
+        pendingManualItems: o.items.filter((i) => !i.fulfilledAt && !i.refundedAt).length,
+        deliveredItems: o.items.filter((i) => i.fulfilledAt).length,
         orderNumber: o.orderNumber,
         status: o.status,
         total: toUsdt(o.totalMinor, o.currency as Currency),
@@ -338,6 +314,10 @@ export class DeveloperController {
       include: { items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true } } },
     });
     if (!o) throw notFound("Order");
+    // Delivered values are part of the order. A manual or supplier item that is
+    // delivered after the purchase response is picked up here — before, this
+    // returned no values at all, so it only ever reached the reseller's Telegram.
+    const d = await apiOrderDetail(ownerId, o.id);
     return {
       orderNumber: o.orderNumber,
       status: o.status,
@@ -348,7 +328,15 @@ export class DeveloperController {
       totalMinor: o.totalMinor,
       createdAt: o.createdAt,
       paidAt: o.paidAt,
+      completedAt: o.completedAt,
+      // `items` stays the order lines, as before, so existing integrations keep working.
       items: o.items.map((i) => ({ product: i.productNameSnap, variant: i.variantNameSnap, quantity: i.quantity })),
+      // The delivered units — same shape as `items` in the purchase response.
+      deliveries: d.items,
+      deliveryText: d.deliveryText,
+      pendingManualItems: d.pendingItems,
+      refundedItems: d.refundedItems,
+      delivered: d.pendingItems === 0 && d.items.length > 0,
     };
   }
 
@@ -546,6 +534,8 @@ export class DeveloperController {
         }
       }
 
+      // What this response hands back must not be pushed again by the webhook.
+      await markApiDelivered(r.orderId).catch(() => undefined);
       return {
         orderNumber: r.orderNumber,
         status,
@@ -628,7 +618,7 @@ Create a key in the bot: open the menu → <b>🧑‍💻 Developer API</b> → 
   <div class="ep"><span class="m get">GET </span><code class="path">/balance</code><span class="desc">balance in USDT + ledger</span></div>
   <div class="ep"><span class="m post">POST </span><code class="path">/orders</code><span class="desc">place an order</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/orders</code><span class="desc">your recent orders</span></div>
-  <div class="ep"><span class="m get">GET </span><code class="path">/orders/{orderNumber}</code><span class="desc">a single order</span></div>
+  <div class="ep"><span class="m get">GET </span><code class="path">/orders/{orderNumber}</code><span class="desc">a single order + its delivered values</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/wallet</code><span class="desc">balance only</span></div>
   <div class="ep"><span class="m get">GET </span><code class="path">/ping</code><span class="desc">verify key + see its scopes</span></div>
 </div>
@@ -644,6 +634,20 @@ Paid from your wallet balance — top up via the bot's <b>💳 Deposit</b> menu.
   -H "Idempotency-Key: $(uuidgen)" \
   -H "Content-Type: application/json" \
   -d '{"variantId":"VARIANT_ID","quantity":1}'</pre>
+</div>
+
+<h2>Items delivered later (manual / supplier)</h2>
+<div class="card">
+Some products are delivered by our team or by a supplier a few minutes after you order. The order response then has
+<code>"pendingManualItems": 1</code> and no value for that item yet. You get it in either of two ways:
+<ul>
+<li><b>Webhook (recommended)</b> — set your URL in the bot: 🧑‍💻 Developer API → 🔔 Delivery webhook. The moment an item is delivered we <code>POST</code> to it:
+<pre>{ "event": "order.delivered", "orderNumber": "GIS-2026-000123", "status": "COMPLETED",
+  "items": [ { "id": "ITEM_ID", "product": "Netflix 1M", "value": "user@mail.com|pass123", "values": ["user@mail.com|pass123"] } ],
+  "deliveryText": "Netflix 1M\n1.\nuser@mail.com|pass123", "pendingItems": 0 }</pre>
+Headers: <code>X-Event: order.delivered</code> and <code>X-Signature: sha256=HMAC_SHA256(secret, raw body)</code> — the secret is shown in the bot. Answer <b>2xx</b>; otherwise we retry with back-off for a few hours. Use <code>items[].id</code> to ignore a repeat.</li>
+<li><b>Polling</b> — <code>GET /orders/{orderNumber}</code> returns <code>deliveries</code> (same shape as <code>items</code> in the purchase response), <code>deliveryText</code> and <code>pendingManualItems</code>. Poll until <code>pendingManualItems</code> is 0.</li>
+</ul>
 </div>
 
 <h2>Catalog response</h2>
@@ -744,7 +748,8 @@ export class DeveloperDocsController {
         balance: { method: "GET", path: "/balance", scope: "wallet:read", returns: { balance: "USDT string", currency: "USDT" } },
         wallet: { method: "GET", path: "/wallet", scope: "wallet:read" },
         orders_list: { method: "GET", path: "/orders", scope: "orders:read" },
-        order_detail: { method: "GET", path: "/orders/{orderNumber}", scope: "orders:read" },
+        order_detail: { method: "GET", path: "/orders/{orderNumber}", scope: "orders:read", returns: { deliveries: "delivered units", deliveryText: "string", pendingManualItems: "number" } },
+        delivery_webhook: { method: "POST", to: "your URL (set in the bot)", event: "order.delivered", headers: { "X-Signature": "sha256=HMAC_SHA256(secret, body)" }, body: { orderNumber: "string", status: "string", items: "delivered units", deliveryText: "string", pendingItems: "number" } },
         place_order: { method: "POST", path: "/orders", scope: "orders:write", body: { variantId: "string", quantity: "number" }, headers: { "Idempotency-Key": "unique per order" } },
         ping: { method: "GET", path: "/ping" },
       },
@@ -769,6 +774,7 @@ export class DeveloperDocsController {
         "supplierBacked=true items are fulfilled upstream but bought identically.",
         "A 403 means the key lacks a scope — GET /ping lists the key's scopes.",
         "Wallet balance is always reported in USDT (balance / balanceUsdt, currency=USDT).",
+        "Manual/supplier items delivered after the order: pushed to your delivery webhook (order.delivered) and returned by GET /orders/{orderNumber} as deliveries[]; poll until pendingManualItems is 0.",
       ],
     };
   }
@@ -817,6 +823,12 @@ export class DeveloperDocsController {
       '  stock: "variants[].stock"  ("unlimited": true means no limit)',
       '  stock (display): "variants[].stockText"  (the number, or "Unlimited")',
       '  variant label: "variants[].label"  (product name, or "Product — Variant")',
+      "",
+      "Items delivered later (manual / supplier):",
+      '  the purchase response has "pendingManualItems" > 0 and no value for them yet.',
+      '  GET /orders/{orderNumber} -> "deliveries" (same shape as purchase "items"), "deliveryText", "pendingManualItems" — poll until 0,',
+      '  or set a delivery webhook in the bot (Developer API -> Delivery webhook): we POST {"event":"order.delivered","orderNumber","status","items","deliveryText","pendingItems"}',
+      '  with header X-Signature: sha256=HMAC_SHA256(secret, raw body). Reply 2xx. Dedupe on items[].id.',
       "",
       "All amounts are USDT. There is no currency parameter.",
       "",

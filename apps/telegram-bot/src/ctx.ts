@@ -69,6 +69,7 @@ export interface SessionData {
     | "wallet_free_txn"
     | "reseller_price"
     | "reseller_price_search"
+    | "api_webhook_url"
     | "upi_ref"
     | "buy_qty"
     | "coupon_code"
@@ -186,7 +187,7 @@ export interface SessionData {
   /** Bulk supplier-product picker state. */
   supSelected?: string[];
   supPage?: number;
-  supFilter?: "all" | "visible" | "hidden" | "deleted";
+  supFilter?: "all" | "visible" | "hidden" | "deleted" | "new";
   /** "quick" = tapping a row publishes/hides it instantly; "select" = tapping ticks it. */
   supMode?: "select" | "quick";
   /** One-shot banner shown at the top of the picker after an action. */

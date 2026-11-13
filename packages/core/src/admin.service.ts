@@ -377,14 +377,16 @@ export async function getProductBriefById(id: string): Promise<ProductBrief | nu
 
 export async function listProductsBrief(limit = 20): Promise<ProductBrief[]> {
   const rows = await prisma.product.findMany({
-    where: { deletedAt: null }, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], take: limit,
+    where: { deletedAt: null, supplierPending: false }, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], take: limit,
   });
   return rows.map(toBrief);
 }
 
 /** Paginated product list for the admin panel (shows ALL products across pages). */
 export async function listProductsPage(page = 1, pageSize = 20, search?: string): Promise<{ items: ProductBrief[]; page: number; pages: number; total: number }> {
-  const where = { deletedAt: null, ...(search && search.trim() ? { name: { contains: search.trim(), mode: "insensitive" as const } } : {}) };
+  // Vendor products the operator has not added (supplierPending) are not part
+  // of the shop — they live only in that supplier's 🆕 Not added list.
+  const where = { deletedAt: null, supplierPending: false, ...(search && search.trim() ? { name: { contains: search.trim(), mode: "insensitive" as const } } : {}) };
   const total = await prisma.product.count({ where });
   const rows = await prisma.product.findMany({ where, orderBy: [{ pinRank: "desc" }, { status: "asc" }, { createdAt: "desc" }], skip: (Math.max(1, page) - 1) * pageSize, take: pageSize });
   return { items: rows.map(toBrief), page: Math.max(1, page), pages: Math.max(1, Math.ceil(total / pageSize)), total };
@@ -1857,6 +1859,7 @@ export async function listProductsForCategorising(opts: {
   const pageSize = Math.min(50, Math.max(5, opts.pageSize ?? 12));
   const where = {
     deletedAt: null,
+    supplierPending: false,
     ...(opts.search ? { name: { contains: opts.search, mode: "insensitive" as const } } : {}),
     // categoryId is required on Product, so "uncategorised" means the
     // Uncategorized bucket rather than a null.
@@ -1895,6 +1898,7 @@ export async function productIdsForCategorising(filter?: string, search?: string
   const rows = await prisma.product.findMany({
     where: {
       deletedAt: null,
+      supplierPending: false,
       ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
       ...(filter === "none" ? { category: { slug: "uncategorized" } } : filter && filter !== "all" ? { categoryId: filter } : {}),
     },

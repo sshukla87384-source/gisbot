@@ -2337,7 +2337,7 @@ const SUP_PAGE_SIZE = 12;
 
 /** Quick-mode label — on the deleted tab a tap restores rather than publishes. */
 function deletedTabLabel(only: string): string {
-  return only === "deleted" ? "⚡ Tapping = restore instantly" : "⚡ Tapping = publish/hide instantly";
+  return only === "deleted" ? "⚡ Tapping = restore instantly" : only === "new" ? "⚡ Tapping = ➕ add to shop instantly" : "⚡ Tapping = publish/hide instantly";
 }
 
 /** The rows currently on screen, so an index in callback data can be resolved back to an id. */
@@ -2376,9 +2376,9 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     await show(ctx, [
       "📂 <b>Supplier products</b>",
       "",
-      "Nothing imported yet. Tap 🔄 <b>Sync catalog</b> to pull this vendor's products in.",
+      "Nothing imported yet. Tap 🔄 <b>Sync catalog</b> to see this vendor's products.",
       "",
-      "They arrive <b>hidden</b> — nothing reaches your shop until you publish it here.",
+      "They arrive under 🆕 <b>Not added</b> — nothing is added to your shop (and nothing gets stock) until you ➕ Add it here.",
     ].join("\n"), kb, true);
     return;
   }
@@ -2398,9 +2398,12 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   }
 
   // ── Filter tabs ──
-  const f = (label: string, key: "all" | "visible" | "hidden" | "deleted") =>
+  const f = (label: string, key: "all" | "visible" | "hidden" | "deleted" | "new") =>
     kb.text(only === key ? `• ${label} •` : label, cb("adm", "spfil", `${supplierId}~${key}`));
-  f("All", "all"); f(`👁 ${counts.shown}`, "visible"); f(`🙈 ${counts.hidden}`, "hidden");
+  // 🆕 = the vendor's catalogue that is NOT in the shop; the other tabs are
+  // the products the operator has added.
+  f(`🆕 Not added: ${counts.pending}`, "new"); kb.row();
+  f("✅ Added", "all"); f(`👁 ${counts.shown}`, "visible"); f(`🙈 ${counts.hidden}`, "hidden");
   if (counts.deleted > 0) f(`🗑 ${counts.deleted}`, "deleted");
   kb.row();
 
@@ -2412,6 +2415,7 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   // the route overflowed Telegram's 64-byte callback_data limit, and cb() throws
   // on overflow, which would take the whole screen down rather than one button.
   const deletedTab = only === "deleted";
+  const newTab = only === "new";
   r.items.forEach((p, i) => {
     // The deleted tab used to render a bare 🗑 for every row, so ticks were
     // invisible while "♻️ Restore N" was driven by those very ticks — you could
@@ -2420,6 +2424,8 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     const box = sel.has(p.id) ? "☑️" : "⬜";
     const mark = deletedTab
       ? (quick ? "♻️" : `${box} 🗑`)
+      : newTab
+        ? (quick ? "➕" : `${box} 🆕`)
       : (quick ? (p.visible ? "👁" : "🙈") : `${box} ${p.visible ? "👁" : "🙈"}`);
     const stock = p.stock === null ? "" : p.stock <= 0 ? " · ⛔️" : ` · ${p.stock}`;
     kb.text(`${mark} ${p.name.slice(0, 24)} · $${(p.priceMinor / 100).toFixed(2)}${stock}`, cb("adm", "sptog", `${supplierId}~${i}`)).row();
@@ -2440,6 +2446,9 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
     if (sel.size > 0) {
       if (deletedTab) {
         kb.add(sbtn(`♻️ Restore ${sel.size}`, cb("adm", "spdo", `${supplierId}~restore`), "success")).row();
+      } else if (newTab) {
+        kb.add(sbtn(`➕ Add ${sel.size} to shop`, cb("adm", "spdo", `${supplierId}~show`), "success")).row();
+        kb.add(sbtn(`🗑 Ignore ${sel.size}`, cb("adm", "spask", `${supplierId}~delete`), "danger")).row();
       } else {
         kb.add(
           sbtn(`👁 Publish ${sel.size}`, cb("adm", "spdo", `${supplierId}~show`), "success"),
@@ -2454,6 +2463,9 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   // ── Whole-catalogue shortcuts (uncapped) ──
   if (deletedTab) {
     kb.add(sbtn(`♻️ Restore all ${counts.deleted}`, cb("adm", "spall", `${supplierId}~restore`), "success")).row();
+  } else if (newTab) {
+    // No "add everything" button on purpose: the whole point is that only the
+    // products picked one by one (or ticked) enter the shop.
   } else {
     kb.add(
       sbtn("👁 Publish every product", cb("adm", "spall", `${supplierId}~show`), "primary"),
@@ -2470,20 +2482,20 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   await show(ctx, [
     flash ? `${flash}\n` : "",
     "📂 <b>Supplier products</b>",
-    `👁 ${counts.shown} in shop · 🙈 ${counts.hidden} hidden${counts.deleted > 0 ? ` · 🗑 ${counts.deleted} deleted` : ""}`,
-    only !== "all" ? `<i>Showing: ${only}</i>` : "",
+    `👁 ${counts.shown} in shop · 🙈 ${counts.hidden} hidden · 🆕 ${counts.pending} not added${counts.deleted > 0 ? ` · 🗑 ${counts.deleted} deleted` : ""}`,
+    only !== "all" ? `<i>Showing: ${only === "new" ? "not added" : only}</i>` : "",
     sel.size > 0 && !quick ? `☑️ <b>${sel.size} selected</b>` : "",
     "",
     r.total === 0 ? "<i>No products match this filter.</i>\n" : "",
     deletedTab
-      ? `These are out of the shop and will not be re-imported by future syncs. Restore brings them back <b>hidden</b>.${quick ? "\n\n⚡ <b>One-by-one:</b> tap any product to restore it immediately." : "\n\n☑️ <b>Bulk:</b> tick products, then tap Restore."}`
+      ? `These are ignored and will not come back with future syncs. Restore puts them back under 🆕 Not added.${quick ? "\n\n⚡ <b>One-by-one:</b> tap any product to restore it immediately." : "\n\n☑️ <b>Bulk:</b> tick products, then tap Restore."}`
+      : newTab
+        ? `The vendor has these, but they are <b>not in your shop</b> — no listing, no stock, no posts.${quick ? "\n\n⚡ Tap a product to ➕ <b>add it to your shop</b>." : "\n\n☑️ Tick products, then ➕ Add."}`
       : quick
         ? "⚡ <b>One-by-one:</b> tap any product to publish or hide it immediately."
         : "☑️ <b>Bulk:</b> tap products to tick them, then choose an action. Ticks survive paging and filtering.",
     "",
-    newVis
-      ? "🆕 New synced products go <b>straight into the shop</b>."
-      : "🆕 New synced products arrive <b>hidden</b>, so a big vendor can't flood your shop. Sync still imports everything.",
+    "🆕 New vendor products never enter your shop by themselves — you get an alert and add only what you want. Stock updates only for products you added.",
   ].filter(Boolean).join("\n"), kb, true);
 }
 
@@ -3032,6 +3044,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_sup_name";
       await askStep(ctx, "🏭 <b>Add supplier</b>\nStep 1/4 — send a <b>name</b> for this supplier:");
       return;
+    case "supnew":
+      // From the "N products from vendor" alert: straight to 🆕 Not added, one tap = add.
+      ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "new"; ctx.session.supMode = "quick";
+      ctx.session.supTarget = id;
+      return supplierProductsView(ctx, id);
     case "supprods":
       // A fresh open starts with a clean selection.
       if (ctx.session.supTarget !== id) {
@@ -3048,7 +3065,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const [supId, key] = id.split("~");
       if (!supId) return;
       const prev = ctx.session.supFilter ?? "all";
-      const next = key === "visible" || key === "hidden" || key === "deleted" ? key : "all";
+      const next = key === "visible" || key === "hidden" || key === "deleted" || key === "new" ? key : "all";
       ctx.session.supFilter = next;
       ctx.session.supPage = 1;
       // Ticks survive all ↔ visible ↔ hidden, which is what the view promises.
@@ -3056,10 +3073,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       // carried into Publish/Hide silently matches nothing (those actions filter
       // deletedAt: null), so the admin would tap "Publish 12" and be told 0 were
       // published with no explanation.
-      if ((prev === "deleted") !== (next === "deleted")) {
+      if ((prev === "deleted") !== (next === "deleted") || (prev === "new") !== (next === "new")) {
         const had = (ctx.session.supSelected ?? []).length;
         ctx.session.supSelected = [];
-        if (had > 0) ctx.session.supFlash = `✖️ Cleared ${had} tick(s) — deleted products need their own actions.`;
+        if (had > 0) ctx.session.supFlash = `✖️ Cleared ${had} tick(s) — this tab has its own actions.`;
       }
       return supplierProductsView(ctx, supId);
     }
@@ -3139,8 +3156,8 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       const ann = r.inStock ? await announceProduct(id, { createdById: "bot-admin", force: true }).catch(() => ({ announced: false, targets: 0 })) : { announced: false, targets: 0 };
       await ctx.reply(
         r.inStock
-          ? `✅ <b>${escapeHtml(r.name ?? "Product")}</b> is live.${ann.announced ? ` 📣 Announced to ${ann.targets ?? 0} customers.` : ""}`
-          : `✅ <b>${escapeHtml(r.name ?? "Product")}</b> approved — out of stock at the vendor right now, it goes live by itself when they restock.`,
+          ? `➕ <b>${escapeHtml(r.name ?? "Product")}</b> added to your shop and live.${ann.announced ? ` 📣 Announced to ${ann.targets ?? 0} customers.` : ""}`
+          : `➕ <b>${escapeHtml(r.name ?? "Product")}</b> added — out of stock at the vendor right now, it goes live by itself when they restock.`,
         { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⚙️ Open product", cb("adm", "prod", id)) },
       );
       return;
@@ -3148,7 +3165,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "spno": {
       const r = await rejectSupplierProduct(id);
       await ctx.editMessageReplyMarkup().catch(() => undefined);
-      await ctx.reply(r.ok ? `🗑 <b>${escapeHtml(r.name ?? "Product")}</b> rejected — it stays out of the shop and sync won't add it again. (Restore from 📂 Supplier products → 🗑 tab.)` : "That product is no longer there.", { parse_mode: "HTML" });
+      await ctx.reply(r.ok ? `🗑 <b>${escapeHtml(r.name ?? "Product")}</b> ignored — not added, and sync won't offer it again. (Restore from 📂 Supplier products → 🗑 tab.)` : "That product is no longer there.", { parse_mode: "HTML" });
       return;
     }
     case "pbulkann": {
@@ -3209,6 +3226,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
           ctx.session.supFlash = `♻️ <b>${escapeHtml(row.name.slice(0, 40))}</b> restored — hidden, ready to publish.`;
           return supplierProductsView(ctx, supId);
         }
+        if (ctx.session.supFilter === "new") {
+          const a = await approveSupplierProduct(row.id);
+          ctx.session.supFlash = a.ok
+            ? `➕ <b>${escapeHtml(row.name.slice(0, 40))}</b> added to your shop${a.inStock ? "" : " — out of stock at the vendor, it goes live when they restock"}.`
+            : "⚠️ That product is no longer available.";
+          return supplierProductsView(ctx, supId);
+        }
         const makeVisible = !row.visible;
         await bulkSupplierProducts(supId, [row.id], makeVisible ? "show" : "hide");
         ctx.session.supFlash = `${makeVisible ? "👁" : "🙈"} <b>${escapeHtml(row.name.slice(0, 40))}</b> ${makeVisible ? "published" : "hidden"}.`;
@@ -3230,7 +3254,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
           return { text: `ℹ️ <b>Nothing imported</b> — the supplier returned no products.\n\n${t ? escapeHtml(t.detail.slice(0, 900)) : "Usually the base URL or key is wrong."}`, kb: supFixKb(id) };
         }
         const kb = new InlineKeyboard()
-          .add(sbtn(`📂 Review ${r.added > 0 ? `${r.added} new ` : ""}product(s)`, cb("adm", "supprods", id), "success")).row()
+          .add(sbtn(r.added > 0 ? `🆕 ${r.added} new — add the ones you want` : "📂 Supplier products", cb("adm", r.added > 0 ? "supnew" : "supprods", id), "success")).row()
           .text("◀️ Suppliers", cb("adm", "sups"));
         return {
           text: [
@@ -5720,7 +5744,7 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       await ctx.reply(`❌ ${msg}`);
       return true;
     }
-    await ctx.reply(`✅ Delivered to the customer with a thank-you + instructions.${r.completed ? `\n🎉 Order <b>${escapeHtml(r.orderNumber ?? "")}</b> is now complete.` : `\n${r.remaining} item(s) still pending on order <b>${escapeHtml(r.orderNumber ?? "")}</b>.`}`, { parse_mode: "HTML" });
+    await ctx.reply(`${r.viaApi ? "✅ Delivered — it's an 🔌 API order, so it goes to the reseller's API (their webhook / order status) for their customer." : "✅ Delivered to the customer with a thank-you + instructions."}${r.completed ? `\n🎉 Order <b>${escapeHtml(r.orderNumber ?? "")}</b> is now complete.` : `\n${r.remaining} item(s) still pending on order <b>${escapeHtml(r.orderNumber ?? "")}</b>.`}`, { parse_mode: "HTML" });
     return true;
   }
   if (awaiting === "admin_pubprice_usd") {

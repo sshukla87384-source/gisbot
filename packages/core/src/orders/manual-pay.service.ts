@@ -594,7 +594,7 @@ export async function listPendingManualItems(orderId: string): Promise<{ orderNu
   return { orderNumber: order.orderNumber, items };
 }
 
-export interface ManualFulfillResult { ok: boolean; reason?: string; orderNumber?: string; remaining?: number; completed?: boolean; }
+export interface ManualFulfillResult { ok: boolean; reason?: string; orderNumber?: string; remaining?: number; completed?: boolean; /** Placed through the developer API: delivered to the reseller's API. */ viaApi?: boolean; }
 
 /** Admin hand-delivers one manual item: store the secret, mark fulfilled, deliver to the customer with a thank-you + instructions. */
 export async function manualFulfillItem(orderItemId: string, secretText: string): Promise<ManualFulfillResult> {
@@ -637,13 +637,25 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   if (allDone) await prisma.order.update({ where: { id: item.orderId }, data: anyRefunded ? { status: "PARTIALLY_REFUNDED", completedAt: new Date() } : { status: "COMPLETED", completedAt: new Date() } });
 
   const tgId = item.order.user.telegramId;
+  // An order placed through the developer API belongs to the reseller's own
+  // customer: the value goes back through their API (the delivery webhook and
+  // GET /orders/{n} — see api-delivery.service). The Telegram copy is only a
+  // receipt for the reseller, and says so, instead of looking like their own buy.
+  const viaApi = item.order.channel === "API";
   if (tgId !== null) {
-    await enqueueTelegramMessage(tgId, buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange), { buttons: copyButtonsFor(payload, { orderItemId: item.id }), followUp: DELIVERY_FOLLOWUP });
+    const text = buildDeliveryText(item.productNameSnap, item.variantNameSnap, payload, item.variant.product.activationGuide, item.variant.product.allowPasswordChange);
+    await enqueueTelegramMessage(
+      tgId,
+      viaApi
+        ? `🔌 <b>API order ${item.order.orderNumber.replace(/</g, "&lt;")}</b> — delivered to your API (webhook / GET /orders). Copy for your records:\n\n${text}`
+        : text,
+      viaApi ? { buttons: copyButtonsFor(payload, { orderItemId: item.id }) } : { buttons: copyButtonsFor(payload, { orderItemId: item.id }), followUp: DELIVERY_FOLLOWUP },
+    );
     // Deliver the item and nothing else. The thank-you, referral nudge and
     // delivery instructions are ORDER-level and were already sent at payment —
     // re-sending them here is what produced the duplicated messages.
   }
-  return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone };
+  return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone, viaApi };
 }
 
 export interface ReplaceResult {
