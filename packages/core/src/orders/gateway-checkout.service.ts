@@ -1,4 +1,5 @@
 import { cancelStalePendingTx } from "./manual-pay.service.js";
+import { cartUnitsFor, txTimeoutForUnits } from "./tx-budget.js";
 import { nextOrderNumber, prisma, type Currency, type PaymentProvider as PaymentProviderEnum } from "@gis/database";
 import { getProvider, type PaymentProviderId } from "@gis/payments";
 import { CoreError } from "@gis/shared";
@@ -43,6 +44,7 @@ export async function createGatewayCheckout(
   }
 
   const expiresAt = new Date(Date.now() + PAYMENT_WINDOW_MIN * 60_000);
+  const units = await cartUnitsFor(userId);
 
   const created = await prisma.$transaction(
     async (tx) => {
@@ -145,7 +147,7 @@ export async function createGatewayCheckout(
 
       return { orderId: order.id, orderNumber, totalMinor };
     },
-    { timeout: 15_000 },
+    { timeout: txTimeoutForUnits(units), maxWait: 10_000 },
   );
 
   // Create the hosted payment session outside the DB transaction.

@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { orderUnitsFor, txTimeoutForUnits } from "./tx-budget.js";
 import { prisma, type Currency } from "@gis/database";
 import { convertMinor } from "../fx.js";
 import { adjustWallet } from "../wallet/wallet.service.js";
@@ -161,6 +162,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
   // still delivered below; the admin just needs to know the wallet part is
   // not covered.
   const before = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true, orderNumber: true, walletUsedMinor: true } });
+  const units = await orderUnitsFor(orderId);
 
   const outcome = await prisma.$transaction(
     async (tx) => {
@@ -419,7 +421,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
         finalStatus,
       };
     },
-    { timeout: 20_000 },
+    { timeout: txTimeoutForUnits(units, 20_000), maxWait: 10_000 },
   );
 
   // Post-commit side effects (queued — retries safe).

@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { orderUnitsFor, txTimeoutForUnits } from "./tx-budget.js";
 import { BINANCE_SESSION_MIN, UPI_SESSION_MIN } from "./binance-window.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, effectiveHours, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
@@ -377,6 +378,7 @@ export async function createBinanceManualCheckout(userId: string, opts: { useWal
  */
 export async function confirmManualPayment(orderId: string, actorId?: string): Promise<{ status: string; delivered: number }> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const units = await orderUnitsFor(orderId);
 
   const outcome = await prisma.$transaction(
     async (tx) => {
@@ -508,7 +510,7 @@ export async function confirmManualPayment(orderId: string, actorId?: string): P
 
       return { kind: "done" as const, orderId: order.id, userId: order.userId, telegramId: order.user.telegramId, buyerHandle: order.user.telegramHandle, buyerFirst: order.user.firstName, buyerReferral: order.user.referralCode, orderNumber: order.orderNumber, totalMinor: order.totalMinor, valueMinor: Math.max(0, order.subtotalMinor - order.discountMinor), currency: order.currency, deliveries, finalStatus, pendingManual, awaitingStock };
     },
-    { timeout: 20_000 },
+    { timeout: txTimeoutForUnits(units, 20_000), maxWait: 10_000 },
   );
 
   if (outcome.kind === "skip") return { status: "already_processed", delivered: 0 };
@@ -969,7 +971,19 @@ export async function notifyOrderToAdmins(orderId: string, method = "order"): Pr
     `👤 ${esc(buyer)}`,
     `🆔 <code>${order.user.telegramId ?? "—"}</code>`,
     "",
-    ...order.items.map(itemLine),
+    // One line per product + state, not per unit: a 700-unit order printed 700
+    // identical lines and the alert was cut off by Telegram's length limit.
+    ...(() => {
+      const by = new Map<string, { line: string; n: number }>();
+      for (const i of order.items) {
+        const base = itemLine({ ...i, quantity: 1 }).replace(/ ×1$/, "");
+        const cur = by.get(base) ?? { line: base, n: 0 };
+        cur.n += i.quantity;
+        by.set(base, cur);
+      }
+      const rows = [...by.values()].map((r) => `${r.line} ×${r.n}`);
+      return rows.length > 25 ? [...rows.slice(0, 25), `… +${rows.length - 25} more`] : rows;
+    })(),
   ];
   if (manualPending.length > 0) lines.push("", "Tap Deliver to send the pending item(s).");
   const buttons = manualPending.length > 0 ? [{ text: "📦 Deliver now", callbackData: cb("adm", "deliver", orderId), style: "primary" as const }] : undefined;

@@ -10,6 +10,9 @@ export const prisma: PrismaClient =
   globalForPrisma.__gisPrisma ??
   new PrismaClient({
     log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
+    // Interactive transactions without their own budget (order creation on
+    // UPI / Binance / Stars) get room for big orders: 5 s cut a 500-unit order.
+    transactionOptions: { maxWait: 10_000, timeout: 120_000 },
   });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.__gisPrisma = prisma;

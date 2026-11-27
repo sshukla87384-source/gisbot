@@ -308,7 +308,7 @@ export async function miniAppBuyWithWallet(
   qty: number,
   quote?: { totalMinor: number; currency: Currency },
 ): Promise<MiniAppBuyResult> {
-  const quantity = Math.max(1, Math.min(50, Math.round(qty)));
+  const quantity = Math.max(1, Math.min(100_000, Math.round(qty)));
   const redis = getRedis();
   const lockKey = `buylock:${user.id}`;
   const locked = await redis.set(lockKey, "1", "EX", 30, "NX").catch(() => "OK");

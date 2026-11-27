@@ -1494,7 +1494,7 @@ export function createBot(): Bot<Ctx> {
     }
     if (awaiting === "buy_qty") {
       const variantId = ctx.session.buyVariantId ?? "";
-      const maxQty = ctx.session.buyMaxQty ?? 99;
+      const maxQty = ctx.session.buyMaxQty ?? 1_000_000;
       if (!variantId) return ctx.reply("That item expired — open the product again.");
       // A word instead of a number ("hi", a product name) used to become
       // quantity 1 and REPLACE the cart. Ask again instead.
@@ -1514,7 +1514,8 @@ export function createBot(): Bot<Ctx> {
       if (!Number.isFinite(qty) || qty < 1) qty = 1;
       let note = "";
       if (maxQty < 1_000_000 && qty > maxQty) { qty = maxQty; note = `Only ${maxQty} available — setting quantity to ${maxQty}. `; }
-      if (qty > 99) qty = 99;
+      // No fixed ceiling: 100, 500, 700 at once is fine — only stock limits it.
+      if (qty > 100_000) qty = 100_000;
       try {
         await clearCart(ctx.user.id);
         await addToCart(ctx.user.id, variantId, qty);
@@ -1999,7 +2000,7 @@ export function createBot(): Bot<Ctx> {
           let qty = intArg(args, 1, 1);
           if (qty < 1) qty = 1;
           if (stock < 1_000_000 && qty > stock) qty = stock;
-          if (qty > 99) qty = 99; // same ceiling the typed-quantity path enforces
+          if (qty > 100_000) qty = 100_000; // stock is the real limit; this only stops nonsense
           await clearCart(user.id);
           await addToCart(user.id, vId, qty);
           await ctx.answerCallbackQuery({ text: `Quantity: ${qty}` });

@@ -45,7 +45,8 @@ const ORDER_LOCK_SEC = 30;
 
 const purchaseSchema = z.object({
   variantId: z.string().min(1),
-  quantity: z.number().int().min(1).max(99).optional().default(1),
+  // No small ceiling — resellers buy 500+ at once. Stock is the real limit.
+  quantity: z.number().int().min(1).max(100_000).optional().default(1),
   /**
    * How to pay. The API only ever offered the wallet, so a partner with a Pay
    * Later limit could use it in the bot and not through their integration.

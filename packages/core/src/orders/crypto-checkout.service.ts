@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { cartUnitsFor, txTimeoutForUnits } from "./tx-budget.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { NowPaymentsProvider, installProvider, type DirectCryptoPayment, type NowPaymentsCreds, type NormalizedPaymentEvent } from "@gis/payments";
 import { CoreError, decryptSecret, encryptSecret, formatMinor, type CurrencyCode } from "@gis/shared";
@@ -307,6 +308,7 @@ export async function createCryptoCheckout(userId: string, opts: { network: stri
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   const currency = user.currency as Currency;
   const expiresAt = new Date(Date.now() + CRYPTO_SESSION_MIN * 60_000);
+  const units = await cartUnitsFor(userId);
 
   const created = await prisma.$transaction(async (tx) => {
     await cancelStalePendingTx(tx, userId);
@@ -374,7 +376,7 @@ export async function createCryptoCheckout(userId: string, opts: { network: stri
       },
     });
     return { orderId: order.id, orderNumber, totalMinor: owedRecorded, orderTotalMinor: totalMinor, walletUsedMinor: applied.walletUsed, usd };
-  }, { timeout: 15_000 });
+  }, { timeout: txTimeoutForUnits(units), maxWait: 10_000 });
 
   // A unique address for this order — from our own seed, or from the processor.
   let pay: { paymentId: string; payAddress: string; payAmount: string; payCurrency: string; payinExtraId: string | null; confirmations?: number };

@@ -206,7 +206,7 @@ h2{font-size:19px;margin:14px 0 4px;line-height:1.25}h3{font-size:15px;margin:16
         + '<div class="foot">Wallet purchases are delivered right here and in the chat. Other payment methods open the bot.</div>';
       openSheet(html);
       Array.prototype.forEach.call(document.querySelectorAll(".var"), function(el){ el.onclick = function(){ var id = el.getAttribute("data-v"); var v = p.variants.filter(function(x){ return x.id===id; })[0]; if (v && v.inStock) { sel = v; qty = 1; haptic(); draw(); } }; });
-      var qm = $("qm"), qp = $("qp"); if (qm) qm.onclick = function(){ if (qty>1) { qty--; draw(); } }; if (qp) qp.onclick = function(){ if (qty<50) { qty++; draw(); } };
+      var qm = $("qm"), qp = $("qp"); if (qm) qm.onclick = function(){ if (qty>1) { qty--; draw(); } }; if (qp) qp.onclick = function(){ if (qty<100000) { qty++; draw(); } };
       var bb = $("buyb"); if (bb) bb.onclick = function(){ openBot("p_" + encodeURIComponent(p.slug)); };
       var tu = $("topup"); if (tu) tu.onclick = function(){ openBot("topup"); };
       var bw = $("buyw") || $("buyw2"); if (bw) bw.onclick = function(){

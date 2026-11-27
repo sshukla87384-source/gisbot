@@ -1,4 +1,5 @@
 import { loadConfig } from "@gis/config";
+import { cartUnitsFor, txTimeoutForUnits } from "./tx-budget.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, encryptSecret, isCoreError } from "@gis/shared";
 import { convertMinor } from "../fx.js";
@@ -192,6 +193,7 @@ export async function checkoutWithWallet(
   opts: { direct?: Array<{ variantId: string; quantity: number }>; maxTotalMinor?: number } = {},
 ): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const units = opts.direct ? opts.direct.reduce((s, l) => s + Math.max(0, l.quantity), 0) : await cartUnitsFor(userId);
 
   const result = await prisma.$transaction(
     async (tx): Promise<CheckoutResult> => {
@@ -311,7 +313,7 @@ export async function checkoutWithWallet(
         pendingManualItems,
       };
     },
-    { timeout: 15_000 },
+    { timeout: txTimeoutForUnits(units), maxWait: 10_000 },
   );
   // Fire-and-forget: this calls out to supplier APIs, which must never hold up
   // the customer's checkout response.
@@ -383,6 +385,7 @@ export async function adjustBnplLimit(userId: string, deltaMinor: number): Promi
 /** Checkout on BNPL credit: deliver now, add to the user's outstanding balance. */
 export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API" = "DIRECT", opts: { maxTotalMinor?: number } = {}): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
+  const units = await cartUnitsFor(userId);
   const result = await prisma.$transaction(
     async (tx): Promise<CheckoutResult> => {
       const rows = await tx.$queryRaw<Array<{ id: string; currency: Currency; bnplLimitMinor: number; bnplOutstandingMinor: number; firstPurchaseAt: Date | null; referredById: string | null }>>`
@@ -437,7 +440,7 @@ export async function checkoutWithBnpl(userId: string, channel: "DIRECT" | "API"
 
       return { orderId: order.id, orderNumber, totalMinor, currency, status: finalStatus, deliveries, pendingManualItems };
     },
-    { timeout: 15_000 },
+    { timeout: txTimeoutForUnits(units), maxWait: 10_000 },
   );
   void notifyOrderToAdmins(result.orderId, "Pay Later (BNPL)").catch(() => undefined);
   return result;
