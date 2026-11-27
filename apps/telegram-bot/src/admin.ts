@@ -220,6 +220,8 @@ import {
   terminalGasReport,
   terminalStats,
   sweepTerminalNow,
+  recheckTerminalPayments,
+  terminalWithdrawBlockers,
   terminalWaitingTotals,
   recentTerminalPayments,
   listSuppliers,
@@ -1224,6 +1226,7 @@ async function terminalView(ctx: Ctx): Promise<void> {
   if (!seeded) kb.text("🆕 Create 12-word seed", cb("adm", "tmnew")).text("📥 Import seed", cb("adm", "tmimport")).row();
   else {
     kb.add(sbtn("💸 Withdraw to my wallet now", cb("adm", "tmsweep"), "success")).row();
+    kb.add(sbtn("🔎 Re-check customer payments (14 days)", cb("adm", "tmrecheck"), "primary")).row();
     kb.text(cfg.autoSweep ? "🔁 Auto-transfer: ON — turn off" : "✋ Auto-transfer: OFF — turn on", cb("adm", "tmauto", cfg.autoSweep ? "0" : "1")).row();
     kb.text("⛽ Gas balances", cb("adm", "tmgas")).row();
     kb.text("📜 Recent payments", cb("adm", "tmrecent")).text("🗑 Remove seed", cb("adm", "tmdel")).row();
@@ -2346,6 +2349,7 @@ async function supplierPageIds(ctx: Ctx, supplierId: string): Promise<string[]> 
     page: ctx.session.supPage ?? 1,
     pageSize: SUP_PAGE_SIZE,
     only: ctx.session.supFilter ?? "all",
+    ...(ctx.session.supSearch ? { search: ctx.session.supSearch } : {}),
   });
 }
 
@@ -2355,7 +2359,7 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   const page = ctx.session.supPage ?? 1;
   const sel = new Set(ctx.session.supSelected ?? []);
   const [r, counts, newVis] = await Promise.all([
-    listSupplierProducts(supplierId, { page, pageSize: SUP_PAGE_SIZE, only }),
+    listSupplierProducts(supplierId, { page, pageSize: SUP_PAGE_SIZE, only, ...(ctx.session.supSearch ? { search: ctx.session.supSearch } : {}) }),
     countSupplierProductStates(supplierId),
     getSupplierNewVisible(supplierId),
   ]);
@@ -2409,6 +2413,10 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   f("✅ Added", "all"); f(`👁 ${counts.shown}`, "visible"); f(`🙈 ${counts.hidden}`, "hidden");
   if (counts.deleted > 0) f(`🗑 ${counts.deleted}`, "deleted");
   kb.row();
+
+  // ── Search by name: a vendor with hundreds of products is unworkable by paging ──
+  const search = ctx.session.supSearch;
+  kb.add(sbtn(search ? `🔎 “${search.slice(0, 20)}” — clear` : "🔎 Search this vendor's products", cb("adm", search ? "spsclr" : "spsrch", supplierId), "primary")).row();
 
   // ── Mode switch: one-by-one vs bulk ──
   const quickLabel = deletedTabLabel(only);
@@ -3047,14 +3055,24 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ctx.session.awaiting = "admin_sup_name";
       await askStep(ctx, "🏭 <b>Add supplier</b>\nStep 1/4 — send a <b>name</b> for this supplier:");
       return;
+    case "spsrch":
+      ctx.session.supTarget = id;
+      ctx.session.awaiting = "admin_sup_search";
+      await askStep(ctx, "🔎 Send part of the product name (e.g. <code>netflix</code>):");
+      return;
+    case "spsclr":
+      ctx.session.supSearch = undefined; ctx.session.supPage = 1;
+      return supplierProductsView(ctx, id);
     case "supnew":
       // From the "N products from vendor" alert: straight to 🆕 Not added, one tap = add.
+      ctx.session.supSearch = undefined;
       ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "new"; ctx.session.supMode = "quick";
       ctx.session.supTarget = id;
       return supplierProductsView(ctx, id);
     case "supprods":
       // A fresh open starts with a clean selection.
       if (ctx.session.supTarget !== id) {
+        ctx.session.supSearch = undefined;
         ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "all"; ctx.session.supMode = "select";
         // Nothing added from this vendor yet: open on 🆕 Not added, where one
         // tap adds a product — not on an empty "Added" tab.
@@ -3103,7 +3121,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return supplierProductsView(ctx, id);
     }
     case "spallsel": {
-      const ids = await supplierProductIdsAll(id, ctx.session.supFilter ?? "all");
+      const ids = await supplierProductIdsAll(id, ctx.session.supFilter ?? "all", 500, ctx.session.supSearch);
       const cur = new Set(ctx.session.supSelected ?? []);
       // Compare membership, not counts: ticks from another filter made the old
       // length check clear the selection when it should have extended it.
@@ -3218,6 +3236,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
         page: ctx.session.supPage ?? 1,
         pageSize: SUP_PAGE_SIZE,
         only: ctx.session.supFilter ?? "all",
+        ...(ctx.session.supSearch ? { search: ctx.session.supSearch } : {}),
       });
       const row = page.items[idx];
       if (!row) {
@@ -5065,10 +5084,51 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "tmsweepgo": {
-      await ctx.reply("💸 Withdrawing… transfers are confirmed as alerts.");
-      const n = await sweepTerminalNow().catch((e: unknown) => { void e; return -1; });
-      await ctx.reply(n < 0 ? "❌ Withdrawal run failed — check 🩺 Logs." : n === 0 ? "ℹ️ Nothing could be sent right now (gas missing or below the minimum) — see the alerts / ⛽ Gas balances." : `✅ ${n} transfer(s) sent to your payout wallet(s).`);
-      return terminalView(ctx);
+      inBackground(ctx, "<b>💸 Withdrawing…</b>", async () => {
+        const n = await sweepTerminalNow().catch((e: unknown) => { void e; return -1; });
+        const left = await terminalWithdrawBlockers().catch(() => []);
+        const back = new InlineKeyboard().text("🔄 Check again", cb("adm", "tmleft")).text("◀️ Terminal", cb("adm", "tm"));
+        return {
+          text: [
+            n < 0 ? "❌ The withdrawal run failed — check 🩺 Logs." : n > 0 ? `✅ <b>${n} transfer(s) sent</b> to your payout wallet(s).` : "⏳ <b>Withdrawal started.</b>",
+            "",
+            left.length === 0
+              ? "Nothing is left on the terminal."
+              : ["<b>Still on the terminal:</b>", ...left.map((l) => `• ${escapeHtml(l.asset)} (${escapeHtml(l.label)}) · ${l.payments} payment(s)\n  <i>${escapeHtml(l.note.slice(0, 220))}</i>`)].join("\n"),
+            "",
+            "<i>BEP20 / Polygon / TRC20 move in two steps — gas first, then the USDT about a minute later. The worker now finishes that on its own for the next 30 minutes; each transfer arrives as an alert. \"needs … for gas\" means: send a little BNB / POL / TRX to that main address (⛽ Gas balances), then tap Withdraw again.</i>",
+          ].join("\n"),
+          kb: back,
+        };
+      });
+      return;
+    }
+    case "tmleft": {
+      const left = await terminalWithdrawBlockers().catch(() => []);
+      await ctx.reply(left.length === 0
+        ? "✅ Nothing is left on the terminal — everything reached your payout wallet(s)."
+        : ["<b>Still on the terminal:</b>", ...left.map((l) => `• ${escapeHtml(l.asset)} (${escapeHtml(l.label)}) · ${l.payments} payment(s)\n  <i>${escapeHtml(l.note.slice(0, 220))}</i>`)].join("\n"),
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔄 Check again", cb("adm", "tmleft")).text("💸 Withdraw again", cb("adm", "tmsweepgo")) });
+      return;
+    }
+    case "tmrecheck": {
+      inBackground(ctx, "<b>🔎 Re-checking customer payments on-chain…</b>", async () => {
+        const r = await recheckTerminalPayments(14);
+        return {
+          text: [
+            "🔎 <b>Re-check done</b>",
+            "",
+            `Looked at <b>${r.checked}</b> unsettled payment(s) from the last 14 days.`,
+            `✅ <b>${r.paid}</b> found paid and settled (order delivered / wallet credited).`,
+            r.partial ? `⚠️ <b>${r.partial}</b> paid short — the customer was told what is missing.` : "",
+            r.failed ? `❌ <b>${r.failed}</b> could not be read from the network — try again in a few minutes.` : "",
+            "",
+            "<i>Money that is in stays on the terminal's addresses until you tap 💸 Withdraw (auto-transfer is off).</i>",
+          ].filter(Boolean).join("\n"),
+          kb: new InlineKeyboard().add(sbtn("💸 Withdraw to my wallet now", cb("adm", "tmsweep"), "success")).row().text("◀️ Terminal", cb("adm", "tm")),
+        };
+      });
+      return;
     }
     case "tmauto": {
       await setTerminalConfig({ autoSweep: id === "1" });
@@ -5493,6 +5553,14 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     ctx.session.awaiting = null;
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_sup_search") {
+    const supId = ctx.session.supTarget ?? "";
+    if (!supId) { await ctx.reply("Open the supplier's 📂 Products again."); return true; }
+    ctx.session.supSearch = text.trim().slice(0, 40) || undefined;
+    ctx.session.supPage = 1;
+    await supplierProductsView(ctx, supId);
     return true;
   }
   if (awaiting === "admin_p_guide") {

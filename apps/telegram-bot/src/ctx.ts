@@ -32,6 +32,7 @@ export interface SessionData {
     | "admin_p_editname"
     | "admin_p_editdesc"
     | "admin_p_guide"
+    | "admin_sup_search"
     | "admin_p_howto"
     | "admin_p_terms"
     | "admin_def_howto"
@@ -187,6 +188,8 @@ export interface SessionData {
   /** Bulk supplier-product picker state. */
   supSelected?: string[];
   supPage?: number;
+  /** Name filter in a supplier's product list. */
+  supSearch?: string;
   supFilter?: "all" | "visible" | "hidden" | "deleted" | "new";
   /** "quick" = tapping a row publishes/hides it instantly; "select" = tapping ticks it. */
   supMode?: "select" | "quick";

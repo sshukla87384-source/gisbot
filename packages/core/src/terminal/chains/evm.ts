@@ -140,18 +140,31 @@ export class EvmUsdtAdapter implements ChainAdapter {
     try {
       confirmed = await this.tokenBalance(addr, safeBlock);
     } catch {
-      // Public RPCs sometimes refuse historical state; fall back to the
-      // transfer logs, which every node serves.
-      const logs = await this.pub().getLogs({
-        address: this.spec.token,
-        event: TRANSFER,
-        args: { to: addr },
-        fromBlock: latest - 5000n,
-        toBlock: latest,
-      });
-      confirmed = logs
-        .filter((l) => l.blockNumber !== null && l.blockNumber <= safeBlock)
-        .reduce((s, l) => s + (l.args.value ?? 0n), 0n);
+      // Public RPCs often refuse historical state. Fall back to the transfer
+      // logs — but a payment older than the log window (BSC makes 5,000 blocks
+      // in about an hour) found nothing there and stayed "confirming" for
+      // ever, and an RPC that also refuses getLogs threw, so the payment was
+      // never seen at all. Neither is fatal now: whatever is not proven here
+      // is reported as pending, and the terminal confirms a balance that has
+      // stayed in place long enough (see AGE_CONFIRM_SEC in terminal.service).
+      try {
+        const logs = await this.pub().getLogs({
+          address: this.spec.token,
+          event: TRANSFER,
+          args: { to: addr },
+          fromBlock: latest - 5000n,
+          toBlock: latest,
+        });
+        // The balance is real at the latest block. Only what landed in the
+        // last `confirmations` blocks still waits; anything older — including
+        // money that arrived before the log window — is confirmed.
+        const recentUnsafe = logs
+          .filter((l) => l.blockNumber === null || l.blockNumber > safeBlock)
+          .reduce((s, l) => s + (l.args.value ?? 0n), 0n);
+        confirmed = pending - (recentUnsafe > pending ? pending : recentUnsafe);
+      } catch {
+        confirmed = 0n;
+      }
       if (confirmed > pending) confirmed = pending;
     }
     return { confirmed, pending: pending - confirmed, txids: [] };

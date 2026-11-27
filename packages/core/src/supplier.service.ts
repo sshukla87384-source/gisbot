@@ -1335,7 +1335,7 @@ export async function listSupplierProducts(
 /** Ids on one page — so "select all on page" doesn't need the client to know them. */
 export async function supplierProductIdsOnPage(
   supplierId: string,
-  opts: { page?: number; pageSize?: number; only?: SupplierFilter } = {},
+  opts: { page?: number; pageSize?: number; only?: SupplierFilter; search?: string } = {},
 ): Promise<string[]> {
   const r = await listSupplierProducts(supplierId, opts);
   return r.items.map((i) => i.id);
@@ -1346,9 +1346,10 @@ export async function supplierProductIdsAll(
   supplierId: string,
   only: SupplierFilter = "all",
   cap = 500,
+  search?: string,
 ): Promise<string[]> {
   const rows = await prisma.product.findMany({
-    where: supplierFilterWhere(supplierId, only),
+    where: { ...supplierFilterWhere(supplierId, only), ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}) },
     orderBy: { name: "asc" },
     take: cap,
     select: { id: true },

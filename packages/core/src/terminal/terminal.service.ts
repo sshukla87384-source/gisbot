@@ -1,6 +1,7 @@
 import { prisma, type Currency } from "@gis/database";
 import { CoreError, formatMinor, isCoreError, type CurrencyCode } from "@gis/shared";
 import { enqueueAdminAlert, enqueueTelegramMessage } from "../queues.js";
+import { getRedis } from "../redis.js";
 import { usdtToMinor } from "../fx.js";
 import { creditWalletTx, adjustWallet } from "../wallet/wallet.service.js";
 import { confirmManualPayment } from "../orders/manual-pay.service.js";
@@ -205,23 +206,53 @@ function toleranceUnits(expected: bigint, chain: ChainAdapter, cfg: TerminalConf
   return expected - (expected * BigInt(Math.round(pct * 100))) / 10_000n;
 }
 
+/**
+ * A balance that has sat on a payment address this long is final on these
+ * chains, even when the node could not prove its confirmations (public BSC /
+ * Polygon RPCs often refuse historical reads; TronGrid's "unconfirmed" list
+ * can lag). Without it such payments stayed "confirming" for ever — the
+ * customer's money had left their account and the order never settled.
+ * LTC / SOL / TON prove confirmations directly and are not included.
+ */
+const AGE_CONFIRM_SEC: Record<string, number> = { usdtbsc: 180, usdtmatic: 300, usdttrc20: 600 };
+
 /** Look at one payment on-chain and advance its state. Returns the fresh row. */
-export async function checkTerminalPayment(id: string) {
+export async function checkTerminalPayment(id: string, opts: { includeExpired?: boolean } = {}) {
   const row = await prisma.terminalPayment.findUnique({ where: { id } });
   if (!row) throw new CoreError("VALIDATION_FAILED", "Payment not found");
-  if (!OPEN.includes(row.status)) return row;
+  // A re-check also looks at EXPIRED slots: money sent after the window (or
+  // missed while a node was down) is still the customer's.
+  const allowed = opts.includeExpired ? [...OPEN, "EXPIRED"] : OPEN;
+  if (!allowed.includes(row.status)) return row;
   const chain = terminalChain(row.chain);
   if (!chain) return row;
+  // Already credited to the wallet as a stranded short payment — settling it
+  // again now would pay the customer twice.
+  if (row.status === "EXPIRED" || row.status === "PARTIAL") {
+    const credited = await prisma.walletTransaction.findUnique({ where: { idempotencyKey: `terminal-partial:${row.id}` }, select: { id: true } }).catch(() => null);
+    if (credited) return row;
+  }
   const cfg = await getTerminalConfig();
   const expected = parseUnits(row.expectedAmount, chain.decimals);
   const enough = toleranceUnits(expected, chain, cfg);
   const scan = await chain.scan(row.address, row.index);
+  const ageSec = AGE_CONFIRM_SEC[chain.code];
+  if (ageSec && scan.confirmed < enough && scan.confirmed + scan.pending >= enough) {
+    const key = `tm:seen:${row.id}`;
+    const redis = getRedis();
+    await redis.set(key, String(Date.now()), "EX", 14 * 86400, "NX").catch(() => undefined);
+    const first = Number(await redis.get(key).catch(() => null)) || Date.now();
+    if (Date.now() - first >= ageSec * 1000) {
+      scan.confirmed += scan.pending;
+      scan.pending = 0n;
+    }
+  }
   const received = fmtUnits(scan.confirmed, chain.decimals);
   const pending = fmtUnits(scan.pending, chain.decimals);
 
   if (scan.confirmed >= enough) {
     const flipped = await prisma.terminalPayment.updateMany({
-      where: { id, status: { in: OPEN } },
+      where: { id, status: { in: allowed } },
       data: { status: "PAID", receivedAmount: received, pendingAmount: "0", txids: scan.txids, paidAt: new Date(), lastCheckedAt: new Date(), sweepStatus: "PENDING", nextSweepAt: new Date() },
     });
     if (flipped.count > 0) await settle(row.id);
@@ -230,12 +261,12 @@ export async function checkTerminalPayment(id: string) {
   let status = row.status;
   if (scan.confirmed > 0n) status = "PARTIAL";
   else if (scan.pending > 0n) status = "CONFIRMING";
-  else status = "WAITING";
+  else status = row.status === "EXPIRED" ? "EXPIRED" : "WAITING";
   // Guarded: the poll and the customer's "Check payment" tap can race, and a
   // scan taken a moment before the other side flipped PAID must not write
   // the row back to open (which would settle it twice on the next tick).
   const upd = await prisma.terminalPayment.updateMany({
-    where: { id, status: { in: OPEN } },
+    where: { id, status: { in: allowed } },
     data: { status, receivedAmount: received, pendingAmount: pending, txids: scan.txids, lastCheckedAt: new Date() },
   });
   const updated = (await prisma.terminalPayment.findUnique({ where: { id } })) ?? row;
@@ -350,9 +381,11 @@ export async function pollTerminalPayments(): Promise<number> {
   if (!(await hasTerminalSeed())) return 0;
   const now = Date.now();
   const rows = await prisma.terminalPayment.findMany({
-    where: { status: { in: OPEN }, createdAt: { gte: new Date(now - 24 * 3600_000) } },
+    // 3 days, not 1: a payment that a node outage hid for a day was never
+    // looked at again. Past their window they are checked every 10 min.
+    where: { status: { in: OPEN }, createdAt: { gte: new Date(now - 72 * 3600_000) } },
     orderBy: { createdAt: "asc" },
-    take: 150,
+    take: 200,
   });
   let advanced = 0;
   for (const r of rows) {
@@ -375,6 +408,34 @@ export async function pollTerminalPayments(): Promise<number> {
     data: { status: "EXPIRED" },
   }).catch(() => undefined);
   return advanced;
+}
+
+/**
+ * Admin: 🔎 Re-check — look at every payment of the last `days` days that is
+ * not settled (including expired ones) on-chain right now, and settle what has
+ * arrived. For customers who paid while the watcher missed it.
+ */
+export async function recheckTerminalPayments(days = 14): Promise<{ checked: number; paid: number; partial: number; failed: number }> {
+  if (!(await hasTerminalSeed())) return { checked: 0, paid: 0, partial: 0, failed: 0 };
+  const rows = await prisma.terminalPayment.findMany({
+    where: { status: { in: [...OPEN, "EXPIRED"] }, createdAt: { gte: new Date(Date.now() - days * 86400_000) } },
+    orderBy: { createdAt: "asc" },
+    take: 400,
+    select: { id: true, chain: true },
+  });
+  let paid = 0, partial = 0, failed = 0;
+  for (const r of rows) {
+    try {
+      const after = await checkTerminalPayment(r.id, { includeExpired: true });
+      if (after.status === "PAID") paid++;
+      else if (after.status === "PARTIAL") partial++;
+    } catch (e) {
+      failed++;
+      // eslint-disable-next-line no-console
+      console.warn("terminal recheck failed", { id: r.id, chain: r.chain, error: String(e).slice(0, 200) });
+    }
+  }
+  return { checked: rows.length, paid, partial, failed };
 }
 
 // ── Stranded partial payments ────────────────────────────────────────────────
@@ -416,7 +477,14 @@ export async function sweepTerminalPayments(limit = 10, opts: { manual?: boolean
   if (!(await hasTerminalSeed())) return 0;
   const cfg = await getTerminalConfig();
   const now = new Date();
-  if (!opts.manual && !cfg.autoSweep) {
+  // A 💸 Withdraw usually needs two steps per address (gas first, then the
+  // USDT a minute later). With auto-transfer off the worker used to stop after
+  // the first, so the money never left: the tap only sent gas. For 30 minutes
+  // after a Withdraw the worker finishes what it started.
+  const withdrawing = !opts.manual && !cfg.autoSweep
+    && Boolean(await getRedis().exists(WITHDRAW_KEY).catch(() => 0));
+  const manualRun = opts.manual || withdrawing;
+  if (!manualRun && !cfg.autoSweep) {
     // Manual mode: nothing leaves the terminal on its own. Customers are still
     // made whole — a short payment that was never completed is credited to
     // their wallet on schedule; only the transfer waits for 💸 Withdraw.
@@ -476,9 +544,13 @@ export async function sweepTerminalPayments(limit = 10, opts: { manual?: boolean
     }
     const minUsd = cfg.sweepMinUsd[r.chain] ?? chain.defaultSweepMinUsd;
     let minUnits = 0n;
-    try {
-      minUnits = (await quoteTerminal(r.chain, minUsd)).units;
-    } catch { /* no price → no floor */ }
+    // A Withdraw the admin asked for moves everything; the floor is for the
+    // automatic transfer, where a tiny amount is not worth its fee.
+    if (!manualRun) {
+      try {
+        minUnits = (await quoteTerminal(r.chain, minUsd)).units;
+      } catch { /* no price → no floor */ }
+    }
     try {
       const res = await chain.sweep(r.index, payout, minUnits);
       if (res.kind === "done") {
@@ -514,7 +586,10 @@ async function gasAlertThrottled(chain: string, note: string): Promise<void> {
  * wallets now (works whether auto-transfer is on or off). Runs passes until
  * nothing more is due, so a backlog goes in one tap.
  */
+const WITHDRAW_KEY = "terminal:withdrawing";
+
 export async function sweepTerminalNow(): Promise<number> {
+  await getRedis().set(WITHDRAW_KEY, "1", "EX", 30 * 60).catch(() => undefined);
   await prisma.terminalPayment.updateMany({ where: { sweepStatus: { in: ["RETRY", "SKIPPED", "PENDING"] } }, data: { nextSweepAt: new Date() } });
   let total = 0;
   for (let pass = 0; pass < 8; pass++) {
@@ -523,6 +598,26 @@ export async function sweepTerminalNow(): Promise<number> {
     if (n === 0) break;
   }
   return total;
+}
+
+/** Why money is still on the terminal, per network — shown after a Withdraw. */
+export async function terminalWithdrawBlockers(): Promise<Array<{ label: string; asset: string; note: string; payments: number }>> {
+  const rows = await prisma.terminalPayment.findMany({
+    where: { sweepStatus: { in: ["PENDING", "RETRY", "SKIPPED", "SWEEPING"] }, receivedAmount: { not: "0" } },
+    select: { chain: true, sweepError: true, sweepStatus: true },
+  });
+  const by = new Map<string, { note: string; payments: number }>();
+  for (const r of rows) {
+    const note = r.sweepError?.trim() || (r.sweepStatus === "SWEEPING" ? "transfer in progress" : "queued — runs within a minute");
+    const k = `${r.chain}|${note.replace(/0x[0-9a-f]{64}|\(0x[^)]*\)/gi, "").slice(0, 140)}`;
+    const cur = by.get(k) ?? { note, payments: 0 };
+    cur.payments++;
+    by.set(k, cur);
+  }
+  return [...by.entries()].map(([k, v]) => {
+    const c = terminalChain(k.split("|")[0] ?? "");
+    return { label: c?.chainLabel ?? k.split("|")[0] ?? "", asset: c?.asset ?? "", note: v.note, payments: v.payments };
+  });
 }
 
 /** What is sitting on the terminal waiting to be withdrawn, per network. */

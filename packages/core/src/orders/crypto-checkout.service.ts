@@ -686,7 +686,9 @@ export async function checkCryptoPayment(kind: "order" | "topup", refId: string,
   if (own) {
     if (own.userId !== userId) throw new CoreError("VALIDATION_FAILED", "Not your payment");
     const chain = terminalChain(own.chain);
-    const row = await checkTerminalPayment(own.id);
+    // Expired too: a customer who paid after the window still gets settled
+    // (a closed order's money goes to their wallet) the moment they tap Check.
+    const row = await checkTerminalPayment(own.id, { includeExpired: true });
     const map: Record<string, string> = { WAITING: "waiting", CONFIRMING: "confirming", PARTIAL: "partially_paid", PAID: "finished", EXPIRED: "expired" };
     const settledOwn = kind === "order"
       ? Boolean(await prisma.order.findFirst({ where: { id: refId, status: { in: ["PAID", "COMPLETED", "PENDING_FULFILLMENT", "AWAITING_STOCK"] } }, select: { id: true } }))
