@@ -406,6 +406,10 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
   // variant → Buy now + Add to cart straight away; several → one row each.
   const isDefaultVariant = (n: string): boolean => /^(standard|default|regular|-)?$/i.test(n.trim());
   const single = p.variants.length === 1;
+  // 🌐 Buy on our website FIRST, Buy now second (operator's order). The
+  // product's own link, else the shop's website — so every product has it
+  // once a website is set.
+  if (p.websiteUrl) kb.url("🌐 Buy on our website", p.websiteUrl).row();
   for (const v of p.variants) {
     if (v.stock > 0 && v.priceMinor !== null) {
       const priceLabel =
@@ -424,8 +428,6 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       kb.add(sbtn(`❌ ${bl}`, cb("mnu", "noop"), "danger")).row();
     }
   }
-  // Buy on the website instead: the product's own link, else the shop's site.
-  if (p.websiteUrl) kb.url("🌐 Buy on our website", p.websiteUrl).row();
   // Notify-me options: restock when sold out, price drop always.
   if (!anyStock) {
     kb.add(sbtn(watchingStock ? "🔔 On the list — stop notifying" : "🔔 Notify me when back in stock", cb("wch", watchingStock ? "offr" : "onr", productId), watchingStock ? "primary" : "success")).row();

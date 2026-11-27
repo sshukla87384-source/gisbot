@@ -409,6 +409,14 @@ function priceMinorOf(p: any): number {
   return Math.round((major ?? 0) * 100);
 }
 
+/** An explicit "not available" flag (inStock:false, status:"out_of_stock"…). */
+function flaggedOut(o: any): boolean {
+  if (!o || typeof o !== "object") return false;
+  for (const k of ["inStock", "in_stock", "available", "is_available", "isAvailable", "instock"]) if (o[k] === false || o[k] === "false") return true;
+  const st = typeof o.status === "string" ? o.status.toLowerCase() : typeof o.stock_status === "string" ? o.stock_status.toLowerCase() : "";
+  return /out.?of.?stock|sold.?out|unavailable/.test(st);
+}
+
 function stockOf(p: any): number | null {
   const direct = pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count", "available_stock", "availableStock", "stock_available", "in_stock", "remaining", "count"]);
   if (direct !== null) return direct;
@@ -418,7 +426,59 @@ function stockOf(p: any): number | null {
     const vs = pickNum(v, ["stock", "available", "quantity"]);
     if (vs !== null) return vs;
   }
+  // No number at all, but the vendor SAYS it is out: that is 0, not "unknown"
+  // (unknown counts as available, which kept sold-out items on sale).
+  if (flaggedOut(p) || (v && flaggedOut(v))) return 0;
   return null;
+}
+
+/** Does this list response say there is more than what it returned? */
+function morePages(json: any): boolean {
+  if (!json || typeof json !== "object" || Array.isArray(json)) return false;
+  const n = (x: unknown): number | null => (typeof x === "number" ? x : typeof x === "string" && x.trim() !== "" && !Number.isNaN(Number(x)) ? Number(x) : null);
+  const objs = [json, json.meta, json.pagination, json.data && !Array.isArray(json.data) ? json.data : null].filter((o) => o && typeof o === "object");
+  for (const o of objs) {
+    if (o.hasMore === true || o.has_more === true || o.truncated === true) return true;
+    if ((typeof o.next === "string" && o.next) || (typeof o.next_page_url === "string" && o.next_page_url) || o.links?.next) return true;
+    const page = n(o.page ?? o.current_page ?? o.currentPage) ?? 1;
+    const pages = n(o.pages ?? o.last_page ?? o.lastPage ?? o.total_pages ?? o.totalPages);
+    if (pages !== null && pages > page) return true;
+  }
+  return false;
+}
+
+/**
+ * The WHOLE catalogue when the first answer was one page of many: first ask
+ * for everything at once, then walk the pages. `complete` is true only when
+ * the result is known to hold every product — sync relies on it to take
+ * products the vendor no longer lists out of the shop.
+ */
+async function completeCatalogue(
+  first: { json: any; products: SupplierProduct[] },
+  get: (q: string) => Promise<any | null>,
+  parse: (json: any) => SupplierProduct[],
+): Promise<{ products: SupplierProduct[]; complete: boolean }> {
+  if (!morePages(first.json)) return { products: first.products, complete: true };
+  for (const q of ["all=true", "limit=1000", "per_page=1000"]) {
+    const j = await get(q).catch(() => null);
+    if (!j) continue;
+    const ps = parse(j);
+    if (ps.length > first.products.length && !morePages(j)) return { products: ps, complete: true };
+  }
+  const all = [...first.products];
+  const seen = new Set(all.map((p) => `${p.ref}|${p.variantRef ?? ""}`));
+  for (let page = 2; page <= 50; page++) {
+    const j = await get(`page=${page}`).catch(() => null);
+    if (!j) return { products: all, complete: false };
+    let added = 0;
+    for (const p of parse(j)) {
+      const k = `${p.ref}|${p.variantRef ?? ""}`;
+      if (!seen.has(k)) { seen.add(k); all.push(p); added++; }
+    }
+    if (added === 0) return { products: all, complete: false }; // the page parameter is ignored
+    if (!morePages(j)) return { products: all, complete: true };
+  }
+  return { products: all, complete: false };
 }
 
 function parseProductArray(arr: any[]): SupplierProduct[] {
@@ -468,7 +528,7 @@ function findProductArray(json: any): any[] {
 }
 
 /** Try common product endpoints; return the parsed products, plus the path used and a raw sample for diagnostics. */
-async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {}): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string; trail?: string[]; keyRejected?: boolean; timedOut?: boolean }> {
+async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {}): Promise<{ products: SupplierProduct[]; path: string; raw: string; note: string; trail?: string[]; keyRejected?: boolean; timedOut?: boolean; complete?: boolean }> {
   let lastRaw = "";
   let lastNote = "";
   const trail: string[] = [];
@@ -489,10 +549,19 @@ async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {})
         const text = await res.text().catch(() => "");
         if (!res.ok) { note(`docs ${attempt} → HTTP ${res.status} ${text.slice(0, 100)}`); if (res.status === 404) break; continue; }
         let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
-        const listed = atPath(json, doc.listField);
-        const arr: any[] = Array.isArray(listed) ? listed : findProductArray(json);
-        const products = parseProductArray(Array.isArray(arr) ? arr : []);
-        if (products.length > 0) return { products, path: `docs:${attempt}`, raw: text.slice(0, 400), note: "ok" };
+        const parseDoc = (j: any): SupplierProduct[] => {
+          const listed = atPath(j, doc.listField);
+          const arr: any[] = Array.isArray(listed) ? listed : findProductArray(j);
+          return parseProductArray(Array.isArray(arr) ? arr : []);
+        };
+        const products = parseDoc(json);
+        if (products.length > 0) {
+          const full = await completeCatalogue({ json, products }, async (q) => {
+            const r2 = await fetch(withKeyParam(`${url}${url.includes("?") ? "&" : "?"}${q}`, styleOf(s), decKey(s)), { headers: authHeaders(decKey(s), styleOf(s)), signal: reqSignal(ctx) });
+            return r2.ok ? JSON.parse(await r2.text()) : null;
+          }, parseDoc);
+          return { products: full.products, complete: full.complete, path: `docs:${attempt}`, raw: text.slice(0, 400), note: "ok" };
+        }
         lastRaw = text.slice(0, 400);
         note(`docs ${attempt} → parsed 0 products`);
       } catch (e) { note(`docs → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
@@ -507,8 +576,13 @@ async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {})
       let json: any;
       try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); note(`${path || "/"} → non-JSON response`); continue; }
       const arr: any[] = findProductArray(json);
-      const products = parseProductArray(arr);
-      if (products.length > 0) {
+      const first = parseProductArray(arr);
+      if (first.length > 0) {
+        const full = await completeCatalogue({ json, products: first }, async (q) => {
+          const r2 = await supFetch(s, `${path}${path.includes("?") ? "&" : "?"}${q}`, {}, false, ctx);
+          return r2.ok ? JSON.parse(await r2.text()) : null;
+        }, (j) => parseProductArray(findProductArray(j)));
+        const products = full.products;
         // Remember the path that ACTUALLY answered, version prefix included
         // (/v1/products, not /products), so the next sync goes straight there.
         let worked = path;
@@ -519,7 +593,7 @@ async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {})
           if (full.startsWith(base)) worked = full.slice(base.length) || path;
         } catch { /* keep the probed path */ }
         void mergeDocsConfig(s.id, { productsPath: worked, baseUrl: base }); // the path is relative to THIS base
-        return { products, path: worked || "/", raw: text.slice(0, 400), note: "ok" };
+        return { products, complete: full.complete, path: worked || "/", raw: text.slice(0, 400), note: "ok" };
       }
       lastRaw = text.slice(0, 400);
       note(`${path || "/"} → parsed 0 products`);
@@ -537,7 +611,7 @@ async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {})
       const products = parseProductArray(Array.isArray(arr) ? arr : []);
       if (products.length > 0) {
         void mergeDocsConfig(s.id, { productsPath: `?action=${action}`, baseUrl: base });
-        return { products, path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
+        return { products, complete: !morePages(json), path: `?action=${action}`, raw: text.slice(0, 400), note: "ok" };
       }
       lastRaw = text.slice(0, 400);
       note(`?action=${action} → parsed 0 products`);
@@ -557,7 +631,7 @@ async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {})
       let json: any; try { json = JSON.parse(text); } catch { lastRaw = text.slice(0, 400); continue; }
       const arr: any[] = findProductArray(json);
       const products = parseProductArray(arr);
-      if (products.length > 0) return { products, path: `POST ${JSON.stringify(body)}`, raw: text.slice(0, 400), note: "ok" };
+      if (products.length > 0) return { products, complete: !morePages(json), path: `POST ${JSON.stringify(body)}`, raw: text.slice(0, 400), note: "ok" };
       lastRaw = text.slice(0, 400);
     } catch (e) { note(`POST → ${String(e instanceof Error ? e.message : e).slice(0, 120)}`); }
   }
@@ -568,6 +642,12 @@ async function probeProducts(s: SupplierRow, opts: { deadlineMs?: number } = {})
 
 export async function fetchSupplierProducts(s: SupplierRow): Promise<SupplierProduct[]> {
   return (await probeProducts(s)).products;
+}
+
+/** The catalogue plus whether it is known to be complete (not one page of many). */
+export async function fetchSupplierCatalogue(s: SupplierRow): Promise<{ products: SupplierProduct[]; complete: boolean }> {
+  const r = await probeProducts(s);
+  return { products: r.products, complete: r.complete === true };
 }
 
 /** Diagnostic for the admin: which endpoint worked, or the raw response so we can map fields. */
@@ -1100,7 +1180,8 @@ export async function syncAllSuppliers(): Promise<{ suppliers: number; updated: 
 async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { added: 0, updated: 0, skipped: 0, failed: 0 };
-  const prods = await fetchSupplierProducts(s);
+  const catalogue = await fetchSupplierCatalogue(s);
+  const prods = catalogue.products;
   // A supplier that answers nothing (wrong key, down) is not re-probed by the
   // 5-minute sweep for a while — see syncAllSuppliers.
   if (prods.length === 0) {
@@ -1132,6 +1213,9 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
   const newIds: string[] = [];
   // Restocks of products already on sale: [productId, units added].
   const restocked: Array<[string, number]> = [];
+  // Our products this catalogue still lists — anything else was sold out and
+  // dropped from the vendor's list (many vendors list in-stock items only).
+  const listedIds = new Set<string>();
   for (const p of prods) {
     try {
     const priceMinor = Math.max(1, Math.round(p.priceMinor * (1 + s.markupBp / 10000)));
@@ -1142,6 +1226,7 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
     // already rejected this product, so we skip it instead of re-creating it.
     if (seenNew.has(refKey)) { unchanged++; continue; }
     const existing = byRef.get(refKey) ?? byRef.get(p.ref) ?? null;
+    if (existing) listedIds.add(existing.id);
     if (existing?.deletedAt) {
       // The operator deleted this one. Leave it dead — do not touch its price,
       // its status, or resurrect it. "Restore" in the picker is the way back.
@@ -1231,6 +1316,22 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
       // One malformed product must never abort the rest of the catalogue.
       failed++;
       await logEvent("supplier", "warn", "supplier.sync", `Skipped ${p.ref}: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`, { supplierId }).catch(() => undefined);
+    }
+  }
+  // Sold out at the vendor = gone from their list: stock 0 and out of the shop
+  // (a stock-driven pause, so it comes back by itself when they list it
+  // again). It used to keep its last quantity — "1 left" — for ever. Only
+  // when the list is known to be COMPLETE (not one page of many), and not
+  // when it suddenly shrank to a fraction of what we know (a broken answer).
+  if (catalogue.complete) {
+    const live = known.filter((k) => !k.deletedAt);
+    const gone = live.filter((k) => !listedIds.has(k.id) && (k.supplierStock !== 0 || k.status === "ACTIVE"));
+    if (gone.length > 0 && prods.length >= Math.ceil(live.length * 0.3)) {
+      const visible = gone.filter((k) => k.status === "ACTIVE" || (k.status === "PAUSED" && k.supplierStockDrivenPause)).map((k) => k.id);
+      const quiet = gone.filter((k) => !visible.includes(k.id)).map((k) => k.id);
+      if (visible.length) await prisma.product.updateMany({ where: { id: { in: visible } }, data: { supplierStock: 0, status: "PAUSED", supplierStockDrivenPause: true } });
+      if (quiet.length) await prisma.product.updateMany({ where: { id: { in: quiet } }, data: { supplierStock: 0 } });
+      updated += gone.length;
     }
   }
   await invalidate("cat:*");
