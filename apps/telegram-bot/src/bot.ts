@@ -773,15 +773,30 @@ export function createBot(): Bot<Ctx> {
     siteCache = { at: Date.now(), url };
     return url;
   };
+  // The bar lives on the message that carried it; some Telegram apps drop it
+  // when chat clean-up removes messages around it, and it was sent only ONCE,
+  // so a customer who lost it never got it back. Now it is re-sent on /start,
+  // /menu and 🏠 Home, and at least once a day — the new bar message replaces
+  // the previous one, so the chat never collects copies.
+  const QUICK_BAR_REFRESH_MS = 24 * 3600_000;
   bot.use(async (ctx, next) => {
     await next();
     if (ctx.chat?.type !== "private" || !ctx.from || ctx.chat.id !== ctx.from.id) return;
     const site = (await shopWebsite()) ?? "";
-    if ((ctx.session.quickBarV ?? 0) >= QUICK_BAR_VERSION && (ctx.session.quickBarSite ?? "") === site) return;
+    const text = ctx.message?.text ?? "";
+    const asked = /^\/(start|menu)\b/.test(text) || QUICK_BAR_RE.test(text) && /home/i.test(text) || ctx.callbackQuery?.data === "mnu:home" || ctx.callbackQuery?.data === "fj:check";
+    const stale = (ctx.session.quickBarV ?? 0) < QUICK_BAR_VERSION
+      || (ctx.session.quickBarSite ?? "") !== site
+      || Date.now() - (ctx.session.quickBarAt ?? 0) > QUICK_BAR_REFRESH_MS;
+    if (!asked && !stale) return;
+    const prev = ctx.session.quickBarMsgId;
+    const m = await ctx.reply("⌨️ Quick menu 👇", { reply_markup: quickBarKeyboard(site || null) }).catch(() => undefined);
+    if (!m) return;
     ctx.session.quickBarV = QUICK_BAR_VERSION;
     ctx.session.quickBarSite = site;
-    await ctx.reply("⌨️ <b>Quick menu</b> is ready below 👇", { parse_mode: "HTML", reply_markup: quickBarKeyboard(site || null) })
-      .catch(() => { ctx.session.quickBarV = 0; });
+    ctx.session.quickBarAt = Date.now();
+    ctx.session.quickBarMsgId = m.message_id;
+    if (prev && prev !== m.message_id) await ctx.api.deleteMessage(ctx.chat.id, prev).catch(() => undefined);
   });
 
   bot.command("start", async (ctx) => {

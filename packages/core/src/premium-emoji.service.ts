@@ -159,12 +159,21 @@ export const UI_GLYPH_LABELS: Record<string, string> = {
   "➕": "Add", "✏️": "Edit", "🗑": "Delete", "⭐": "Star / Rating", "🪙": "Crypto / Coin", "🇮🇳": "UPI / India",
   "📊": "Stats", "🔔": "Notify", "🏆": "Tier / Reward", "👥": "Referrals", "🧑‍💻": "Developer", "🎡": "Spin",
   "💎": "VIP", "🔑": "Key", "🛟": "Support",
+  // Notifications: new product, restock, sale, price change, order feed…
+  "📣": "Announcement", "🆕": "New product", "🚀": "Launch / New stock", "🎉": "Celebration", "🚨": "Alert / Hurry",
+  "💥": "Deal", "📢": "Channel post", "⚠️": "Warning", "🏷": "Price tag", "💸": "Discount", "💲": "Price",
+  "📈": "Price up", "📉": "Price down", "🔻": "Drop", "🏪": "Store", "👇": "Tap below", "➡️": "Arrow", "🛡": "Warranty",
+  "⏰": "Ends soon", "✨": "Sparkle", "⏳": "Waiting", "🟢": "In stock", "💯": "Best", "👉": "Pointer",
 };
 
 /** The emoji the bot's own buttons and screens use most — the coverage report in 🎨 Custom Emoji. */
 export const BOT_UI_GLYPHS = [
   "◀️", "▶️", "🏠", "🛍", "🛒", "🗂", "📦", "💰", "💳", "🎁", "🔗", "📤", "⚡", "✅", "❌", "🎫", "💬", "👤", "🌐", "💱",
   "🔥", "🎯", "📋", "🔄", "🧾", "➕", "✏️", "🗑", "⭐", "🪙", "🇮🇳", "📊", "🔔", "🏆", "👥", "🧑‍💻", "🎡", "💎", "🔑", "🛟",
+  // The icons product notifications use (announcements, restock, flash sale,
+  // bulk deal, price change, order feed) — so every one can be made premium.
+  "📣", "🆕", "🚀", "🎉", "🚨", "💥", "📢", "⚠️", "🏷", "💸", "💲", "📈", "📉", "🔻", "🏪", "👇", "➡️", "🛡", "⏰", "✨",
+  "⏳", "🟢", "💯", "👉",
 ];
 
 /** Telegram caps a message's entities; stay well inside it. */

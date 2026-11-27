@@ -36,6 +36,7 @@ export interface SessionData {
     | "admin_chan_add"
     | "admin_site"
     | "admin_p_site"
+    | "admin_p_icon"
     | "admin_p_howto"
     | "admin_p_terms"
     | "admin_def_howto"
@@ -341,6 +342,9 @@ export interface SessionData {
   quickBarV?: number;
   /** The website the quick bar was sent with — a change re-sends the bar. */
   quickBarSite?: string;
+  /** The message that carries the quick bar, and when it was last sent. */
+  quickBarMsgId?: number;
+  quickBarAt?: number;
 }
 
 export type BotUser = User & { roleNames: string[] };

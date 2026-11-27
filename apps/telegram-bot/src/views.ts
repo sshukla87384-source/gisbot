@@ -417,8 +417,8 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       const buyLabel = p.buyButtonText ? `${p.buyButtonText} — ${priceLabel}` : `⚡ ${icon}Buy${single ? " now" : bl} — ${priceLabel}`;
       const buyStyle = (p.buttonStyle as "primary" | "success" | "danger" | null) ?? "success";
       kb.add(sbtn(buyLabel, cb("crt", "buynow", v.id), buyStyle, p.iconCustomEmojiId ?? undefined));
-      if (single) kb.row().add(sbtn("🛒 Add to cart", cb("crt", "add", v.id), "primary")).row();
-      else kb.add(sbtn("🛒 Add", cb("crt", "add", v.id), "primary")).row();
+      // Buy only — the "Add to cart" button was removed at the operator's request.
+      kb.row();
     } else {
       const bl = isDefaultVariant(v.name) ? "Sold out" : `${v.name} — out of stock`;
       kb.add(sbtn(`❌ ${bl}`, cb("mnu", "noop"), "danger")).row();

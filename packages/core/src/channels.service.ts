@@ -4,6 +4,7 @@ import { formatMinor, type CurrencyCode } from "@gis/shared";
 import { enqueueTelegramMessage } from "./queues.js";
 import { getRedis } from "./redis.js";
 import { groupOrderLines } from "./orders/order.service.js";
+import { productEmojiHtml } from "./broadcast.service.js";
 
 /**
  * Channels & groups the shop is linked to:
@@ -122,15 +123,23 @@ export async function postOrderToFeed(orderId: string): Promise<void> {
     select: {
       currency: true, subtotalMinor: true, discountMinor: true, createdAt: true,
       user: { select: { firstName: true, telegramHandle: true } },
-      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true } },
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, variant: { select: { product: { select: { iconEmoji: true, nameHtml: true, name: true } } } } } },
     },
   });
   if (!o || o.items.length === 0) return;
   const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const groups = groupOrderLines(o.items);
+  // The product's own (premium) emoji where it has one, else 📦.
+  const iconOf = new Map<string, string>();
+  for (const i of o.items) {
+    if (iconOf.has(i.productNameSnap)) continue;
+    const pr = i.variant.product;
+    iconOf.set(i.productNameSnap, productEmojiHtml(pr.iconEmoji, pr.nameHtml, pr.name) || "📦");
+  }
   const lines = groups.slice(0, 6).map((g) => {
     const vn = g.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${esc(g.variantNameSnap)}`;
-    return `📦 <b>${esc(g.productNameSnap)}</b>${vn} ×${g.quantity}`;
+    const name = g.productNameSnap.replace(/^\s*\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*\s*/u, "");
+    return `${iconOf.get(g.productNameSnap) ?? "📦"} <b>${esc(name)}</b>${vn} ×${g.quantity}`;
   });
   if (groups.length > 6) lines.push(`… +${groups.length - 6} more`);
   const value = Math.max(0, o.subtotalMinor - o.discountMinor);

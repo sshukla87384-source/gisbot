@@ -172,6 +172,7 @@ import {
   getShopWebsite,
   setShopWebsite,
   setProductWebsite,
+  setProductPremiumIcon,
   getProductWebsite,
   normalizeWebsiteUrl,
   type LinkedChat,
@@ -941,7 +942,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("📣 Announce restock (+qty)", cb("adm", "prestock", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("📋 How to use", cb("adm", "phow", p.id)).text("📜 Terms & Conditions", cb("adm", "pterms", p.id)).row();
-  kb.text("🌐 Website buy link", cb("adm", "psite", p.id)).row();
+  kb.text("🌐 Website buy link", cb("adm", "psite", p.id)).text("😀 Premium emoji", cb("adm", "picon", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
@@ -4965,6 +4966,20 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       ].join("\n"));
       return;
     }
+    case "picon": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_icon";
+      await askStep(ctx, [
+        "😀 <b>Premium emoji for this product</b>",
+        "",
+        "Send <b>one premium emoji</b> from your Telegram Premium emoji keyboard. It appears before the product's name on its page and in <b>every notification</b> about it — new product, restock, flash sale, bulk deal, price change and the order feed.",
+        "",
+        "Send <code>-</code> to remove it.",
+        "",
+        "<i>The icons inside notifications (📣 🆕 🚀 🔥 💥 …) are set once for the whole bot in 🎨 Custom Emoji → 🎯 Fix icons.</i>",
+      ].join("\n"));
+      return;
+    }
     case "psite": {
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_site";
@@ -5680,6 +5695,29 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     ctx.session.awaiting = null;
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_p_icon") {
+    const pid = ctx.session.admProductId ?? "";
+    if (!pid) { await ctx.reply("That product expired — open it again."); return true; }
+    if (text.trim() === "-") {
+      ctx.session.admProductId = undefined;
+      await setProductPremiumIcon(pid, null);
+      await ctx.reply("🧹 Premium emoji removed from this product.");
+      await productView(ctx, pid);
+      return true;
+    }
+    const raw = ctx.message?.text ?? "";
+    const ent = (ctx.message?.entities ?? []).find((e) => e.type === "custom_emoji") as { offset: number; length: number; custom_emoji_id?: string } | undefined;
+    if (!ent?.custom_emoji_id) {
+      ctx.session.awaiting = "admin_p_icon";
+      await ctx.reply("That isn't a premium emoji. Pick one from the <b>Telegram Premium</b> emoji keyboard (the animated ones), or send - to remove.", { parse_mode: "HTML" });
+      return true;
+    }
+    ctx.session.admProductId = undefined;
+    await setProductPremiumIcon(pid, { id: ent.custom_emoji_id, glyph: raw.slice(ent.offset, ent.offset + ent.length) });
+    await ctx.reply(`✅ Premium emoji set: <tg-emoji emoji-id="${ent.custom_emoji_id}">${escapeHtml(raw.slice(ent.offset, ent.offset + ent.length) || "⭐")}</tg-emoji> — every notification about this product uses it now.`, { parse_mode: "HTML" }).catch(() => ctx.reply("✅ Premium emoji set — every notification about this product uses it now."));
+    await productView(ctx, pid);
     return true;
   }
   if (awaiting === "admin_site" || awaiting === "admin_p_site") {

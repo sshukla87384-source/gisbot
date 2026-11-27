@@ -403,6 +403,27 @@ export async function adminDeleteProduct(id: string): Promise<void> {
   await invalidate("cat:*");
 }
 
+/**
+ * The product's own premium emoji — shown before its name on the product page
+ * and in EVERY notification about it (announcement, restock, flash sale, bulk
+ * deal, price change, order feed), which all read it from nameHtml.
+ * `icon` null removes it.
+ */
+export async function setProductPremiumIcon(productId: string, icon: { id: string; glyph: string } | null): Promise<void> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { name: true, nameHtml: true } });
+  if (!p) return;
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const lead = /^\s*<tg-emoji[^>]*>[\s\S]*?<\/tg-emoji>\s*/i;
+  const rest = p.nameHtml ? p.nameHtml.replace(lead, "") : esc(p.name.replace(/^\s*\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*\s*/u, ""));
+  const id = icon?.id.replace(/\D/g, "") ?? "";
+  const nameHtml = icon && id ? `<tg-emoji emoji-id="${id}">${esc(icon.glyph || "⭐")}</tg-emoji> ${rest}` : (rest !== esc(p.name) ? rest : null);
+  await prisma.product.update({
+    where: { id: productId },
+    data: { nameHtml: nameHtml?.slice(0, 500) ?? null, iconEmoji: icon ? (icon.glyph || "⭐").slice(0, 16) : null },
+  });
+  await invalidate("cat:*");
+}
+
 export async function setProductName(productId: string, name: string, nameHtml: string | null = null): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { name: name.slice(0, 200), nameHtml: nameHtml?.slice(0, 500) ?? null } });
   await invalidate("cat:*");
