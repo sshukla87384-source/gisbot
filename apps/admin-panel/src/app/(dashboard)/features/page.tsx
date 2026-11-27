@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Badge, Button, Card, Input, Label, Textarea } from "@/components/ui";
 import { useToast } from "@/components/toast";
-import { apiData } from "@/lib/api";
+import { apiData, downloadFile } from "@/lib/api";
 import { errorMessage } from "@/lib/utils";
 
 /**
@@ -223,10 +223,27 @@ function Combo({ f }: { f: Features }) {
 function ShopAndBackup({ f }: { f: Features }) {
   const shop = useFeature("shop");
   const backup = useFeature("backup");
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const download = async () => {
+    setBusy(true);
+    try {
+      await downloadFile("/features/backup/download", "gisbot-full-backup.json.gz");
+      toast("Backup downloaded");
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <Section title="🏬 Shop & backups">
       <Toggle on={f.shop.hideSoldOut} label="Hide sold-out products from the shop" onChange={(on) => shop.mutate({ hideSoldOut: on })} disabled={shop.isPending} />
       <Toggle on={f.backup.daily} label="Send a daily JSON backup to the admin chat" onChange={(on) => backup.mutate({ daily: on })} disabled={backup.isPending} />
+      <div className="flex flex-wrap items-center gap-3">
+        <Button onClick={() => void download()} disabled={busy}>{busy ? "Preparing…" : "⬇️ Download full backup"}</Button>
+        <span className="text-xs text-slate-400">Every table and row, as one .json.gz file. Encrypted fields need ENCRYPTION_MASTER_KEY.</span>
+      </div>
     </Section>
   );
 }

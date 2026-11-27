@@ -172,6 +172,9 @@ import {
   getShopWebsite,
   setShopWebsite,
   setProductWebsite,
+  buildFullBackup,
+  getUiLabels,
+  setUiLabel,
   setProductPremiumIcon,
   getProductWebsite,
   normalizeWebsiteUrl,
@@ -1420,7 +1423,8 @@ async function agentsView(ctx: Ctx): Promise<void> {
 async function backupView(ctx: Ctx): Promise<void> {
   const c = await getBackupConfig();
   const kb = new InlineKeyboard()
-    .text("💾 Send backup now", cb("adm", "backupnow")).row()
+    .add(sbtn("💾 Full backup — send it to me now", cb("adm", "backupfull"), "success")).row()
+    .text("📨 Send JSON backup to the admin chat", cb("adm", "backupnow")).row()
     .text(c.daily ? "⛔ Daily backup OFF" : "✅ Daily backup ON", cb("adm", "backuptog")).row()
     .text("◀️ Back", cb("adm", "m_tools"));
   await show(ctx, [
@@ -1428,7 +1432,9 @@ async function backupView(ctx: Ctx): Promise<void> {
     "",
     `Daily automatic backup: <b>${c.daily ? "ON ✅" : "OFF"}</b> (sent to the admin alert chat / admin ids).`,
     "",
-    "One JSON file with products, stock, users, wallets, orders, payments, coupons and settings. Secrets inside stay <b>encrypted</b> with ENCRYPTION_MASTER_KEY — back that key up separately, in a different place.",
+    "<b>💾 Full backup</b>: every table and every row of the database (products, stock, users, wallets, orders, payments, suppliers, settings…) in one <code>.json.gz</code> file, sent right here. The web panel has the same button (Features → Shop &amp; backups).",
+    "",
+    "Secrets inside stay <b>encrypted</b> with ENCRYPTION_MASTER_KEY — back that key up separately, in a different place. Login secrets (seed, passcode, 2FA, provider API keys) are never included.",
   ].join("\n"), kb, true);
 }
 
@@ -1749,12 +1755,32 @@ async function emojiFixView(ctx: Ctx, page: number): Promise<void> {
   ].join("\n"), kb, true);
 }
 
+/** ✏️ Button names: the admin's renames, applied to every inline button. */
+async function uiLabelsView(ctx: Ctx): Promise<void> {
+  const labels = await getUiLabels();
+  const entries = Object.entries(labels);
+  const kb = new InlineKeyboard();
+  kb.add(sbtn("➕ Rename a button", cb("adm", "uilabeladd"), "success")).row();
+  entries.slice(0, 30).forEach(([from], i) => { kb.text(`↩️ ${from.slice(0, 40)}`, cb("adm", "uilabelrm", String(i))).row(); });
+  kb.text("◀️ Back", cb("adm", "emoji"));
+  await show(ctx, [
+    "✏️ <b>Button names</b>",
+    "",
+    "Give any button in the bot your own name — Back, Next, Search, Buy now, menu buttons, pop-up buttons, all of them. The change shows everywhere that button appears.",
+    "",
+    entries.length ? entries.map(([a, b]) => `• ${escapeHtml(a)} → <b>${escapeHtml(b)}</b>`).join("\n") : "<i>No renames yet.</i>",
+    "",
+    "<i>Tap a ↩️ row to give that button its original name back. Icons: 🎯 Fix icons sets the premium emoji for each.</i>",
+  ].join("\n"), kb, true);
+}
+
 async function emojiRegistryView(ctx: Ctx): Promise<void> {
   const [reg, auto, glyphs] = await Promise.all([getCustomEmojiRegistry(), getAutoEmojiConfig(), premiumGlyphMap().catch(() => ({ map: new Map<string, string>() }))]);
   const names = Object.keys(reg);
   const kb = new InlineKeyboard()
     .add(sbtn(auto.enabled ? "✨ Premium everywhere: ON" : "✨ Premium everywhere: OFF", cb("adm", "emojiauto", auto.enabled ? "0" : "1"), auto.enabled ? "success" : "danger")).row()
     .add(sbtn("🎯 Fix icons one by one (pick the right emoji)", cb("adm", "emojifix", "0"), "success")).row()
+    .add(sbtn("✏️ Rename any button", cb("adm", "uilabels"), "primary")).row()
     .add(sbtn("🧹 Remove auto-added emoji (packs / bulk / products)", cb("adm", "emojiclean"), "danger")).row()
     .text(auto.learn ? "🧠 ALL emoji from my products (incl. app logos): ON" : "🧠 ALL emoji from my products (incl. app logos): OFF", cb("adm", "emojilearn", auto.learn ? "0" : "1")).row()
     .add(sbtn("📦 Import a premium emoji pack (1 link)", cb("adm", "emojipack"), "primary")).row()
@@ -3468,6 +3494,27 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "↩️ Type your reply — it will be sent to the customer as a Support message:");
       return;
     case "emoji": return emojiRegistryView(ctx);
+    case "uilabels": return uiLabelsView(ctx);
+    case "uilabeladd":
+      ctx.session.awaiting = "admin_ui_label";
+      await askStep(ctx, [
+        "✏️ <b>Rename buttons</b>",
+        "",
+        "Send the button exactly as customers see it, then <code>=&gt;</code>, then the new name. One per line:",
+        "<code>◀️ Back =&gt; ⬅️ Go back</code>",
+        "<code>🔍 Search products =&gt; 🔎 Find a product</code>",
+        "<code>⚡ Buy now =&gt; 🛒 Order now</code>",
+        "",
+        "Emoji in the new name turn premium by themselves once set in 🎯 Fix icons. Send <code>Old label =&gt; -</code> to undo one.",
+      ].join("\n"));
+      return;
+    case "uilabelrm": {
+      const labels = await getUiLabels();
+      const k = Object.keys(labels)[Number.parseInt(id, 10)];
+      if (k) await setUiLabel(k, null);
+      flash(ctx, "↩️ Back to the original name.");
+      return uiLabelsView(ctx);
+    }
     case "delnote": {
       const cur = (await getDeliveryInstructions()).trim();
       ctx.session.awaiting = "admin_delivery_note";
@@ -5155,6 +5202,24 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     }
     case "backup": return backupView(ctx);
     case "backuptog": { const c = await getBackupConfig(); await setBackupDaily(!c.daily); return backupView(ctx); }
+    case "backupfull": {
+      await ctx.reply("💾 Building the full backup… (a few seconds)");
+      try {
+        const r = await buildFullBackup();
+        if (r.bytes > 48 * 1024 * 1024) {
+          await ctx.reply(`⚠️ The backup is ${(r.bytes / 1048576).toFixed(1)} MB — over Telegram's 50 MB limit. Download it from the web panel (Features → Shop & backups) instead.`);
+          return;
+        }
+        const tables = Object.keys(r.counts).length;
+        const rows = Object.values(r.counts).reduce((a, b) => a + Math.max(0, b), 0);
+        await ctx.replyWithDocument(new InputFile(r.gz, r.filename), {
+          caption: `💾 Full backup — ${tables} tables, ${rows.toLocaleString("en-US")} rows (${(r.rawBytes / 1048576).toFixed(1)} MB unpacked).\nEncrypted fields need ENCRYPTION_MASTER_KEY. Keep this file private.`,
+        });
+      } catch (e) {
+        await ctx.reply(`❌ Backup failed: ${escapeHtml(e instanceof Error ? e.message : String(e))}`, { parse_mode: "HTML" });
+      }
+      return;
+    }
     case "backupnow": {
       await ctx.reply("💾 Building the backup…");
       try {
@@ -5701,6 +5766,25 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     ctx.session.awaiting = null;
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_ui_label") {
+    const lines = (ctx.message?.text ?? text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    let done = 0, undone = 0;
+    const bad: string[] = [];
+    for (const l of lines) {
+      const m = l.match(/^(.+?)\s*(?:=>|→|->)\s*(.+)$/);
+      if (!m?.[1] || !m[2]) { bad.push(l); continue; }
+      const to = m[2].trim();
+      await setUiLabel(m[1], to === "-" ? null : to);
+      if (to === "-") undone++; else done++;
+    }
+    await ctx.reply([
+      done ? `✅ ${done} button(s) renamed.` : "",
+      undone ? `↩️ ${undone} back to the original name.` : "",
+      bad.length ? `⚠️ Not understood (use <code>Old =&gt; New</code>): ${bad.slice(0, 3).map((b) => escapeHtml(b.slice(0, 40))).join(", ")}` : "",
+    ].filter(Boolean).join("\n") || "Nothing changed.", { parse_mode: "HTML" });
+    await uiLabelsView(ctx);
     return true;
   }
   if (awaiting === "admin_p_icon") {

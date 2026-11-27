@@ -1,3 +1,5 @@
+import { gzipSync } from "node:zlib";
+import { Prisma } from "@gis/database";
 import { loadConfig } from "@gis/config";
 import { prisma } from "@gis/database";
 import { randomBytes } from "node:crypto";
@@ -151,6 +153,52 @@ export async function buildBackupJson(): Promise<{ json: string; counts: Record<
   return { json: JSON.stringify(data, bigintSafe), counts };
 }
 
+/**
+ * EVERYTHING in the database — every table, every row — as one gzipped JSON
+ * file. The old JSON export stopped at a hand-picked list of tables and at
+ * 20,000 rows, and it was only ever sent to the alert chat, which often is not
+ * set: the tap failed with "No ADMIN_ALERT_CHAT_ID". This one is handed
+ * straight to whoever asked (bot or web panel).
+ *
+ * Encrypted fields stay encrypted (they need ENCRYPTION_MASTER_KEY); the
+ * handful of credential settings (seed, passcode, 2FA, provider API keys) are
+ * left out, as before.
+ */
+export async function buildFullBackup(): Promise<{ gz: Buffer; bytes: number; rawBytes: number; counts: Record<string, number>; filename: string }> {
+  const bigintSafe = (_k: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
+  const models = Prisma.dmmf.datamodel.models.map((m) => m.name);
+  const tables: Record<string, unknown[]> = {};
+  const counts: Record<string, number> = {};
+  const client = prisma as unknown as Record<string, { findMany?: (a?: unknown) => Promise<unknown[]> } | undefined>;
+  for (const name of models) {
+    const delegate = client[name.charAt(0).toLowerCase() + name.slice(1)];
+    if (!delegate?.findMany) continue;
+    try {
+      let rows = await delegate.findMany();
+      if (name === "Setting") rows = (rows as Array<{ key: string }>).filter((r) => !SECRET_SETTING_KEYS.test(r.key));
+      tables[name] = rows;
+      counts[name] = rows.length;
+    } catch (e) {
+      counts[name] = -1; // could not read; noted in meta
+      tables[name] = [];
+      void e;
+    }
+  }
+  const json = JSON.stringify({
+    meta: {
+      store: loadConfig().STORE_NAME,
+      exportedAt: new Date().toISOString(),
+      format: "gisbot-full-backup/1",
+      note: "Every table and row. Encrypted fields need ENCRYPTION_MASTER_KEY — keep that key safe and separate. Credential settings are not included.",
+      counts,
+    },
+    tables,
+  }, bigintSafe);
+  const gz = gzipSync(Buffer.from(json), { level: 9 });
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+  return { gz, bytes: gz.length, rawBytes: Buffer.byteLength(json), counts, filename: `gisbot-full-backup-${stamp}.json.gz` };
+}
+
 /** Build the export and send it to the admin alert chat / admins as a document. */
 export async function sendBackup(reason = "manual"): Promise<{ bytes: number; counts: Record<string, number> }> {
   const { json, counts } = await buildBackupJson();
@@ -161,7 +209,12 @@ export async function sendBackup(reason = "manual"): Promise<{ bytes: number; co
   const targets = new Set<string>();
   if (cfg.ADMIN_ALERT_CHAT_ID) targets.add(String(cfg.ADMIN_ALERT_CHAT_ID));
   for (const id of (cfg.BOT_ADMIN_IDS ?? "").split(",").map((x) => x.trim()).filter(Boolean)) targets.add(id);
-  if (targets.size === 0) throw new Error("No ADMIN_ALERT_CHAT_ID or BOT_ADMIN_IDS to send the backup to");
+  // Nothing configured: the admins logged in to the bot panel get it.
+  if (targets.size === 0) {
+    const members = await getRedis().smembers(BOT_ADMIN_MEMBERS_KEY).catch(() => [] as string[]);
+    for (const m of members) targets.add(m);
+  }
+  if (targets.size === 0) throw new Error("No admin chat to send the backup to — set ADMIN_ALERT_CHAT_ID, or use 💾 Full backup (sent to you)");
   if (Buffer.byteLength(json) > 45 * 1024 * 1024) {
     await enqueueAdminAlert("⚠️ Backup is over 45 MB — too large to send through Telegram. Export from the server instead (pg_dump).").catch(() => undefined);
     throw new Error("backup too large for Telegram");

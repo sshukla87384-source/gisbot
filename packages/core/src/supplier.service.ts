@@ -837,22 +837,64 @@ export async function placeSupplierOrder(
 
   // Strategy 0 — a sibling shop running this same software.
   if (variantRef) {
+    const root = s.baseUrl.replace(/\/$/, "");
+    const hdrs = { ...authHeaders(decKey(s), styleOf(s)), "Content-Type": "application/json", "Idempotency-Key": extId };
+    // Its order (keys included) by number: for a replayed purchase (same
+    // Idempotency-Key — it answers with no items) and for items it delivers
+    // a moment later (manual / its own supplier).
+    const fetchOrderKeys = async (path: string, orderNumber: string): Promise<string[]> => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const r2 = await fetch(`${root}${path}/${encodeURIComponent(orderNumber)}`, { headers: authHeaders(decKey(s), styleOf(s)), signal: AbortSignal.timeout(10_000) });
+          if (!r2.ok) continue;
+          const j2 = JSON.parse(await r2.text()) as Record<string, unknown>;
+          const body = (j2.data && typeof j2.data === "object" ? j2.data : j2) as Record<string, unknown>;
+          const k2 = extractDeliveredKeys({ items: body.deliveries ?? [] }, excl);
+          if (k2.length > 0) return k2;
+        } catch { /* retry */ }
+      }
+      return [];
+    };
     for (const path of ["/api/v1/developer/orders", "/developer/orders", "/orders"]) {
       try {
-        const res = await fetch(`${s.baseUrl.replace(/\/$/, "")}${path}`, {
-          method: "POST",
-          headers: { ...authHeaders(decKey(s), styleOf(s)), "Content-Type": "application/json", "Idempotency-Key": extId },
-          body: JSON.stringify({ variantId: variantRef, quantity: qty }),
-          signal: AbortSignal.timeout(12_000),
-        });
-        const text = await res.text().catch(() => "");
+        let res: Response | null = null;
+        let text = "";
+        // "Another purchase for this account is in progress" / "this key is
+        // still being processed" is a busy signal, not a refusal — two of our
+        // customers buying from the same vendor at once used to fail here.
+        for (let attempt = 0; attempt < 4; attempt++) {
+          res = await fetch(`${root}${path}`, { method: "POST", headers: hdrs, body: JSON.stringify({ variantId: variantRef, quantity: qty }), signal: AbortSignal.timeout(20_000) });
+          text = await res.text().catch(() => "");
+          if (res.status === 409 && /PURCHASE_IN_PROGRESS|IDEMPOTENCY_IN_FLIGHT|in progress|being processed/i.test(text) && attempt < 3) {
+            await new Promise((r) => setTimeout(r, 2500 * (attempt + 1)));
+            continue;
+          }
+          break;
+        }
+        if (!res) continue;
         if (res.status === 404) continue;
         lastRaw = text.slice(0, 500);
-        if (!res.ok) { lastReason = `${res.status} ${text.slice(0, 160)}`; break; }
+        if (!res.ok) {
+          let ej: unknown = null; try { ej = JSON.parse(text); } catch { /* not JSON */ }
+          const code = (ej as { error?: { code?: string }; code?: string } | null)?.error?.code ?? (ej as { code?: string } | null)?.code ?? "";
+          // Its own refusals (out of stock, not enough balance, product gone) are final.
+          if (res.status === 402 || /OUT_OF_STOCK|INSUFFICIENT|NOT_FOUND|VALIDATION/i.test(code)) {
+            return { ok: false, keys: [], reason: `REJECTED: ${code || res.status}`, raw: lastRaw, rejected: true };
+          }
+          lastReason = `${res.status} ${text.slice(0, 160)}`;
+          break;
+        }
         const { keys, json } = readKeys(text);
         if (keys.length > 0) return { ok: true, keys, raw: lastRaw };
         const rej = supplierRejection(json);
         if (rej) return { ok: false, keys: [], reason: `REJECTED: ${rej}`, raw: lastRaw, rejected: true };
+        const body = (json && typeof json === "object" && (json as { data?: unknown }).data && typeof (json as { data?: unknown }).data === "object" ? (json as { data: Record<string, unknown> }).data : json) as Record<string, unknown> | null;
+        const orderNumber = typeof body?.orderNumber === "string" ? body.orderNumber : null;
+        if (orderNumber) {
+          const later = await fetchOrderKeys(path, orderNumber);
+          if (later.length > 0) return { ok: true, keys: later, raw: lastRaw };
+        }
         lastReason = "ACCEPTED_NO_KEY";
         return { ok: false, keys: [], reason: lastReason, raw: lastRaw };
       } catch (e) { lastReason = String(e instanceof Error ? e.message : e).slice(0, 160); }
@@ -904,9 +946,9 @@ export async function placeSupplierOrder(
   const orderPaths = [...new Set([docCfg?.orderPath, "/orders", "/order"].filter((x): x is string => !!x).map((x) => (x.startsWith("/") ? x : `/${x}`)))];
   for (const orderPath of orderPaths) {
     try {
-      const post = (body: Record<string, unknown>) => supFetch(s, orderPath, {
+      const post = (body: Record<string, unknown>, key = extId) => supFetch(s, orderPath, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": extId },
+        headers: { "Content-Type": "application/json", "Idempotency-Key": key },
         body: JSON.stringify(body),
       });
       let res = await post({ product_id: pid, productId: pid, service_id: pid, serviceId: pid, id: pid, quantity: qty, qty, external_order_id: extId, externalOrderId: extId });
@@ -914,7 +956,10 @@ export async function placeSupplierOrder(
       // A 400 means nothing was performed: a strict validator may refuse our
       // extra field names, so try once more with only the essentials.
       if (res.status === 400) {
-        res = await post({ product_id: pid, qty, quantity: qty });
+        // A NEW idempotency key: the same key with a different body is answered
+        // "409 duplicate / idempotency conflict" by strict vendors — the 400
+        // means nothing was created, so a fresh key cannot double-buy.
+        res = await post({ product_id: pid, qty, quantity: qty }, `${extId}-r`);
         text = await res.text().catch(() => "");
       }
       if (res.status === 404 || res.status === 405) { lastReason = `${res.status} ${orderPath}`; continue; }
@@ -1254,7 +1299,13 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
       };
       const v = existing.variants[0];
       const priceOf = (cur: "USD" | "INR") => v?.prices.find((x) => x.currency === cur)?.amountMinor;
-      const pricesSame = !v || existing.priceLocked || (priceOf("USD") === priceMinor && priceOf("INR") === inrMinor);
+      // The INR price follows the live USDT rate, which moves a little every
+      // minute — rewriting it on every sync changed the price between a
+      // customer's confirm screen and their tap ("price changed, review
+      // again"). It now moves only when the rate shifted it by more than 1.5 %.
+      const curInr = priceOf("INR");
+      const inrClose = curInr !== undefined && curInr > 0 && Math.abs(curInr - inrMinor) / curInr <= 0.015;
+      const pricesSame = !v || existing.priceLocked || (priceOf("USD") === priceMinor && (priceOf("INR") === inrMinor || (inrClose && priceOf("USD") === priceMinor)));
       const rowSame = existing.name === data.name && existing.description === data.description && existing.activationGuide === data.activationGuide
         && existing.supplierStock === data.supplierStock && existing.status === data.status && existing.supplierStockDrivenPause === data.supplierStockDrivenPause;
       if (rowSame && pricesSame) { unchanged++; continue; } // nothing changed — no writes

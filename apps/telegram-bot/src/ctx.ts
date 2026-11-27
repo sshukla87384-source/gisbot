@@ -37,6 +37,7 @@ export interface SessionData {
     | "admin_site"
     | "admin_p_site"
     | "admin_p_icon"
+    | "admin_ui_label"
     | "admin_p_howto"
     | "admin_p_terms"
     | "admin_def_howto"

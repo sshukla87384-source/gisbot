@@ -220,9 +220,23 @@ const MAX_TRIES = 12;
  */
 export async function dispatchApiDeliveryWebhooks(limit = 200): Promise<{ sent: number; failed: number }> {
   const now = Date.now();
+  const redis = getRedis();
+  // Orders waiting out a back-off are left out of the query itself: counted
+  // against the limit, one reseller with a dead server held every other
+  // reseller's deliveries back for hours.
+  const backedOff: string[] = [];
+  try {
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", "apiwh:back:*", "COUNT", 500);
+      cursor = next;
+      for (const k of keys) backedOff.push(k.slice("apiwh:back:".length));
+    } while (cursor !== "0" && backedOff.length < 5000);
+  } catch { /* no exclusions */ }
   const rows = await prisma.orderItem.findMany({
     where: {
       apiNotifiedAt: null,
+      ...(backedOff.length ? { orderId: { notIn: backedOff } } : {}),
       // 10 s grace: a purchase response marks its own instant deliveries.
       fulfilledAt: { gte: new Date(now - 48 * 3600_000), lte: new Date(now - 10_000) },
       deliveryPayloadEncrypted: { not: null },
@@ -235,7 +249,6 @@ export async function dispatchApiDeliveryWebhooks(limit = 200): Promise<{ sent: 
   if (rows.length === 0) return { sent: 0, failed: 0 };
   const byOrder = new Map<string, typeof rows>();
   for (const r of rows) byOrder.set(r.orderId, [...(byOrder.get(r.orderId) ?? []), r]);
-  const redis = getRedis();
   let sent = 0, failed = 0;
   for (const [orderId, items] of byOrder) {
     const first = items[0]!;

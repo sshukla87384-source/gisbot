@@ -501,12 +501,16 @@ export class DeveloperController {
         : await checkoutWithWallet(userId, "API");
       placed = true;
       if (idemKey) await redis.set(idemKey, r.orderNumber, "EX", IDEM_TTL_SEC);
+      // Marked BEFORE anything slow: what this response returns must never also
+      // go out by webhook (a big order's checkout can run past the sweep's grace).
+      await markApiDelivered(r.orderId).catch(() => undefined);
 
       let items = r.deliveries.map((d) => apiDeliveryItem({
         productName: d.productName,
         variantName: d.variantName,
         payload: { kind: d.kind, ...d.secret },
         activationGuide: d.activationGuide,
+        ...((d as { orderItemId?: string }).orderItemId ? { orderItemId: (d as { orderItemId?: string }).orderItemId } : {}),
       }));
       let status: string = r.status;
       let pending = r.pendingManualItems;

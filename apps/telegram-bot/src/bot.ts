@@ -453,7 +453,8 @@ export function createBot(): Bot<Ctx> {
     const cmd = ctx.message?.text ?? "";
     // Both lookups at once: this runs on every single update.
     const [isAdminHere, maint] = await Promise.all([isBotAdmin(ctx.from.id), getMaintenance()]);
-    if (!isAdminHere && !cmd.startsWith("/admin") && !ctx.message?.successful_payment) {
+    // The panel opens with /shriji (and older /admin): never block the way in.
+    if (!isAdminHere && !/^\/(shriji|admin)\b/i.test(cmd) && !ctx.message?.successful_payment) {
       if (maint.enabled) {
         await ctx.reply(maint.message, { parse_mode: "HTML" }).catch(() => undefined);
         return;
@@ -755,7 +756,7 @@ export function createBot(): Bot<Ctx> {
       return showHome(ctx);
     }
     // The admin panel (and logging in to it) is never gated.
-    if (data.startsWith("adm:") || (ctx.message?.text ?? "").startsWith("/admin") || (ctx.session.awaiting ?? "").startsWith("admin_")) return next();
+    if (data.startsWith("adm:") || /^\/(shriji|admin)\b/i.test(ctx.message?.text ?? "") || (ctx.session.awaiting ?? "").startsWith("admin_")) return next();
     if (await isBotAdmin(ctx.from.id)) return next();
     const missing = await missingMustJoin(ctx.api, ctx.from.id);
     if (missing.length === 0) return next();

@@ -164,7 +164,61 @@ export const UI_GLYPH_LABELS: Record<string, string> = {
   "💥": "Deal", "📢": "Channel post", "⚠️": "Warning", "🏷": "Price tag", "💸": "Discount", "💲": "Price",
   "📈": "Price up", "📉": "Price down", "🔻": "Drop", "🏪": "Store", "👇": "Tap below", "➡️": "Arrow", "🛡": "Warranty",
   "⏰": "Ends soon", "✨": "Sparkle", "⏳": "Waiting", "🟢": "In stock", "💯": "Best", "👉": "Pointer",
+  "🔎": "Search", "🔍": "Search (alt)", "✖️": "Cancel / Close", "⬅️": "Back (alt)", "🔙": "Back (alt 2)", "📂": "Folder / Category",
+  "💾": "Saved", "⚙️": "Settings", "🆘": "Help", "ℹ️": "Info",
 };
+
+// ── Button names ──────────────────────────────────────────────────────────────
+
+const LABELS_KEY = "ui.labels";
+let labelCache: { at: number; map: Map<string, string> } | null = null;
+
+/** Admin renames: exact button text → new text, applied to every inline button. */
+export async function getUiLabels(): Promise<Record<string, string>> {
+  const row = await prisma.setting.findUnique({ where: { key: LABELS_KEY } }).catch(() => null);
+  const v = row?.value;
+  return v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([, x]) => typeof x === "string")) as Record<string, string> : {};
+}
+
+export async function setUiLabel(from: string, to: string | null): Promise<Record<string, string>> {
+  const cur = await getUiLabels();
+  const k = from.trim();
+  if (!k) return cur;
+  if (to === null || !to.trim()) delete cur[k];
+  else cur[k] = to.trim().slice(0, 60);
+  await prisma.setting.upsert({ where: { key: LABELS_KEY }, create: { key: LABELS_KEY, value: cur }, update: { value: cur } });
+  labelCache = null;
+  return cur;
+}
+
+async function uiLabelMap(): Promise<Map<string, string>> {
+  if (labelCache && Date.now() - labelCache.at < 60_000) return labelCache.map;
+  const map = new Map(Object.entries(await getUiLabels().catch(() => ({}))).map(([k, v]) => [norm(k), v] as const));
+  labelCache = { at: Date.now(), map };
+  return map;
+}
+
+/** Labels compare without variation selectors / extra spaces, so "◀ Back" matches "◀️ Back". */
+const norm = (t: string): string => t.replace(/\uFE0F/g, "").replace(/\s+/g, " ").trim();
+
+function relabelKeyboard<T>(markup: T, map: Map<string, string>): T {
+  const kb = (markup as { inline_keyboard?: Btn[][] } | undefined)?.inline_keyboard;
+  if (!Array.isArray(kb) || map.size === 0) return markup;
+  let changed = false;
+  const rows = kb.map((row) => row.map((b) => {
+    if (!b || typeof b.text !== "string") return b;
+    // Exact label first, then the label with a trailing count/price removed
+    // ("🛒 Cart (3)" → "🛒 Cart"), so a rename survives the changing part.
+    const t = norm(b.text);
+    const exact = map.get(t);
+    if (exact) { changed = true; return { ...b, text: exact }; }
+    const m = t.match(/^(.*?)(\s*(?:\(.*\)|—.*|·.*))$/);
+    const base = m?.[1] ? map.get(m[1].trim()) : undefined;
+    if (base && m) { changed = true; return { ...b, text: `${base}${m[2]}` }; }
+    return b;
+  }));
+  return changed ? ({ ...(markup as object), inline_keyboard: rows } as T) : markup;
+}
 
 /** The emoji the bot's own buttons and screens use most — the coverage report in 🎨 Custom Emoji. */
 export const BOT_UI_GLYPHS = [
@@ -174,6 +228,8 @@ export const BOT_UI_GLYPHS = [
   // bulk deal, price change, order feed) — so every one can be made premium.
   "📣", "🆕", "🚀", "🎉", "🚨", "💥", "📢", "⚠️", "🏷", "💸", "💲", "📈", "📉", "🔻", "🏪", "👇", "➡️", "🛡", "⏰", "✨",
   "⏳", "🟢", "💯", "👉",
+  // Navigation & search used on almost every screen.
+  "🔎", "🔍", "✖️", "⬅️", "🔙", "📂", "💾", "⚙️", "🆘", "ℹ️",
 ];
 
 /** Telegram caps a message's entities; stay well inside it. */
@@ -272,6 +328,16 @@ export function premiumEmojiTransformer(opts: { buttons: boolean }) {
   // showing". Now it takes three refusals in a row, and a success resets it.
   let strikes = 0;
   return async (prev: ApiCall, method: string, payload: unknown, signal?: AbortSignal) => {
+    // Button renames from 🎨 Custom Emoji → ✏️ Button names apply first, with
+    // or without premium emoji.
+    if (MARKUP_METHODS.has(method) && payload && typeof payload === "object" && (payload as Record<string, unknown>).reply_markup) {
+      const labels = await uiLabelMap().catch(() => new Map<string, string>());
+      if (labels.size > 0) {
+        const rm = (payload as Record<string, unknown>).reply_markup;
+        const relabeled = relabelKeyboard(rm, labels);
+        if (relabeled !== rm) payload = { ...(payload as Record<string, unknown>), reply_markup: relabeled };
+      }
+    }
     if (!MARKUP_METHODS.has(method) || !payload || typeof payload !== "object" || Date.now() < refusedUntil) return prev(method, payload, signal);
     let state: { cfg: AutoEmojiConfig; map: Map<string, string> };
     try { state = await premiumGlyphMap(); } catch { return prev(method, payload, signal); }

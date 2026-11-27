@@ -5,6 +5,7 @@ import {
   getAlwaysAdminHandle,
   getAlwaysAdminId,
   getBackupConfig,
+  buildFullBackup,
   getComboConfig,
   getEnabledCryptoNetworks,
   getHideSoldOut,
@@ -38,7 +39,8 @@ import {
   setTerminalConfig,
   setTerminalPayout,
 } from "@gis/core";
-import { Body, Controller, Get, Module, Param, Patch, Req } from "@nestjs/common";
+import { Body, Controller, Get, Module, Param, Patch, Req, StreamableFile } from "@nestjs/common";
+import { SkipEnvelope } from "../common/permissions.decorator.js";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { z } from "zod";
 import { writeAudit } from "../common/audit.js";
@@ -150,6 +152,16 @@ export class FeaturesController {
   @Get()
   all() {
     return snapshot();
+  }
+
+  /** ⬇️ Full database backup (every table) as a .json.gz download. */
+  @RequirePermission("settings.write")
+  @SkipEnvelope()
+  @Get("backup/download")
+  async downloadBackup(@Req() req: ApiRequest) {
+    const r = await buildFullBackup();
+    await writeAudit(req, "backup.download", "Setting", "backup", undefined, { bytes: r.bytes, counts: r.counts }).catch(() => undefined);
+    return new StreamableFile(r.gz, { type: "application/gzip", disposition: `attachment; filename="${r.filename}"`, length: r.bytes });
   }
 
   @RequirePermission("settings.write")

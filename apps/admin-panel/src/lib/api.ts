@@ -169,6 +169,35 @@ export async function apiData<T>(path: string, options: RequestOptions = {}): Pr
 }
 
 
+/** Authenticated file download (e.g. the full backup): saves what the API returns. */
+export async function downloadFile(path: string, fallbackName: string): Promise<void> {
+  const url = `${BASE_URL}${path}`;
+  const doFetch = (): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    const token = authStore.getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return fetch(url, { credentials: "include", headers, signal: AbortSignal.timeout(180_000) });
+  };
+  let res = await doFetch();
+  if (res.status === 401) {
+    const refreshed = await refreshSession();
+    if (refreshed) res = await doFetch();
+  }
+  if (!res.ok) {
+    const json = (await res.json().catch(() => null)) as Envelope | null;
+    throw new ApiError(json?.error?.message ?? `Download failed (${res.status})`, json?.error?.code ?? "DOWNLOAD_ERROR", res.status);
+  }
+  const name = /filename="?([^";]+)"?/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? fallbackName;
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+}
+
 /** Multipart upload helper (the JSON `api` wrapper can't send FormData). */
 export async function uploadFile<T>(path: string, file: File): Promise<T> {
   const url = `${BASE_URL}${path}`;
