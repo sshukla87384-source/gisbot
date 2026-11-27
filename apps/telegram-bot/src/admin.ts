@@ -173,6 +173,8 @@ import {
   setShopWebsite,
   setProductWebsite,
   buildFullBackup,
+  getWebShopEnabled,
+  setWebShopEnabled,
   getUiLabels,
   setUiLabel,
   setProductPremiumIcon,
@@ -616,6 +618,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
       [["📋 How to use (all products)", cb("adm", "defhow"), "primary"], ["📜 Terms (all products)", cb("adm", "defterms"), "primary"]],
       [["📢 Channels & groups", cb("adm", "chans"), "success"], ["🌐 Website link", cb("adm", "site"), "primary"]],
+      [["🛒 Web shop (website)", cb("adm", "wshop"), "success"]],
       [["😴 Sold-out products", cb("adm", "hidesold"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
@@ -1211,6 +1214,35 @@ async function railsView(ctx: Ctx): Promise<void> {
  * Self-hosted crypto terminal: a 12-word seed on this server, a fresh address
  * per payment, auto-sweep to the operator's own wallet. No processor, no KYC.
  */
+/** Where the web shop lives by default: https://api.<domain>/shop (the API host already has its certificate). */
+function webShopUrl(): string | null {
+  const api = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/+$/, "");
+  return /^https:\/\//.test(api) ? `${api}/shop` : null;
+}
+
+/** 🛒 Web shop: on/off, its address, and linking it to the bot's 🌐 buttons. */
+async function webShopAdminView(ctx: Ctx): Promise<void> {
+  const [on, site] = await Promise.all([getWebShopEnabled(), getShopWebsite()]);
+  const url = webShopUrl();
+  const kb = new InlineKeyboard();
+  kb.add(sbtn(on ? "🟢 Web shop: ON — tap to close" : "🔴 Web shop: OFF — tap to open", cb("adm", "wshoptog"), on ? "success" : "danger")).row();
+  if (url) kb.url("🌐 Open the web shop", url).row();
+  if (url && site !== url) kb.text("🔗 Use it for the bot's 🌐 Website buttons", cb("adm", "wshoplink")).row();
+  kb.text("◀️ Back", cb("adm", "m_content"));
+  await show(ctx, [
+    "🛒 <b>Web shop</b>",
+    "",
+    "Your shop as a normal website: same products, prices, stock, wallet and orders as the bot. Customers log in with Telegram, pay from the wallet (top up with crypto right there), and get their keys on the page and in Telegram.",
+    "",
+    url ? `🔗 Address: <code>${escapeHtml(url)}</code>` : "⚠️ Set PUBLIC_API_URL (https) in .env to get the address.",
+    site ? `🌐 Bot website buttons open: <code>${escapeHtml(site)}</code>` : "",
+    "",
+    "<b>Login setup (once):</b> BotFather → /setdomain → pick this bot → send the web shop's domain (for now the <code>api.</code> domain above). Without it the Telegram login button says \"Bot domain invalid\".",
+    "",
+    "<b>Own domain:</b> point its DNS A record to the server, set <code>SHOP_DOMAIN=yourdomain.com</code> in .env, run <code>./infrastructure/scripts/get-shop-cert.sh full</code>, then /setdomain to the new domain and set 🌐 Website link to it.",
+  ].filter(Boolean).join("\n"), kb, true);
+}
+
 /** 📢 Channels & groups: must-join list and order-feed list. */
 async function channelsView(ctx: Ctx): Promise<void> {
   const c = await getChannelsConfig();
@@ -4974,6 +5006,13 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       return;
     }
     case "chans": return channelsView(ctx);
+    case "wshop": return webShopAdminView(ctx);
+    case "wshoptog": { await setWebShopEnabled(!(await getWebShopEnabled())); return webShopAdminView(ctx); }
+    case "wshoplink": {
+      const url = webShopUrl();
+      if (url) { await setShopWebsite(url); flash(ctx, "✅ The 🌐 buttons in the bot (menu, quick bar, every product) now open the web shop."); }
+      return webShopAdminView(ctx);
+    }
     case "chfj": {
       const c = await getChannelsConfig();
       await setChannelsConfig({ forceJoin: !c.forceJoin });

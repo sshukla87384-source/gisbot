@@ -49,9 +49,24 @@ if docker run --rm -v gis_certbot_certs:/c alpine test -d "/c/live/${NGINX_DOMAI
   HAS_ROOT_CERT=1
 fi
 
-echo "==> Rendering nginx config for ${NGINX_DOMAIN} (root cert: ${HAS_ROOT_CERT})"
-sed "s/__DOMAIN__/${NGINX_DOMAIN}/g" infrastructure/nginx/gis.conf \
+# Optional: the web shop on its own domain (SHOP_DOMAIN=mystore.com in .env).
+# Its block is only rendered once its certificate exists (get-shop-cert.sh).
+SHOP_DOMAIN="$(grep -E '^SHOP_DOMAIN=' .env | head -n1 | cut -d= -f2- || true)"
+SHOP_DOMAIN="${SHOP_DOMAIN%%#*}"; SHOP_DOMAIN="${SHOP_DOMAIN//[[:space:]]/}"
+SHOP_DOMAIN="${SHOP_DOMAIN//\"/}"; SHOP_DOMAIN="${SHOP_DOMAIN//\'/}"
+SHOP_DOMAIN="${SHOP_DOMAIN#https://}"; SHOP_DOMAIN="${SHOP_DOMAIN#http://}"; SHOP_DOMAIN="${SHOP_DOMAIN%%/*}"
+HAS_SHOP_CERT=0
+if [ -n "$SHOP_DOMAIN" ] && docker run --rm -v gis_certbot_certs:/c alpine test -d "/c/live/${SHOP_DOMAIN}" 2>/dev/null; then
+  HAS_SHOP_CERT=1
+fi
+
+echo "==> Rendering nginx config for ${NGINX_DOMAIN} (root cert: ${HAS_ROOT_CERT}, shop domain: ${SHOP_DOMAIN:-none} cert: ${HAS_SHOP_CERT})"
+sed -e "s/__DOMAIN__/${NGINX_DOMAIN}/g" -e "s/__SHOP_DOMAIN__/${SHOP_DOMAIN:-shop.invalid}/g" infrastructure/nginx/gis.conf \
   > infrastructure/nginx/gis.rendered.conf
+if [ "$HAS_SHOP_CERT" != "1" ]; then
+  sed -i '/# >>> SHOP_DOMAIN/,/# <<< SHOP_DOMAIN/d' infrastructure/nginx/gis.rendered.conf
+  [ -n "$SHOP_DOMAIN" ] && echo "    (shop domain ${SHOP_DOMAIN} waits for its certificate — run get-shop-cert.sh)"
+fi
 if [ "$HAS_ROOT_CERT" != "1" ]; then
   # Remove the landing HTTPS block so nginx starts without the root cert.
   # (The landing page still serves over http until the cert is obtained.)
