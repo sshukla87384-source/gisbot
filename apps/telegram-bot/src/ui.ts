@@ -27,7 +27,7 @@ export function mainMenuText(user: BotUser, balanceMinor: bigint, orderCount: nu
   ].join("\n");
 }
 
-export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: string; icon?: string } | undefined> = {}, miniApp: string | null = null): InlineKeyboard {
+export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: string; icon?: string } | undefined> = {}, miniApp: string | null = null, website: string | null = null): InlineKeyboard {
   const loc = user.locale;
   const L = (key: string, fallback: string) => cfg[key]?.label || fallback;
   const I = (key: string) => cfg[key]?.icon;
@@ -37,7 +37,10 @@ export function mainMenuKeyboard(user: BotUser, cfg: Record<string, { label?: st
   if (miniApp) kb.webApp(L("miniapp", "🛍 Open Shop (Mini App)"), miniApp).row();
   kb
     .add(sbtn(L("shop", t(loc, "b_shopnow")), cb("shp", "home", 1), "success", I("shop")))
-    .row()
+    .row();
+  // The shop's website, for customers who prefer to buy there.
+  if (website) kb.url("🌐 Shop on our website", website).row();
+  kb
     // "🗂 Shop by Category" and the outer "📦 My Orders" were removed at the
     // operator's request: categories are tiles inside Shop Now, and My Orders
     // lives inside 👤 My Account. Their handlers stay, so old buttons still work.

@@ -33,6 +33,9 @@ export interface SessionData {
     | "admin_p_editdesc"
     | "admin_p_guide"
     | "admin_sup_search"
+    | "admin_chan_add"
+    | "admin_site"
+    | "admin_p_site"
     | "admin_p_howto"
     | "admin_p_terms"
     | "admin_def_howto"
@@ -190,6 +193,8 @@ export interface SessionData {
   supPage?: number;
   /** Name filter in a supplier's product list. */
   supSearch?: string;
+  /** Which list the admin is adding a chat to (must-join / order feed). */
+  chanKind?: "mustJoin" | "orderFeed";
   supFilter?: "all" | "visible" | "hidden" | "deleted" | "new";
   /** "quick" = tapping a row publishes/hides it instantly; "select" = tapping ticks it. */
   supMode?: "select" | "quick";
@@ -223,6 +228,8 @@ export interface SessionData {
   tmChain?: string;
   /** The current home card, replaced (not stacked) on the next /start or /menu. */
   menuMsgId?: number;
+  /** The "join to continue" card currently shown, replaced rather than stacked. */
+  fjMsgId?: number;
   /** FAQ question held between the two admin prompts. */
   faqQTmp?: string;
   /** Ticket text held while the FAQ hint is shown; set once the hint was offered. */
@@ -332,6 +339,8 @@ export interface SessionData {
   isNewUser?: boolean;
   /** Version of the quick bar (reply keyboard) this chat already has. */
   quickBarV?: number;
+  /** The website the quick bar was sent with — a change re-sends the bar. */
+  quickBarSite?: string;
 }
 
 export type BotUser = User & { roleNames: string[] };

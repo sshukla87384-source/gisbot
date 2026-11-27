@@ -1,5 +1,6 @@
 import {
   alsoBought,
+  getShopWebsite,
   getApiWebhook,
   availableCryptoNetworks,
   binanceOffered,
@@ -118,14 +119,15 @@ export interface View {
 export async function menuView(user: BotUser): Promise<View> {
   // getButtonConfig was a separate sequential round trip on the most-rendered
   // screen in the bot.
-  const [wallet, orderCount, btnCfg, miniCfg] = await Promise.all([
+  const [wallet, orderCount, btnCfg, miniCfg, website] = await Promise.all([
     getWallet(user.id),
     prisma.order.count({ where: { userId: user.id } }),
     getButtonConfig(),
     getMiniAppConfig(),
+    getShopWebsite().catch(() => null),
   ]);
   const miniApp = miniCfg.enabled ? await miniAppReachableUrl() : null;
-  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg, miniApp) };
+  return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg, miniApp, website) };
 }
 
 
@@ -422,6 +424,8 @@ export async function productView(user: BotUser, productId: string): Promise<Vie
       kb.add(sbtn(`❌ ${bl}`, cb("mnu", "noop"), "danger")).row();
     }
   }
+  // Buy on the website instead: the product's own link, else the shop's site.
+  if (p.websiteUrl) kb.url("🌐 Buy on our website", p.websiteUrl).row();
   // Notify-me options: restock when sold out, price drop always.
   if (!anyStock) {
     kb.add(sbtn(watchingStock ? "🔔 On the list — stop notifying" : "🔔 Notify me when back in stock", cb("wch", watchingStock ? "offr" : "onr", productId), watchingStock ? "primary" : "success")).row();

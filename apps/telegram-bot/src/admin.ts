@@ -165,6 +165,16 @@ import {
   setProductName,
   setProductDescription,
   setProductActivationGuide,
+  getChannelsConfig,
+  setChannelsConfig,
+  addLinkedChat,
+  removeLinkedChat,
+  getShopWebsite,
+  setShopWebsite,
+  setProductWebsite,
+  getProductWebsite,
+  normalizeWebsiteUrl,
+  type LinkedChat,
   setProductSection,
   getProductSections,
   getProductSectionDefaults,
@@ -601,6 +611,7 @@ async function showSubmenu(ctx: Ctx, route: string): Promise<boolean> {
       [["🎨 Custom Emoji", cb("adm", "emoji"), "primary"], ["🔤 Button Labels", cb("adm", "btns"), "primary"]],
       [["📋 Delivery Note", cb("adm", "delnote"), "primary"]],
       [["📋 How to use (all products)", cb("adm", "defhow"), "primary"], ["📜 Terms (all products)", cb("adm", "defterms"), "primary"]],
+      [["📢 Channels & groups", cb("adm", "chans"), "success"], ["🌐 Website link", cb("adm", "site"), "primary"]],
       [["😴 Sold-out products", cb("adm", "hidesold"), "primary"]],
       [["🌐 Auto-Translate", cb("adm", "trcfg"), "primary"]],
       [["💬 After-sale message", cb("adm", "fup"), "success"]],
@@ -930,6 +941,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.row().text("📣 Announce restock (+qty)", cb("adm", "prestock", p.id));
   kb.row().text("✏️ Name", cb("adm", "pname", p.id)).text("✏️ Description", cb("adm", "pdesc", p.id)).row();
   kb.text("📋 How to use", cb("adm", "phow", p.id)).text("📜 Terms & Conditions", cb("adm", "pterms", p.id)).row();
+  kb.text("🌐 Website buy link", cb("adm", "psite", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
   if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
@@ -1195,6 +1207,66 @@ async function railsView(ctx: Ctx): Promise<void> {
  * Self-hosted crypto terminal: a 12-word seed on this server, a fresh address
  * per payment, auto-sweep to the operator's own wallet. No processor, no KYC.
  */
+/** 📢 Channels & groups: must-join list and order-feed list. */
+async function channelsView(ctx: Ctx): Promise<void> {
+  const c = await getChannelsConfig();
+  const kb = new InlineKeyboard();
+  const icon = (x: LinkedChat) => (x.type === "channel" ? "📢" : "👥");
+  kb.add(sbtn(c.forceJoin ? "🔒 Must-join: ON — tap to turn off" : "🔓 Must-join: OFF — tap to turn on", cb("adm", "chfj"), c.forceJoin ? "success" : "danger")).row();
+  for (const x of c.mustJoin) kb.text(`🗑 ${icon(x)} ${x.title.slice(0, 30)}`, cb("adm", "chrm", `m~${x.chatId}`)).row();
+  kb.add(sbtn("➕ Add must-join channel / group", cb("adm", "chadd", "must"), "primary")).row();
+  for (const x of c.orderFeed) kb.text(`🗑 ${icon(x)} ${x.title.slice(0, 30)}`, cb("adm", "chrm", `f~${x.chatId}`)).row();
+  kb.add(sbtn("➕ Add order-feed channel / group", cb("adm", "chadd", "feed"), "primary")).row();
+  kb.text(c.feedShowPrice ? "💰 Feed shows price: ON" : "💰 Feed shows price: OFF", cb("adm", "chprice")).row();
+  kb.text("◀️ Back", cb("adm", "m_content"));
+  await show(ctx, [
+    "📢 <b>Channels & groups</b>",
+    "",
+    "🔒 <b>Must join</b> — customers can't use the bot (shop, wallet, buy…) until they have joined <b>all</b> of these. Leaving locks them out again within ~2 minutes.",
+    c.mustJoin.length ? c.mustJoin.map((x) => `${icon(x)} <b>${escapeHtml(x.title)}</b>${x.link ? "" : " ⚠️ no join link"}`).join("\n") : "<i>None yet.</i>",
+    c.mustJoin.length && !c.forceJoin ? "<i>(switched off — nobody is asked to join)</i>" : "",
+    "",
+    "🔔 <b>Order feed</b> — every paid order is posted here (buyer's name masked).",
+    c.orderFeed.length ? c.orderFeed.map((x) => `${icon(x)} <b>${escapeHtml(x.title)}</b>`).join("\n") : "<i>None yet.</i>",
+    "",
+    "<i>Add the bot to each chat first — as an <b>admin</b> in channels. Tap a 🗑 row to remove it. Admins are never asked to join.</i>",
+  ].filter((l) => l !== "").join("\n"), kb, true);
+}
+
+/** Turn what the admin sent (@name, t.me link, forwarded post, "id link") into a chat the bot can use. */
+async function resolveLinkedChat(ctx: Ctx, raw: string, kind: "mustJoin" | "orderFeed"): Promise<{ ok: true; chat: LinkedChat; warn?: string } | { ok: false; reason: string }> {
+  const msg = ctx.message as unknown as { forward_origin?: { type?: string; chat?: { id: number } } } | undefined;
+  const fo = msg?.forward_origin;
+  let ref: string | number | null = fo?.type === "channel" && fo.chat ? fo.chat.id : null;
+  const t = raw.trim();
+  const linkGiven = t.match(/https?:\/\/t\.me\/\+?[A-Za-z0-9_-]+/)?.[0] ?? null;
+  if (ref === null) {
+    const idTok = t.match(/-?\d{6,}/)?.[0];
+    const user = t.match(/(?:t\.me\/|@)([A-Za-z][A-Za-z0-9_]{3,})/)?.[1];
+    ref = idTok ?? (user ? `@${user}` : null);
+  }
+  if (ref === null) return { ok: false, reason: "Send its @username, a t.me/… link, forward a post from it, or send <code>id invite-link</code>." };
+  let chat: Awaited<ReturnType<Ctx["api"]["getChat"]>>;
+  try { chat = await ctx.api.getChat(ref); } catch {
+    return { ok: false, reason: "I can't see that chat. Add this bot to it first (as <b>admin</b> in a channel), then send it again." };
+  }
+  if (chat.type === "private") return { ok: false, reason: "That is a person, not a channel or group." };
+  let status = "";
+  try { status = (await ctx.api.getChatMember(chat.id, ctx.me.id)).status; } catch { /* not in it */ }
+  const isAdmin = status === "administrator" || status === "creator";
+  if (chat.type === "channel" && !isAdmin) return { ok: false, reason: `Make this bot an <b>admin</b> of the channel first — it needs that to ${kind === "orderFeed" ? "post there" : "see who joined"}.` };
+  if (!isAdmin && status !== "member") return { ok: false, reason: "Add this bot to the group first, then send it again." };
+  const username = "username" in chat && chat.username ? chat.username : null;
+  let link: string | null = username ? `https://t.me/${username}` : linkGiven ?? ("invite_link" in chat && chat.invite_link ? chat.invite_link : null);
+  if (!link && isAdmin) link = await ctx.api.exportChatInviteLink(chat.id).catch(() => null);
+  const title = "title" in chat && chat.title ? chat.title : "Chat";
+  return {
+    ok: true,
+    chat: { chatId: String(chat.id), title, link, type: chat.type },
+    ...(kind === "mustJoin" && !link ? { warn: "No join link — give the bot \"Invite users\" rights, or send the id with an invite link." } : {}),
+  };
+}
+
 async function terminalView(ctx: Ctx): Promise<void> {
   const [seeded, cfg, stats, waiting] = await Promise.all([hasTerminalSeed(), getTerminalConfig(), terminalStats().catch(() => null), terminalWaitingTotals().catch(() => [])]);
   const fp = seeded ? await terminalFingerprint() : "";
@@ -4851,6 +4923,60 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await askStep(ctx, "✏️ Send the new <b>description</b> (one feature per line looks best):");
       return;
     }
+    case "chans": return channelsView(ctx);
+    case "chfj": {
+      const c = await getChannelsConfig();
+      await setChannelsConfig({ forceJoin: !c.forceJoin });
+      return channelsView(ctx);
+    }
+    case "chprice": {
+      const c = await getChannelsConfig();
+      await setChannelsConfig({ feedShowPrice: !c.feedShowPrice });
+      return channelsView(ctx);
+    }
+    case "chadd": {
+      ctx.session.chanKind = id === "feed" ? "orderFeed" : "mustJoin";
+      ctx.session.awaiting = "admin_chan_add";
+      await askStep(ctx, [
+        id === "feed" ? "🔔 <b>Add an order-feed channel / group</b>" : "🔒 <b>Add a must-join channel / group</b>",
+        "",
+        "1️⃣ Add this bot to it — in a <b>channel</b> make it an <b>admin</b> (it needs that to " + (id === "feed" ? "post" : "see who joined") + ").",
+        "2️⃣ Then send me one of:",
+        "• its <b>@username</b> or <b>t.me/…</b> link (public chats)",
+        "• <b>forward any post</b> from the channel here",
+        "• for a private chat: its id and invite link, e.g. <code>-1001234567890 https://t.me/+AbCd…</code>",
+      ].join("\n"));
+      return;
+    }
+    case "chrm": {
+      const [kind, chatId] = id.split("~");
+      if (chatId) await removeLinkedChat(kind === "f" ? "orderFeed" : "mustJoin", chatId);
+      flash(ctx, "🗑 Removed.");
+      return channelsView(ctx);
+    }
+    case "site": {
+      const cur = await getShopWebsite();
+      ctx.session.awaiting = "admin_site";
+      await askStep(ctx, [
+        "🌐 <b>Your website</b>",
+        "Shown as <b>🌐 Shop on our website</b> in the menu, in the quick bar, and on every product that has no link of its own.",
+        cur ? `\nNow: ${escapeHtml(cur)}` : "\nNot set.",
+        "\nSend the link (e.g. <code>https://getitsasta.cloud</code>), or <code>-</code> to remove it.",
+      ].join("\n"));
+      return;
+    }
+    case "psite": {
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_site";
+      const own = await getProductWebsite(id).catch(() => null);
+      await askStep(ctx, [
+        "🌐 <b>Website buy link for this product</b>",
+        "Customers see <b>🌐 Buy on our website</b> on this product and land on this page.",
+        own ? `\nNow: ${escapeHtml(own)}` : "\nNow: the shop's website (if set).",
+        "\nSend the product's link, or <code>-</code> to use the shop's website.",
+      ].join("\n"));
+      return;
+    }
     case "phow":
     case "pterms": {
       const section = action === "phow" ? "howto" : "terms";
@@ -5554,6 +5680,34 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     ctx.session.awaiting = null;
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_site" || awaiting === "admin_p_site") {
+    const pid = ctx.session.admProductId ?? "";
+    const clear = text.trim() === "-";
+    const url = clear ? null : normalizeWebsiteUrl(text);
+    if (!clear && !url) { ctx.session.awaiting = awaiting; await ctx.reply("That isn't a valid link — send something like https://yourshop.com/product, or - to clear."); return true; }
+    if (awaiting === "admin_site") {
+      await setShopWebsite(url);
+      await ctx.reply(url ? `✅ Website saved: ${url}\nIt appears in the menu, the quick bar and on products without their own link.` : "🧹 Website removed.");
+      await sendPanel(ctx, false);
+    } else {
+      ctx.session.admProductId = undefined;
+      if (!pid) { await ctx.reply("That product expired — open it again."); return true; }
+      await setProductWebsite(pid, url);
+      await ctx.reply(url ? "✅ Website buy link saved for this product." : "↩️ This product now uses the shop's website link.");
+      await productView(ctx, pid);
+    }
+    return true;
+  }
+  if (awaiting === "admin_chan_add") {
+    const kind = ctx.session.chanKind ?? "mustJoin";
+    const r = await resolveLinkedChat(ctx, text, kind);
+    if (!r.ok) { ctx.session.awaiting = "admin_chan_add"; await ctx.reply(`❌ ${r.reason}\n\nTry again, or tap 🏠 to cancel.`, { parse_mode: "HTML" }); return true; }
+    await addLinkedChat(kind, r.chat);
+    ctx.session.chanKind = undefined;
+    flash(ctx, `✅ <b>${escapeHtml(r.chat.title)}</b> added${kind === "mustJoin" ? " — customers must join it to use the bot." : " — every paid order is posted there."}${r.warn ? `\n⚠️ ${r.warn}` : ""}`);
+    await channelsView(ctx);
     return true;
   }
   if (awaiting === "admin_sup_search") {

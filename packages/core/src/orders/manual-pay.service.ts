@@ -927,6 +927,8 @@ async function notifyReplacementToBuyer(
 
 /** Fire on EVERY paid order: auto-fulfil supplier items, then notify admins with a full summary. */
 export async function notifyOrderToAdmins(orderId: string, method = "order"): Promise<void> {
+  // Public "🛒 New order" post in the order-feed channel / group, if set.
+  void import("../channels.service.js").then((m) => m.postOrderToFeed(orderId)).catch(() => undefined);
   // After-sale follow-up (review request / promo), if the admin enabled one.
   void scheduleFollowup(orderId, loadConfig().STORE_NAME).catch(() => undefined);
   // Tier may have changed with this order — tell them if so (never blocks).

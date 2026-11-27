@@ -27,7 +27,7 @@ export function sbtn(text: string, data: string, style?: BtnStyle, iconCustomEmo
  * matched by QUICK_BAR_RE in bot.ts, so keep the words in step.
  */
 export const QUICK_BAR_VERSION = 1;
-export function quickBarKeyboard(): ReplyKeyboardMarkup {
+export function quickBarKeyboard(website: string | null = null): ReplyKeyboardMarkup {
   const styled = loadConfig().BUTTON_STYLES_ENABLED;
   const b = (text: string, style?: BtnStyle): KeyboardButton => {
     const k: KeyboardButton.CommonButton = { text };
@@ -38,6 +38,8 @@ export function quickBarKeyboard(): ReplyKeyboardMarkup {
     keyboard: [
       [b("🛍 Shop", "success"), b("💰 Wallet", "primary"), b("📦 Orders", "primary")],
       [b("👤 Account", "primary"), b("💬 Support", "primary"), b("🏠 Home")],
+      // The shop's website opens inside Telegram (needs https).
+      ...(website && website.startsWith("https://") ? [[{ text: "🌐 Shop on our website", web_app: { url: website } } as KeyboardButton]] : []),
     ],
     resize_keyboard: true,
     is_persistent: true,

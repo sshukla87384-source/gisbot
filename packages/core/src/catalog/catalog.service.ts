@@ -82,6 +82,8 @@ export interface ProductView {
   howToUse: string | null;
   /** "📜 Terms & Conditions" for the product page — same rules as howToUse. */
   terms: string | null;
+  /** "🌐 Buy on website": the product's own link, else the shop's website. */
+  websiteUrl: string | null;
   isPlatform: boolean;
   supplierBacked: boolean;
   warranty: boolean;
@@ -529,7 +531,7 @@ async function getProductViewUncached(productId: string, currency: Currency, use
   const plainDesc = plainDescription(p.description, null);
   // How to use / Terms: the product's own text, else the shop default; a
   // product can switch a section off ("__off__") even when a default exists.
-  const defs = await prisma.setting.findMany({ where: { key: { in: ["product.howto.default", "product.terms.default"] } } }).catch(() => []);
+  const defs = await prisma.setting.findMany({ where: { key: { in: ["product.howto.default", "product.terms.default", "shop.website"] } } }).catch(() => []);
   const defOf = (k: string): string => { const r = defs.find((x) => x.key === k); return typeof r?.value === "string" ? r.value.trim() : ""; };
   const sectionSrc = (own: string | null, def: string): string | null =>
     own === "__off__" ? null : (own?.trim() || def || null);
@@ -581,6 +583,7 @@ async function getProductViewUncached(productId: string, currency: Currency, use
     activationGuide: p.activationGuide,
     howToUse: sectionOut(howSrc, trHow),
     terms: sectionOut(termsSrc, trTerms),
+    websiteUrl: p.websiteUrl || defOf("shop.website") || null,
     isPlatform: p.resellerId === null,
     supplierBacked: p.supplierId !== null,
     warranty: p.warranty,

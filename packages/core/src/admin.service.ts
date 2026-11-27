@@ -426,6 +426,47 @@ export async function setProductActivationGuide(productId: string, guide: string
   await invalidate("cat:*");
 }
 
+// ───────────── Website links ─────────────
+
+const SHOP_WEBSITE_KEY = "shop.website";
+
+/** A clean https link, or null. */
+export function normalizeWebsiteUrl(raw: string): string | null {
+  let u = raw.trim();
+  if (!u) return null;
+  if (/^www\./i.test(u) || /^[a-z0-9-]+(\.[a-z0-9-]+)+(\/|$)/i.test(u)) u = `https://${u}`;
+  try {
+    const p = new URL(u);
+    if (p.protocol !== "https:" && p.protocol !== "http:") return null;
+    return p.toString().slice(0, 500);
+  } catch {
+    return null;
+  }
+}
+
+/** The shop's website ("🌐 Shop on our website" in the menu and quick bar). */
+export async function getShopWebsite(): Promise<string | null> {
+  const row = await prisma.setting.findUnique({ where: { key: SHOP_WEBSITE_KEY } }).catch(() => null);
+  return typeof row?.value === "string" && row.value ? row.value : null;
+}
+
+export async function setShopWebsite(url: string | null): Promise<void> {
+  if (!url) { await prisma.setting.deleteMany({ where: { key: SHOP_WEBSITE_KEY } }); }
+  else await prisma.setting.upsert({ where: { key: SHOP_WEBSITE_KEY }, create: { key: SHOP_WEBSITE_KEY, value: url }, update: { value: url } });
+  await invalidate("cat:*");
+}
+
+export async function getProductWebsite(productId: string): Promise<string | null> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { websiteUrl: true } }).catch(() => null);
+  return p?.websiteUrl ?? null;
+}
+
+/** A product's own purchase link on the website (null = use the shop's website). */
+export async function setProductWebsite(productId: string, url: string | null): Promise<void> {
+  await prisma.product.update({ where: { id: productId }, data: { websiteUrl: url } });
+  await invalidate("cat:*");
+}
+
 // ───────────── Product page: How to use / Terms & Conditions ─────────────
 
 /** Stored on a product to hide a section there even when a shop default exists. */

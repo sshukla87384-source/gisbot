@@ -14,7 +14,7 @@ interface Variant { id: string; name: string; sku: string; isActive: boolean; pr
 interface Product {
   id: string; name: string; description: string | null; status: string; fulfillmentMode: string;
   imageUrl: string | null; iconEmoji: string | null;
-  howToUse: string | null; terms: string | null;
+  howToUse: string | null; terms: string | null; websiteUrl: string | null;
   salePercentBp: number | null; saleStartsAt: string | null; saleEndsAt: string | null;
   variants: Variant[];
 }
@@ -35,13 +35,13 @@ export default function ProductDetail() {
   const [fields, setFields] = useState({
     name: "", description: "", status: "DRAFT", fulfillmentMode: "AUTOMATIC",
     imageUrl: "", iconEmoji: "", salePercent: "", saleStartsAt: "", saleEndsAt: "",
-    howToUse: "", terms: "",
+    howToUse: "", terms: "", websiteUrl: "",
   });
   useEffect(() => {
     if (data) setFields({
       name: data.name, description: data.description ?? "", status: data.status, fulfillmentMode: data.fulfillmentMode,
       imageUrl: data.imageUrl ?? "", iconEmoji: data.iconEmoji ?? "",
-      howToUse: data.howToUse ?? "", terms: data.terms ?? "",
+      howToUse: data.howToUse ?? "", terms: data.terms ?? "", websiteUrl: data.websiteUrl ?? "",
       salePercent: data.salePercentBp ? String(data.salePercentBp / 100) : "",
       saleStartsAt: toLocal(data.saleStartsAt), saleEndsAt: toLocal(data.saleEndsAt),
     });
@@ -53,7 +53,7 @@ export default function ProductDetail() {
       const body: Record<string, unknown> = {
         name: fields.name, description: fields.description, status: fields.status,
         fulfillmentMode: fields.fulfillmentMode, imageUrl: fields.imageUrl, iconEmoji: fields.iconEmoji,
-        howToUse: fields.howToUse, terms: fields.terms,
+        howToUse: fields.howToUse, terms: fields.terms, websiteUrl: fields.websiteUrl,
         salePercentBp: Number.isFinite(pct) ? pct : 0,
         saleStartsAt: toIso(fields.saleStartsAt), saleEndsAt: toIso(fields.saleEndsAt),
       };
@@ -90,6 +90,7 @@ export default function ProductDetail() {
           <div className="md:col-span-2"><Label>Description</Label><Textarea rows={3} value={fields.description} onChange={(e) => setFields({ ...fields, description: e.target.value })} /></div>
           <div><Label>📋 How to use (one step per line)</Label><Textarea rows={4} value={fields.howToUse} onChange={(e) => setFields({ ...fields, howToUse: e.target.value })} placeholder={"Enter the email address\nEnter the password\nUse the 2FA key to get the OTP"} /></div>
           <div><Label>📜 Terms &amp; Conditions (one per line)</Label><Textarea rows={4} value={fields.terms} onChange={(e) => setFields({ ...fields, terms: e.target.value })} placeholder={"No refund after delivery\nWarranty: 25 days"} /></div>
+          <div className="md:col-span-2"><Label>🌐 Website buy link (optional)</Label><Input value={fields.websiteUrl} onChange={(e) => setFields({ ...fields, websiteUrl: e.target.value })} placeholder="https://yourshop.com/product/netflix — empty = your shop's website" /></div>
           <p className="md:col-span-2 -mt-1 text-xs text-slate-400">Leave empty to use the shop-wide default (set in the bot: Admin → Content &amp; Style). Type <code>__off__</code> to hide a section on this product.</p>
 
           <div className="md:col-span-2">

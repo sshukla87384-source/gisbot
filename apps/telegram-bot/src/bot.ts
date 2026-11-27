@@ -96,6 +96,9 @@ import {
   getUpiAutoPolicy,
   settleUpiTopup,
   enqueueAdminAlert,
+  activeMustJoin,
+  getShopWebsite,
+  type LinkedChat,
   capTelegramHtml,
   entitiesToTelegramHtml,
   getAdminOrder,
@@ -686,15 +689,98 @@ export function createBot(): Bot<Ctx> {
   };
 
   // ── Commands ──
+  // ── Must-join channels / groups ──
+  // A customer has to be a member of every chat the admin listed before the
+  // bot does anything for them. Membership is cached for 2 minutes, so a
+  // customer who leaves is locked out again within that time.
+  const FJ_MEMBER = new Set(["creator", "administrator", "member"]);
+  const missingMustJoin = async (api: Ctx["api"], userId: number, fresh = false): Promise<LinkedChat[]> => {
+    const chats = await activeMustJoin().catch(() => [] as LinkedChat[]);
+    if (chats.length === 0) return [];
+    const redis = getRedis();
+    const missing: LinkedChat[] = [];
+    for (const c of chats) {
+      const key = `fj:${c.chatId}:${userId}`;
+      if (!fresh && (await redis.get(key).catch(() => null)) === "1") continue;
+      try {
+        const m = await api.getChatMember(c.chatId, userId);
+        const ok = FJ_MEMBER.has(m.status) || (m.status === "restricted" && (m as { is_member?: boolean }).is_member === true);
+        if (ok) { await redis.set(key, "1", "EX", 120).catch(() => undefined); continue; }
+        missing.push(c);
+      } catch (e) {
+        // The bot cannot read members there (not an admin of the channel, or
+        // removed from it). Never lock every customer out over a setup
+        // problem — let them through and tell the admin.
+        const first = await redis.set(`fj:err:${c.chatId}`, "1", "EX", 6 * 3600, "NX").catch(() => null);
+        if (first === "OK") {
+          await enqueueAdminAlert(`⚠️ <b>Must-join check failed</b> for <b>${escapeHtml(c.title)}</b> — make the bot an <b>admin</b> there (channels need it to see members). Customers are let through until it works.\n<i>${escapeHtml(String(e instanceof Error ? e.message : e).slice(0, 160))}</i>`).catch(() => undefined);
+        }
+      }
+    }
+    return missing;
+  };
+  const showJoinGate = async (ctx: Ctx, missing: LinkedChat[]): Promise<void> => {
+    const kb = new InlineKeyboard();
+    for (const c of missing) {
+      if (c.link) kb.url(`${c.type === "channel" ? "📢" : "👥"} Join ${c.title}`.slice(0, 60), c.link).row();
+    }
+    kb.add(sbtn("✅ I've joined — continue", "fj:check", "success"));
+    const text = [
+      "🔒 <b>Join to continue</b>",
+      "",
+      `To use <b>${escapeHtml(config.STORE_NAME)}</b> please join ${missing.length === 1 ? "this" : "these"} first:`,
+      ...missing.map((c) => `${c.type === "channel" ? "📢" : "👥"} <b>${escapeHtml(c.title)}</b>`),
+      "",
+      "Join, then tap <b>✅ I've joined</b>.",
+    ].join("\n");
+    if (ctx.chat && ctx.session.fjMsgId) {
+      await ctx.api.deleteMessage(ctx.chat.id, ctx.session.fjMsgId).catch(() => undefined);
+      ctx.session.fjMsgId = undefined;
+    }
+    const m = await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb, link_preview_options: { is_disabled: true } }).catch(() => undefined);
+    if (m) ctx.session.fjMsgId = m.message_id;
+  };
+  bot.use(async (ctx, next) => {
+    if (ctx.chat?.type !== "private" || !ctx.from) return next();
+    if (ctx.message?.successful_payment) return next();
+    const data = ctx.callbackQuery?.data ?? "";
+    if (data === "fj:check") {
+      const missing = await missingMustJoin(ctx.api, ctx.from.id, true);
+      if (missing.length > 0) {
+        await ctx.answerCallbackQuery({ text: `Not yet — please join: ${missing.map((c) => c.title).join(", ")}`.slice(0, 190), show_alert: true }).catch(() => undefined);
+        return;
+      }
+      await ctx.answerCallbackQuery({ text: "✅ Thanks for joining!" }).catch(() => undefined);
+      ctx.session.fjMsgId = undefined;
+      return showHome(ctx);
+    }
+    // The admin panel (and logging in to it) is never gated.
+    if (data.startsWith("adm:") || (ctx.message?.text ?? "").startsWith("/admin") || (ctx.session.awaiting ?? "").startsWith("admin_")) return next();
+    if (await isBotAdmin(ctx.from.id)) return next();
+    const missing = await missingMustJoin(ctx.api, ctx.from.id);
+    if (missing.length === 0) return next();
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "🔒 Please join our channel first" }).catch(() => undefined);
+    await showJoinGate(ctx, missing);
+  });
+
   // ── Quick bar: six always-visible buttons under the message box ──
   // Sent once per chat (and again whenever the bar's version changes), after
   // whatever the update itself showed, so it never lands above a screen.
+  let siteCache: { at: number; url: string | null } | null = null;
+  const shopWebsite = async (): Promise<string | null> => {
+    if (siteCache && Date.now() - siteCache.at < 60_000) return siteCache.url;
+    const url = await getShopWebsite().catch(() => null);
+    siteCache = { at: Date.now(), url };
+    return url;
+  };
   bot.use(async (ctx, next) => {
     await next();
     if (ctx.chat?.type !== "private" || !ctx.from || ctx.chat.id !== ctx.from.id) return;
-    if ((ctx.session.quickBarV ?? 0) >= QUICK_BAR_VERSION) return;
+    const site = (await shopWebsite()) ?? "";
+    if ((ctx.session.quickBarV ?? 0) >= QUICK_BAR_VERSION && (ctx.session.quickBarSite ?? "") === site) return;
     ctx.session.quickBarV = QUICK_BAR_VERSION;
-    await ctx.reply("⌨️ <b>Quick menu</b> is ready below 👇", { parse_mode: "HTML", reply_markup: quickBarKeyboard() })
+    ctx.session.quickBarSite = site;
+    await ctx.reply("⌨️ <b>Quick menu</b> is ready below 👇", { parse_mode: "HTML", reply_markup: quickBarKeyboard(site || null) })
       .catch(() => { ctx.session.quickBarV = 0; });
   });
 

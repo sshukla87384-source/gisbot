@@ -23,6 +23,7 @@ export * from "./orders/gateway-checkout.service.js";
 export * from "./orders/fulfillment.service.js";
 export * from "./orders/order.service.js";
 export * from "./api-delivery.service.js";
+export * from "./channels.service.js";
 export * from "./support/ticket.service.js";
 export * from "./finance.service.js";
 export * from "./recovery.service.js";
