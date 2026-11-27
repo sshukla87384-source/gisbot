@@ -5121,6 +5121,7 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
             `Looked at <b>${r.checked}</b> unsettled payment(s) from the last 14 days.`,
             `✅ <b>${r.paid}</b> found paid and settled (order delivered / wallet credited).`,
             r.partial ? `⚠️ <b>${r.partial}</b> paid short — the customer was told what is missing.` : "",
+            r.repaired ? `💰 <b>${r.repaired}</b> already-paid top-up(s) / order(s) that were never credited — credited now.` : "",
             r.failed ? `❌ <b>${r.failed}</b> could not be read from the network — try again in a few minutes.` : "",
             "",
             "<i>Money that is in stays on the terminal's addresses until you tap 💸 Withdraw (auto-transfer is off).</i>",

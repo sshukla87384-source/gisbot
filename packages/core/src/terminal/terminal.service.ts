@@ -402,6 +402,10 @@ export async function pollTerminalPayments(): Promise<number> {
       console.warn("terminal poll failed", { id: r.id, chain: r.chain, error: String(e).slice(0, 200) });
     }
   }
+  // Every 10 min: payments that are PAID on-chain but whose top-up / order
+  // never got credited (the settle step failed once and was never retried).
+  const due = await getRedis().set("tm:repair:tick", "1", "EX", 600, "NX").catch(() => null);
+  if (due === "OK") await repairUnsettledTerminalPayments({ includeOpenOrders: false }).catch(() => undefined);
   // Mark long-dead ones so they drop out of the active set.
   await prisma.terminalPayment.updateMany({
     where: { status: "WAITING", expiresAt: { lt: new Date(now - 24 * 3600_000) } },
@@ -415,8 +419,51 @@ export async function pollTerminalPayments(): Promise<number> {
  * not settled (including expired ones) on-chain right now, and settle what has
  * arrived. For customers who paid while the watcher missed it.
  */
-export async function recheckTerminalPayments(days = 14): Promise<{ checked: number; paid: number; partial: number; failed: number }> {
-  if (!(await hasTerminalSeed())) return { checked: 0, paid: 0, partial: 0, failed: 0 };
+/**
+ * A payment flips to PAID first and is credited right after. If that credit
+ * failed once (DB hiccup, restart), nothing ever tried again: the chain said
+ * "success", the top-up stayed PENDING. Re-run the settle step — it is
+ * idempotent (status-guarded flips + wallet idempotency keys).
+ */
+export async function repairUnsettledTerminalPayments(opts: { days?: number; includeOpenOrders?: boolean } = {}): Promise<number> {
+  const since = new Date(Date.now() - (opts.days ?? 14) * 86400_000);
+  const rows = await prisma.terminalPayment.findMany({
+    where: { status: "PAID", OR: [{ paidAt: { gte: since } }, { paidAt: null, createdAt: { gte: since } }] },
+    select: { id: true, kind: true, refId: true },
+    orderBy: { createdAt: "desc" },
+    take: 300,
+  });
+  if (rows.length === 0) return 0;
+  const topIds = rows.filter((r) => r.kind === "TOPUP").map((r) => r.refId);
+  const ordIds = rows.filter((r) => r.kind === "ORDER").map((r) => r.refId);
+  const [openTops, orders, lateCredits] = await Promise.all([
+    topIds.length ? prisma.walletTopup.findMany({ where: { id: { in: topIds }, status: { in: ["PENDING", "EXPIRED"] } }, select: { id: true } }) : Promise.resolve([] as Array<{ id: string }>),
+    ordIds.length ? prisma.order.findMany({ where: { id: { in: ordIds } }, select: { id: true, status: true } }) : Promise.resolve([] as Array<{ id: string; status: string }>),
+    prisma.walletTransaction.findMany({ where: { idempotencyKey: { in: rows.map((r) => `terminal-late:${r.id}`) } }, select: { idempotencyKey: true } }),
+  ]);
+  const tops = new Set(openTops.map((t) => t.id));
+  const orderStatus = new Map(orders.map((o) => [o.id, o.status as string]));
+  const late = new Set(lateCredits.map((c) => c.idempotencyKey));
+  let fixed = 0;
+  for (const r of rows) {
+    let need = false;
+    if (r.kind === "TOPUP") need = tops.has(r.refId);
+    else {
+      const st = orderStatus.get(r.refId);
+      // Closed / deleted order whose money was never moved to the wallet.
+      if (st === undefined || st === "EXPIRED" || st === "CANCELLED") need = !late.has(`terminal-late:${r.id}`);
+      // Still waiting for payment although the chain has it (manual re-check only:
+      // a delivery that keeps failing would otherwise alert every 10 minutes).
+      else if (st === "PENDING_PAYMENT") need = opts.includeOpenOrders === true;
+    }
+    if (!need) continue;
+    try { await settle(r.id); fixed++; } catch { /* next run */ }
+  }
+  return fixed;
+}
+
+export async function recheckTerminalPayments(days = 14): Promise<{ checked: number; paid: number; partial: number; failed: number; repaired: number }> {
+  if (!(await hasTerminalSeed())) return { checked: 0, paid: 0, partial: 0, failed: 0, repaired: 0 };
   const rows = await prisma.terminalPayment.findMany({
     where: { status: { in: [...OPEN, "EXPIRED"] }, createdAt: { gte: new Date(Date.now() - days * 86400_000) } },
     orderBy: { createdAt: "asc" },
@@ -435,7 +482,8 @@ export async function recheckTerminalPayments(days = 14): Promise<{ checked: num
       console.warn("terminal recheck failed", { id: r.id, chain: r.chain, error: String(e).slice(0, 200) });
     }
   }
-  return { checked: rows.length, paid, partial, failed };
+  const repaired = await repairUnsettledTerminalPayments({ days, includeOpenOrders: true }).catch(() => 0);
+  return { checked: rows.length, paid, partial, failed, repaired };
 }
 
 // ── Stranded partial payments ────────────────────────────────────────────────
