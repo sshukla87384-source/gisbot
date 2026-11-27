@@ -34,10 +34,12 @@ export interface ChannelsConfig {
   orderFeed: LinkedChat[];
   /** Show the amount in the order feed. */
   feedShowPrice: boolean;
+  /** The order-feed chats must be joined too (on by default). */
+  feedMustJoin: boolean;
 }
 
 const KEY = "channels.cfg";
-const DEFAULT: ChannelsConfig = { forceJoin: true, mustJoin: [], orderFeed: [], feedShowPrice: true };
+const DEFAULT: ChannelsConfig = { forceJoin: true, mustJoin: [], orderFeed: [], feedShowPrice: true, feedMustJoin: true };
 let cache: { at: number; v: ChannelsConfig } | null = null;
 
 function cleanList(x: unknown): LinkedChat[] {
@@ -65,6 +67,7 @@ export async function getChannelsConfig(): Promise<ChannelsConfig> {
         mustJoin: cleanList(r.mustJoin),
         orderFeed: cleanList(r.orderFeed),
         feedShowPrice: r.feedShowPrice !== false,
+        feedMustJoin: r.feedMustJoin !== false,
       };
     }
   } catch { /* defaults */ }
@@ -93,10 +96,18 @@ export async function removeLinkedChat(kind: LinkedChatKind, chatId: string): Pr
   return setChannelsConfig({ [kind]: cfg[kind].filter((c) => c.chatId !== chatId) } as Partial<ChannelsConfig>);
 }
 
-/** The chats a customer must have joined, when the gate is on. */
+/**
+ * The chats a customer must have joined, when the gate is on: the must-join
+ * list plus — unless switched off — the order-feed channels / groups.
+ */
 export async function activeMustJoin(): Promise<LinkedChat[]> {
   const cfg = await getChannelsConfig();
-  return cfg.forceJoin ? cfg.mustJoin : [];
+  if (!cfg.forceJoin) return [];
+  const all = cfg.feedMustJoin ? [...cfg.mustJoin, ...cfg.orderFeed] : cfg.mustJoin;
+  const seen = new Set<string>();
+  // A chat with no join link cannot be joined from the bot — enforcing it
+  // would lock every customer out, so it is skipped until it has one.
+  return all.filter((c) => Boolean(c.link) && (seen.has(c.chatId) ? false : (seen.add(c.chatId), true)));
 }
 
 // ── Order feed ───────────────────────────────────────────────────────────────

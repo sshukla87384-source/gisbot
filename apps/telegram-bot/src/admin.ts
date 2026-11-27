@@ -1219,6 +1219,7 @@ async function channelsView(ctx: Ctx): Promise<void> {
   for (const x of c.orderFeed) kb.text(`🗑 ${icon(x)} ${x.title.slice(0, 30)}`, cb("adm", "chrm", `f~${x.chatId}`)).row();
   kb.add(sbtn("➕ Add order-feed channel / group", cb("adm", "chadd", "feed"), "primary")).row();
   kb.text(c.feedShowPrice ? "💰 Feed shows price: ON" : "💰 Feed shows price: OFF", cb("adm", "chprice")).row();
+  kb.text(c.feedMustJoin ? "🔒 Order feed must be joined too: ON" : "🔓 Order feed must be joined too: OFF", cb("adm", "chfeedmj")).row();
   kb.text("◀️ Back", cb("adm", "m_content"));
   await show(ctx, [
     "📢 <b>Channels & groups</b>",
@@ -1227,7 +1228,7 @@ async function channelsView(ctx: Ctx): Promise<void> {
     c.mustJoin.length ? c.mustJoin.map((x) => `${icon(x)} <b>${escapeHtml(x.title)}</b>${x.link ? "" : " ⚠️ no join link"}`).join("\n") : "<i>None yet.</i>",
     c.mustJoin.length && !c.forceJoin ? "<i>(switched off — nobody is asked to join)</i>" : "",
     "",
-    "🔔 <b>Order feed</b> — every paid order is posted here (buyer's name masked).",
+    `🔔 <b>Order feed</b> — every paid order is posted here (buyer's name masked)${c.feedMustJoin ? ", and customers must join it too" : ""}.`,
     c.orderFeed.length ? c.orderFeed.map((x) => `${icon(x)} <b>${escapeHtml(x.title)}</b>`).join("\n") : "<i>None yet.</i>",
     "",
     "<i>Add the bot to each chat first — as an <b>admin</b> in channels. Tap a 🗑 row to remove it. Admins are never asked to join.</i>",
@@ -1264,7 +1265,7 @@ async function resolveLinkedChat(ctx: Ctx, raw: string, kind: "mustJoin" | "orde
   return {
     ok: true,
     chat: { chatId: String(chat.id), title, link, type: chat.type },
-    ...(kind === "mustJoin" && !link ? { warn: "No join link — give the bot \"Invite users\" rights, or send the id with an invite link." } : {}),
+    ...(!link ? { warn: "No join link, so customers can't be asked to join it — give the bot \"Invite users\" rights, or send the id with an invite link." } : {}),
   };
 }
 
@@ -4928,6 +4929,11 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "chfj": {
       const c = await getChannelsConfig();
       await setChannelsConfig({ forceJoin: !c.forceJoin });
+      return channelsView(ctx);
+    }
+    case "chfeedmj": {
+      const c = await getChannelsConfig();
+      await setChannelsConfig({ feedMustJoin: !c.feedMustJoin });
       return channelsView(ctx);
     }
     case "chprice": {
