@@ -7,6 +7,7 @@ import { productRating } from "./followup.service.js";
 import { resolveTelegramUser } from "./users/user.service.js";
 import { sanitizeTelegramHtml } from "./tg-html.js";
 import { publicImageUrl } from "./miniapp.service.js";
+import { getRedis } from "./redis.js";
 
 /**
  * The shop as a normal website (apps/api serves the page at /shop).
@@ -85,14 +86,23 @@ function sessionKey(): Buffer {
   return createHash("sha256").update(`webshop-session|${cfg.JWT_SECRET ?? cfg.BOT_TOKEN}`).digest();
 }
 
-export function makeWebSession(userId: string): { token: string; maxAgeSec: number } {
+/** Bumped on logout: every cookie carrying an older version stops working. */
+async function sessionVersion(userId: string): Promise<number> {
+  return Number(await getRedis().get(`shopsess:${userId}`).catch(() => null)) || 0;
+}
+
+export async function revokeWebSessions(userId: string): Promise<void> {
+  await getRedis().incr(`shopsess:${userId}`);
+}
+
+export async function makeWebSession(userId: string): Promise<{ token: string; maxAgeSec: number }> {
   const exp = Math.floor(Date.now() / 1000) + SESSION_DAYS * 86_400;
-  const body = Buffer.from(JSON.stringify({ u: userId, e: exp })).toString("base64url");
+  const body = Buffer.from(JSON.stringify({ u: userId, e: exp, v: await sessionVersion(userId) })).toString("base64url");
   const sig = createHmac("sha256", sessionKey()).update(body).digest("base64url");
   return { token: `${body}.${sig}`, maxAgeSec: SESSION_DAYS * 86_400 };
 }
 
-export function readWebSession(token: string | undefined | null): string | null {
+export function readWebSession(token: string | undefined | null): { id: string; v: number } | null {
   if (!token || token.length > 512) return null;
   const [body, sig] = token.split(".");
   if (!body || !sig) return null;
@@ -101,9 +111,9 @@ export function readWebSession(token: string | undefined | null): string | null 
   const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   try {
-    const v = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { u?: string; e?: number };
+    const v = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { u?: string; e?: number; v?: number };
     if (!v.u || !v.e || v.e < Date.now() / 1000) return null;
-    return v.u;
+    return { id: v.u, v: Number(v.v) || 0 };
   } catch {
     return null;
   }
@@ -111,8 +121,10 @@ export function readWebSession(token: string | undefined | null): string | null 
 
 /** The signed-in customer, or null (unknown, banned or logged out). */
 export async function webSessionUser(token: string | undefined | null): Promise<{ id: string; telegramId: bigint; currency: Currency; firstName: string | null; referralCode: string } | null> {
-  const id = readWebSession(token);
-  if (!id) return null;
+  const s = readWebSession(token);
+  if (!s) return null;
+  if (s.v !== (await sessionVersion(s.id))) return null; // logged out since
+  const id = s.id;
   const u = await prisma.user.findFirst({
     where: { id, status: "ACTIVE" },
     select: { id: true, telegramId: true, currency: true, firstName: true, referralCode: true },

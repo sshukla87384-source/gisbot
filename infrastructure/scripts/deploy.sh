@@ -61,18 +61,23 @@ if [ -n "$SHOP_DOMAIN" ] && docker run --rm -v gis_certbot_certs:/c alpine test 
 fi
 
 echo "==> Rendering nginx config for ${NGINX_DOMAIN} (root cert: ${HAS_ROOT_CERT}, shop domain: ${SHOP_DOMAIN:-none} cert: ${HAS_SHOP_CERT})"
-sed -e "s/__DOMAIN__/${NGINX_DOMAIN}/g" -e "s/__SHOP_DOMAIN__/${SHOP_DOMAIN:-shop.invalid}/g" infrastructure/nginx/gis.conf \
-  > infrastructure/nginx/gis.rendered.conf
+# Rendered into a temp file and then COPIED over the mounted one: compose
+# bind-mounts this single file, and replacing it (sed -i makes a new file)
+# left the running nginx reading the old copy for ever.
+RENDER_TMP="$(mktemp)"
+sed -e "s/__DOMAIN__/${NGINX_DOMAIN}/g" -e "s/__SHOP_DOMAIN__/${SHOP_DOMAIN:-shop.invalid}/g" infrastructure/nginx/gis.conf > "$RENDER_TMP"
 if [ "$HAS_SHOP_CERT" != "1" ]; then
-  sed -i '/# >>> SHOP_DOMAIN/,/# <<< SHOP_DOMAIN/d' infrastructure/nginx/gis.rendered.conf
-  [ -n "$SHOP_DOMAIN" ] && echo "    (shop domain ${SHOP_DOMAIN} waits for its certificate — run get-shop-cert.sh)"
+  sed -i '/# >>> SHOP_DOMAIN/,/# <<< SHOP_DOMAIN/d' "$RENDER_TMP"
+  if [ -n "$SHOP_DOMAIN" ]; then echo "    (shop domain ${SHOP_DOMAIN} waits for its certificate — run get-shop-cert.sh)"; fi
 fi
 if [ "$HAS_ROOT_CERT" != "1" ]; then
   # Remove the landing HTTPS block so nginx starts without the root cert.
   # (The landing page still serves over http until the cert is obtained.)
-  sed -i '/# >>> LANDING_HTTPS/,/# <<< LANDING_HTTPS/d' infrastructure/nginx/gis.rendered.conf
+  sed -i '/# >>> LANDING_HTTPS/,/# <<< LANDING_HTTPS/d' "$RENDER_TMP"
   echo "    (landing HTTPS disabled until cert exists — run get-landing-cert.sh)"
 fi
+cat "$RENDER_TMP" > infrastructure/nginx/gis.rendered.conf
+rm -f "$RENDER_TMP"
 
 # Build images ONE AT A TIME. Parallel builds (BuildKit bake) can exhaust RAM on
 # a single VPS during the heavy Next.js admin build → "connection reset by peer".
@@ -85,6 +90,8 @@ for svc in $BUILD_SVCS; do
   $COMPOSE build --pull "$svc"
 done
 echo "==> Applying stack"; $COMPOSE up -d --remove-orphans
+# A running nginx does not re-read its config by itself: apply the new routes now.
+$COMPOSE exec -T nginx nginx -s reload >/dev/null 2>&1 || true
 
 # Reclaim space: drop old images + build cache left by previous builds (safe — never touches volumes).
 #

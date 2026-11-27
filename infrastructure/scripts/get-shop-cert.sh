@@ -20,9 +20,9 @@ EMAIL="$(env_value SEED_ADMIN_EMAIL)"
 [ -n "$EMAIL" ] || EMAIL="admin@${NGINX_DOMAIN:-$SHOP_DOMAIN}"
 COMPOSE="docker compose --env-file .env -f infrastructure/docker/compose.prod.yml"
 
+# The domain itself only (not www): a www name that points elsewhere would
+# make the whole request fail.
 DOMAINS=(-d "${SHOP_DOMAIN}")
-# www is optional: include it only when its DNS points here too.
-if getent hosts "www.${SHOP_DOMAIN}" >/dev/null 2>&1; then DOMAINS+=(-d "www.${SHOP_DOMAIN}"); fi
 
 echo "==> Requesting certificate for ${SHOP_DOMAIN}"
 $COMPOSE run --rm --entrypoint certbot certbot certonly --webroot -w /var/www/certbot \

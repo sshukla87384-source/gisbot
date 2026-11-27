@@ -20,6 +20,7 @@ import {
   webLoginUser,
   webSessionUser,
   webShopProduct,
+  revokeWebSessions,
   type TelegramLogin,
 } from "@gis/core";
 import { loadConfig } from "@gis/config";
@@ -71,11 +72,13 @@ const loginBody = z.object({
   hash: z.string().length(64),
   ref: z.string().max(40).optional(),
 });
+// The quote is required: it is what the order limits and the price guard check.
 const buyBody = z.object({
   variantId: z.string().min(1).max(64),
   qty: z.number().int().min(1).max(100_000),
-  quoteMinor: z.number().int().min(0).max(10_000_000_000).optional(),
-  quoteCurrency: z.enum(["USD", "INR"]).optional(),
+  quoteMinor: z.number().int().min(1).max(10_000_000_000),
+  quoteCurrency: z.enum(["USD", "INR"]),
+  idem: z.string().min(8).max(64).regex(/^[A-Za-z0-9._-]+$/),
 });
 const topupBody = z.object({ amount: z.number().positive().max(100_000), network: z.string().min(2).max(32) });
 
@@ -158,15 +161,18 @@ export class WebShopController {
     const { ref, ...tg } = parsed.data;
     if (!verifyTelegramLogin(tg as unknown as TelegramLogin)) throw new ApiError(401, "BAD_LOGIN", "Telegram login could not be verified — please try again.");
     const u = await webLoginUser(tg as unknown as TelegramLogin, ref ?? null);
-    if (u.status === "BANNED") throw new ApiError(403, "BANNED", "This account is suspended.");
-    const s = makeWebSession(u.id);
+    if (u.status !== "ACTIVE") throw new ApiError(403, "BANNED", "This account is suspended.");
+    const s = await makeWebSession(u.id);
     res.cookie(COOKIE, s.token, { httpOnly: true, secure: loadConfig().NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: s.maxAgeSec * 1000 });
     return { ok: true };
   }
 
   @Post("auth/logout")
-  logout(@Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
+  async logout(@Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
     this.csrf(req);
+    // Every session of this customer ends, not just this browser's cookie.
+    const user = await webSessionUser(this.cookie(req)).catch(() => null);
+    if (user) await revokeWebSessions(user.id).catch(() => undefined);
     res.clearCookie(COOKIE, { path: "/" });
     return { ok: true };
   }
@@ -232,9 +238,28 @@ export class WebShopController {
     const user = await this.who(req);
     await limit(`buy:${user.id}`, 20, 60);
     const b = buyBody.safeParse(body);
-    if (!b.success) throw new ApiError(400, "VALIDATION", "Bad request.");
-    const quote = b.data.quoteMinor !== undefined && b.data.quoteCurrency ? { totalMinor: b.data.quoteMinor, currency: b.data.quoteCurrency as Currency } : undefined;
-    return miniAppBuyWithWallet({ id: user.id, telegramId: user.telegramId, currency: user.currency }, b.data.variantId, b.data.qty, quote);
+    if (!b.success) throw new ApiError(400, "VALIDATION", "Bad request — please reload the page.");
+    // Idempotent per click: a retried request gets the first result back (or
+    // "still processing"), never a second order.
+    const redis = getRedis();
+    const idemKey = `shopbuy:${user.id}:${b.data.idem}`;
+    const claimed = await redis.set(idemKey, "__pending__", "EX", 900, "NX").catch(() => "OK");
+    if (claimed !== "OK") {
+      const prev = await redis.get(idemKey).catch(() => null);
+      if (prev && prev !== "__pending__") return JSON.parse(prev) as unknown;
+      throw new ApiError(409, "IN_PROGRESS", "This purchase is still processing — check 📦 Orders in a moment.");
+    }
+    const quote = { totalMinor: b.data.quoteMinor, currency: b.data.quoteCurrency as Currency };
+    try {
+      const r = await miniAppBuyWithWallet({ id: user.id, telegramId: user.telegramId, currency: user.currency }, b.data.variantId, b.data.qty, quote);
+      // A refusal (balance, stock, price change) frees the key so the same click can be retried.
+      if (r.ok) await redis.set(idemKey, JSON.stringify(r), "EX", 900).catch(() => undefined);
+      else await redis.del(idemKey).catch(() => undefined);
+      return r;
+    } catch (e) {
+      // Unknown outcome: keep the key for its TTL so a blind retry cannot buy twice.
+      throw e;
+    }
   }
 
   @Post("topup/crypto")

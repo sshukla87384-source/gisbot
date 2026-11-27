@@ -218,8 +218,6 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
     var body = {}; for (var k in user) body[k] = user[k]; if (ref) body.ref = ref;
     api("auth/telegram", body).then(function(){ closeModal(); toast("Welcome! 👋"); return loadMe(); }).then(function(){ if (loginAfter) { var f = loginAfter; loginAfter = null; f(); } }).catch(function(e){ toast(e.message); });
   };
-  // Redirect-style login (the widget can also come back with ?id=…&hash=…).
-  (function(){ var u = new URLSearchParams(location.search); if (u.get("hash") && u.get("id")) { var o = {}; ["id","first_name","last_name","username","photo_url","auth_date","hash"].forEach(function(k){ if (u.get(k)) o[k] = u.get(k); }); history.replaceState(null, "", location.pathname); window.__tgAuth(o); } })();
 
   function loadMe(){
     return api("me").then(function(d){ me = d; currency = d.currency || currency; $("cur").value = currency; header(); }).catch(function(){ me = null; header(); });
@@ -309,13 +307,19 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
   }
   function buy(total){
     var b = $("buy"); b.disabled = true; b.textContent = "⏳ Processing…";
-    api("buy", { variantId: cur.v.id, qty: cur.qty, quoteMinor: total, quoteCurrency: cur.p.currency }).then(function(r){
+    // One key per click: a retry of THIS request returns the same order, never a second one.
+    var key = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+    api("buy", { variantId: cur.v.id, qty: cur.qty, quoteMinor: total, quoteCurrency: cur.p.currency, idem: key }).then(function(r){
       if (!r.ok) {
         if (r.reason === "insufficient") { b.disabled = false; renderProduct(); topupModal(me && cur.p.currency === me.walletCurrency && me.walletCurrency === me.currency ? Math.max(100, total - (me.balanceMinor || 0)) : null, "Your wallet balance is too low for this order. Top up and come back — it takes a minute."); return; }
         toast(r.message); b.disabled = false; renderProduct(); if (r.reason === "price_changed") openProduct(cur.p.id); return;
       }
       loadMe(); success(r);
-    }).catch(function(e){ toast(e.message); b.disabled = false; renderProduct(); });
+    }).catch(function(e){
+      // No answer is not "not bought": the order may still be going through.
+      if (!e.status || e.status >= 500 || e.code === "IN_PROGRESS") { b.textContent = "⏳ Still processing — check 📦 Orders"; toast("Check 📦 Orders in a moment before trying again."); return; }
+      toast(e.message); b.disabled = false; renderProduct();
+    });
   }
   function valuesHtml(list){
     return list.map(function(d){ return '<div class="panel" style="margin:10px 0;padding:14px"><b>' + esc(d.productName) + (d.variantName && !/^standard$/i.test(d.variantName) ? " · " + esc(d.variantName) : "") + '</b>' + (d.replaced ? ' <span class="pill r">replaced</span>' : "")
