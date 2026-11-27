@@ -3,6 +3,7 @@ import { bytesToHex } from "@noble/hashes/utils";
 import {
   createPublicClient,
   createWalletClient,
+  fallback,
   formatEther,
   http,
   isAddress,
@@ -34,13 +35,21 @@ const ERC20 = parseAbi([
   "function transfer(address to, uint256 value) returns (bool)",
 ]);
 const TRANSFER = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
-const makeClient = (chain: Chain, rpc: string) => createPublicClient({ chain, transport: http(rpc, { timeout: 15_000 }) });
+/**
+ * Several public RPCs, tried in order. One URL was a single point of failure:
+ * polygon-rpc.com stopped answering anonymous calls, so no Polygon payment was
+ * ever read — customers paid, the terminal saw nothing. The operator's own URL
+ * (BSC_RPC_URL / POLYGON_RPC_URL) always goes first.
+ */
+const rpcTransport = (urls: string[]) =>
+  fallback(urls.map((u) => http(u, { timeout: 12_000, retryCount: 1 })), { retryCount: 1 });
+const makeClient = (chain: Chain, rpcs: string[]) => createPublicClient({ chain, transport: rpcTransport(rpcs) });
 type Pub = ReturnType<typeof makeClient>;
 
 interface EvmSpec {
   code: string;
   chain: Chain;
-  rpc: () => string;
+  rpc: () => string[];
   token: Address;
   decimals: number;
   confirmations: number;
@@ -54,11 +63,20 @@ interface EvmSpec {
   account: number;
 }
 
+const uniq = (xs: Array<string | undefined>): string[] => [...new Set(xs.filter((x): x is string => Boolean(x && x.trim())))];
+
 const SPECS: Record<string, EvmSpec> = {
   usdtbsc: {
     code: "usdtbsc",
     chain: bsc,
-    rpc: () => loadConfig().BSC_RPC_URL ?? "https://bsc-dataseed.binance.org",
+    rpc: () => uniq([
+      loadConfig().BSC_RPC_URL,
+      "https://bsc-dataseed.binance.org",
+      "https://bsc-rpc.publicnode.com",
+      "https://bsc-dataseed1.defibit.io",
+      "https://bsc.drpc.org",
+      "https://1rpc.io/bnb",
+    ]),
     token: "0x55d398326f99059fF775485246999027B3197955",
     decimals: 18,
     confirmations: 12,
@@ -71,7 +89,14 @@ const SPECS: Record<string, EvmSpec> = {
   usdtmatic: {
     code: "usdtmatic",
     chain: polygon,
-    rpc: () => loadConfig().POLYGON_RPC_URL ?? "https://polygon-rpc.com",
+    rpc: () => uniq([
+      loadConfig().POLYGON_RPC_URL,
+      "https://polygon-bor-rpc.publicnode.com",
+      "https://polygon.drpc.org",
+      "https://1rpc.io/matic",
+      "https://polygon.llamarpc.com",
+      "https://polygon-rpc.com",
+    ]),
     token: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
     decimals: 6,
     confirmations: 30,
@@ -189,12 +214,12 @@ export class EvmUsdtAdapter implements ChainAdapter {
       if (mainBal < topUp + sendGas) {
         return { kind: "pending", note: `main address ${main.address} needs ${this.spec.gasSymbol} for gas (has ${formatEther(mainBal)}, needs ≥ ${formatEther(topUp + sendGas)})` };
       }
-      const wallet = createWalletClient({ account: main, chain: this.spec.chain, transport: http(this.spec.rpc(), { timeout: 15_000 }) });
+      const wallet = createWalletClient({ account: main, chain: this.spec.chain, transport: rpcTransport(this.spec.rpc()) });
       const hash = await wallet.sendTransaction({ to: payer.address, value: topUp, gas: 21_000n });
       return { kind: "pending", note: `gas sent (${hash}) — transfer on next tick` };
     }
     // Step 2: move the USDT.
-    const wallet = createWalletClient({ account: payer, chain: this.spec.chain, transport: http(this.spec.rpc(), { timeout: 15_000 }) });
+    const wallet = createWalletClient({ account: payer, chain: this.spec.chain, transport: rpcTransport(this.spec.rpc()) });
     const hash = await wallet.writeContract({
       address: this.spec.token, abi: ERC20, functionName: "transfer", args: [payout as Address, balance], gas: this.spec.transferGas,
     });
