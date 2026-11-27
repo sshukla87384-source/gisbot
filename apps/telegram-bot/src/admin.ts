@@ -170,6 +170,8 @@ import {
   addLinkedChat,
   removeLinkedChat,
   getShopWebsite,
+  webShopBaseUrl,
+  isWebShopUrl,
   setShopWebsite,
   setProductWebsite,
   buildFullBackup,
@@ -1220,8 +1222,7 @@ async function railsView(ctx: Ctx): Promise<void> {
  */
 /** Where the web shop lives by default: https://api.<domain>/shop (the API host already has its certificate). */
 function webShopUrl(): string | null {
-  const api = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/+$/, "");
-  return /^https:\/\//.test(api) ? `${api}/shop` : null;
+  return webShopBaseUrl();
 }
 
 /** 🌐 Website images: the gallery on the web shop's product page. */
@@ -1282,7 +1283,7 @@ async function webShopAdminView(ctx: Ctx): Promise<void> {
   const kb = new InlineKeyboard();
   kb.add(sbtn(on ? "🟢 Web shop: ON — tap to close" : "🔴 Web shop: OFF — tap to open", cb("adm", "wshoptog"), on ? "success" : "danger")).row();
   if (url) kb.url("🌐 Open the web shop", url).row();
-  if (url && site !== url) kb.text("🔗 Use it for the bot's 🌐 Website buttons", cb("adm", "wshoplink")).row();
+  if (url && site && !isWebShopUrl(site)) kb.text("🔗 Use it for the bot's 🌐 Website buttons", cb("adm", "wshoplink")).row();
   kb.text("◀️ Back", cb("adm", "m_content"));
   await show(ctx, [
     "🛒 <b>Web shop</b>",
@@ -1290,11 +1291,13 @@ async function webShopAdminView(ctx: Ctx): Promise<void> {
     "Your shop as a normal website: same products, prices, stock, wallet and orders as the bot. Customers log in with Telegram, pay from the wallet (top up with crypto right there), and get their keys on the page and in Telegram.",
     "",
     url ? `🔗 Address: <code>${escapeHtml(url)}</code>` : "⚠️ Set PUBLIC_API_URL (https) in .env to get the address.",
-    site ? `🌐 Bot website buttons open: <code>${escapeHtml(site)}</code>` : "",
+    site && !isWebShopUrl(site)
+      ? `🌐 Bot website buttons open your other website: <code>${escapeHtml(site)}</code>`
+      : on && url ? "✅ <b>Synced:</b> every product's 🌐 Buy on our website button opens <b>that product</b> on the web shop; the menu and quick bar open its home page. Automatic for new products too." : "",
     "",
     "<b>Login setup (once):</b> BotFather → /setdomain → pick this bot → send the web shop's domain (for now the <code>api.</code> domain above). Without it the Telegram login button says \"Bot domain invalid\".",
     "",
-    "<b>Own domain:</b> point its DNS A record to the server, set <code>SHOP_DOMAIN=yourdomain.com</code> in .env, run <code>./infrastructure/scripts/get-shop-cert.sh full</code>, then /setdomain to the new domain and set 🌐 Website link to it.",
+    "<b>Own domain:</b> point its DNS A record to the server, set <code>SHOP_DOMAIN=yourdomain.com</code> in .env, run <code>./infrastructure/scripts/get-shop-cert.sh full</code>, then /setdomain to the new domain. The bot's 🌐 buttons switch to the new domain by themselves.",
   ].filter(Boolean).join("\n"), kb, true);
 }
 

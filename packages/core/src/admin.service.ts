@@ -11,6 +11,7 @@ import { splitCredential, sanitizeCredentialLine, repairAccountPair } from "./or
 import { clearPaymentPrompts } from "./orders/pay-prompt.service.js";
 import { groupOrderLines } from "./orders/order.service.js";
 import { sanitizeTelegramHtml } from "./tg-html.js";
+import { effectiveShopWebsite } from "./web-shop-url.js";
 
 /** Compact dashboard figures for the in-bot admin panel. */
 export async function getAdminStats(): Promise<{
@@ -469,6 +470,15 @@ export function normalizeWebsiteUrl(raw: string): string | null {
 export async function getShopWebsite(): Promise<string | null> {
   const row = await prisma.setting.findUnique({ where: { key: SHOP_WEBSITE_KEY } }).catch(() => null);
   return typeof row?.value === "string" && row.value ? row.value : null;
+}
+
+/** What the bot's 🌐 menu / quick-bar button opens (falls back to the web shop when it is on). */
+export async function getShopWebsiteLink(): Promise<string | null> {
+  const [site, on] = await Promise.all([
+    getShopWebsite(),
+    prisma.setting.findUnique({ where: { key: "webshop.enabled" } }).then((r) => (r?.value as { on?: boolean } | null | undefined)?.on !== false).catch(() => true),
+  ]);
+  return effectiveShopWebsite(site, on);
 }
 
 export async function setShopWebsite(url: string | null): Promise<void> {

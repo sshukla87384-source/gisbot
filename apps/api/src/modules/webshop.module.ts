@@ -5,7 +5,7 @@ import {
   createCryptoTopup,
   getProductIdBySlug,
   getRedis,
-  getShopWebsite,
+  getShopWebsiteLink,
   getWebShopEnabled,
   makeWebSession,
   miniAppBuyWithWallet,
@@ -117,7 +117,7 @@ export class WebShopController {
 
   @Get("config")
   async config() {
-    const [bot, nets, site] = await Promise.all([botUsername(), availableCryptoNetworks().catch(() => []), getShopWebsite().catch(() => null)]);
+    const [bot, nets, site] = await Promise.all([botUsername(), availableCryptoNetworks().catch(() => []), getShopWebsiteLink().catch(() => null)]);
     return {
       store: loadConfig().STORE_NAME,
       bot,

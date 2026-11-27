@@ -7,7 +7,7 @@ import { productRating } from "./followup.service.js";
 import { resolveTelegramUser } from "./users/user.service.js";
 import { sanitizeTelegramHtml } from "./tg-html.js";
 import { publicImageUrl } from "./miniapp.service.js";
-import { getRedis } from "./redis.js";
+import { getRedis, invalidate } from "./redis.js";
 
 /**
  * The shop as a normal website (apps/api serves the page at /shop).
@@ -30,6 +30,7 @@ export async function getWebShopEnabled(): Promise<boolean> {
 
 export async function setWebShopEnabled(on: boolean): Promise<void> {
   await prisma.setting.upsert({ where: { key: ENABLED_KEY }, create: { key: ENABLED_KEY, value: { on } }, update: { value: { on } } });
+  await invalidate("cat:*"); // product cards carry the web shop link
 }
 
 // ── Telegram Login Widget ────────────────────────────────────────────────────

@@ -97,7 +97,7 @@ import {
   settleUpiTopup,
   enqueueAdminAlert,
   activeMustJoin,
-  getShopWebsite,
+  getShopWebsiteLink,
   type LinkedChat,
   capTelegramHtml,
   entitiesToTelegramHtml,
@@ -770,7 +770,7 @@ export function createBot(): Bot<Ctx> {
   let siteCache: { at: number; url: string | null } | null = null;
   const shopWebsite = async (): Promise<string | null> => {
     if (siteCache && Date.now() - siteCache.at < 60_000) return siteCache.url;
-    const url = await getShopWebsite().catch(() => null);
+    const url = await getShopWebsiteLink().catch(() => null);
     siteCache = { at: Date.now(), url };
     return url;
   };

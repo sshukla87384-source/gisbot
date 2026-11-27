@@ -1,6 +1,6 @@
 import {
   alsoBought,
-  getShopWebsite,
+  getShopWebsiteLink,
   getApiWebhook,
   availableCryptoNetworks,
   binanceOffered,
@@ -124,7 +124,7 @@ export async function menuView(user: BotUser): Promise<View> {
     prisma.order.count({ where: { userId: user.id } }),
     getButtonConfig(),
     getMiniAppConfig(),
-    getShopWebsite().catch(() => null),
+    getShopWebsiteLink().catch(() => null),
   ]);
   const miniApp = miniCfg.enabled ? await miniAppReachableUrl() : null;
   return { text: mainMenuText(user, wallet.balanceMinor, orderCount), kb: mainMenuKeyboard(user, btnCfg, miniApp, website) };
