@@ -2369,8 +2369,11 @@ async function supplierProductsView(ctx: Ctx, supplierId: string): Promise<void>
   ctx.session.supConfirm = undefined;
   const kb = new InlineKeyboard();
 
-  // Nothing imported yet — offer the one button that actually helps.
-  if (counts.shown + counts.hidden + counts.deleted === 0) {
+  // Nothing imported yet — offer the one button that actually helps. A vendor
+  // whose products all sit under 🆕 Not added HAS products: counting only the
+  // added ones showed "Nothing imported yet" for every new vendor, with no way
+  // to reach the products and add them.
+  if (counts.shown + counts.hidden + counts.deleted + counts.pending === 0) {
     kb.add(sbtn("🔄 Sync catalog now", cb("adm", "supsync", supplierId), "success")).row();
     kb.text("◀️ Back", cb("adm", "sups"));
     await show(ctx, [
@@ -3053,6 +3056,10 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       // A fresh open starts with a clean selection.
       if (ctx.session.supTarget !== id) {
         ctx.session.supSelected = []; ctx.session.supPage = 1; ctx.session.supFilter = "all"; ctx.session.supMode = "select";
+        // Nothing added from this vendor yet: open on 🆕 Not added, where one
+        // tap adds a product — not on an empty "Added" tab.
+        const c = await countSupplierProductStates(id).catch(() => null);
+        if (c && c.shown + c.hidden === 0 && c.pending > 0) { ctx.session.supFilter = "new"; ctx.session.supMode = "quick"; }
       }
       ctx.session.supTarget = id;
       return supplierProductsView(ctx, id);
