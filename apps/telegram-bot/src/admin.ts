@@ -173,6 +173,9 @@ import {
   setShopWebsite,
   setProductWebsite,
   buildFullBackup,
+  getProductWebImages,
+  addProductWebImage,
+  editProductWebImages,
   getWebShopEnabled,
   setWebShopEnabled,
   getUiLabels,
@@ -951,6 +954,7 @@ async function productView(ctx: Ctx, productId: string): Promise<void> {
   kb.text("🌐 Website buy link", cb("adm", "psite", p.id)).text("😀 Premium emoji", cb("adm", "picon", p.id)).row();
   kb.text("📄 Delivery instructions", cb("adm", "pguide", p.id)).row();
   kb.text("🖼 Set image", cb("adm", "pimg", p.id)).text("🔑 Add stock keys", cb("adm", "keys", p.id)).row();
+  kb.text("🌐 Website images", cb("adm", "pwimg", p.id)).row();
   if (p.supplierId) kb.text("🤖 Delivery: Auto via supplier", cb("adm", "prod", p.id)).row();
   else kb.text(`⚙️ Delivery: ${p.fulfillmentMode === "MANUAL" ? "MANUAL → make AUTOMATIC" : "AUTOMATIC → make MANUAL"}`, cb("adm", "pmode", p.id)).row();
   if (p.type === "DIGITAL_ACCOUNT") kb.text(`🔐 Password change: ${p.allowPwChange ? "✅ Allowed → disallow" : "🚫 Not allowed → allow"}`, cb("adm", "ppw", p.id)).row();
@@ -1218,6 +1222,57 @@ async function railsView(ctx: Ctx): Promise<void> {
 function webShopUrl(): string | null {
   const api = (loadConfig().PUBLIC_API_URL ?? "").replace(/\/+$/, "");
   return /^https:\/\//.test(api) ? `${api}/shop` : null;
+}
+
+/** 🌐 Website images: the gallery on the web shop's product page. */
+async function webImagesView(ctx: Ctx, productId: string): Promise<void> {
+  const { images, botImage } = await getProductWebImages(productId);
+  const kb = new InlineKeyboard();
+  images.forEach((u, i) => {
+    kb.url(`${i === 0 ? "⭐" : "🖼"} ${i + 1}`, u);
+    if (i > 0) kb.text("⭐ Make main", cb("adm", "pwimgmain", `${productId}~${i}`));
+    kb.text("🗑", cb("adm", "pwimgrm", `${productId}~${i}`)).row();
+  });
+  if (images.length < 8) kb.add(sbtn("➕ Add image", cb("adm", "pwimgadd", productId), "success")).row();
+  if (botImage && !images.includes(botImage)) kb.text("📋 Use the bot's image", cb("adm", "pwimgbot", productId)).row();
+  if (images.length) kb.text("🧹 Remove all", cb("adm", "pwimgclr", productId)).row();
+  kb.text("◀️ Back", cb("adm", "prod", productId));
+  await show(ctx, [
+    "🌐 <b>Website images</b>",
+    "",
+    "Pictures for this product on the <b>web shop</b> (and the Mini App): the first is the main picture on the product card; the others are a gallery on the product page.",
+    "",
+    images.length ? `${images.length} image(s). Tap a number to open it.` : (botImage ? "None yet — the website uses the bot image." : "None yet — the website shows the product's emoji."),
+  ].join("\n"), kb, true);
+}
+
+/** Store an admin's photo / file / link as a website image (hosted on our /media, so a web page can show it). */
+export async function addWebImageFromAdmin(ctx: Ctx, src: { fileId?: string; url?: string }): Promise<void> {
+  const productId = ctx.session.admProductId ?? "";
+  if (!productId) { await ctx.reply("That product expired — open it again and tap 🌐 Website images."); return; }
+  let hosted: string | null = null;
+  try {
+    if (src.fileId) {
+      const f = await ctx.api.getFile(src.fileId);
+      if (f.file_path) hosted = await hostImageFromUrl(`https://api.telegram.org/file/bot${loadConfig().BOT_TOKEN}/${f.file_path}`, `web-${productId.slice(-6)}`);
+    } else if (src.url) {
+      hosted = await hostImageFromUrl(src.url, `web-${productId.slice(-6)}`);
+      if (!hosted && /\.(jpe?g|png|webp|gif)(\?|$)/i.test(src.url)) hosted = src.url;
+    }
+  } catch { hosted = null; }
+  // Keep listening: the admin usually sends several pictures in a row.
+  ctx.session.awaiting = "admin_p_webimg";
+  ctx.session.admProductId = productId;
+  if (!hosted) {
+    await ctx.reply("⚠️ Couldn't store that image. Send it as a <b>photo</b>, or a direct https image link (.jpg/.png). If photos never work, PUBLIC_API_URL is not set on the server.", { parse_mode: "HTML" });
+    return;
+  }
+  const r = await addProductWebImage(productId, hosted);
+  if (!r.ok) { await ctx.reply(`⚠️ Not added: ${r.reason ?? "error"}.`); ctx.session.awaiting = null; return webImagesView(ctx, productId); }
+  await ctx.reply(`✅ Image ${r.count} added to the website.${r.count < 8 ? " Send another, or tap below when done." : ""}`, {
+    reply_markup: new InlineKeyboard().text("✔️ Done", cb("adm", "pwimg", productId)),
+  });
+  if (r.count >= 8) { ctx.session.awaiting = null; await webImagesView(ctx, productId); }
 }
 
 /** 🛒 Web shop: on/off, its address, and linking it to the bot's 🌐 buttons. */
@@ -4987,6 +5042,29 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       flash(ctx, "🗑 Product deleted.");
       return productsView(ctx);
     }
+    case "pwimg": return webImagesView(ctx, id);
+    case "pwimgadd":
+      ctx.session.admProductId = id;
+      ctx.session.awaiting = "admin_p_webimg";
+      await askStep(ctx, "🌐 Send a <b>photo</b> (or an image file, or an https image link) for this product's <b>website</b> page. Send several, one by one — up to 8. The first one is the main picture.");
+      return;
+    case "pwimgbot": {
+      const { botImage } = await getProductWebImages(id);
+      if (botImage) { const r = await addProductWebImage(id, botImage); flash(ctx, r.ok ? "✅ Bot image added to the website." : `⚠️ ${r.reason ?? "Could not add it"}.`); }
+      return webImagesView(ctx, id);
+    }
+    case "pwimgmain":
+    case "pwimgrm": {
+      const [pid, idx] = id.split("~");
+      if (!pid) return;
+      await editProductWebImages(pid, action === "pwimgmain" ? "main" : "remove", Number.parseInt(idx ?? "0", 10) || 0);
+      flash(ctx, action === "pwimgmain" ? "⭐ Main picture changed." : "🗑 Image removed.");
+      return webImagesView(ctx, pid);
+    }
+    case "pwimgclr":
+      await editProductWebImages(id, "clear");
+      flash(ctx, "🧹 Website images cleared — the website shows the bot image.");
+      return webImagesView(ctx, id);
     case "pimg": {
       ctx.session.admProductId = id;
       ctx.session.awaiting = "admin_p_image";
@@ -5814,6 +5892,17 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     }
     ctx.session.awaiting = null;
     await sendPanel(ctx, false);
+    return true;
+  }
+  if (awaiting === "admin_p_webimg") {
+    let url = text.trim();
+    if (/^www\./i.test(url)) url = `https://${url}`;
+    if (!/^https?:\/\/\S+$/i.test(url)) {
+      ctx.session.awaiting = "admin_p_webimg";
+      await ctx.reply("Send a photo, an image file, or an https image link — or tap ✔️ Done.", { reply_markup: new InlineKeyboard().text("✔️ Done", cb("adm", "pwimg", ctx.session.admProductId ?? "")) });
+      return true;
+    }
+    await addWebImageFromAdmin(ctx, { url });
     return true;
   }
   if (awaiting === "admin_ui_label") {
@@ -7223,6 +7312,11 @@ export async function handleAdminDocument(ctx: Ctx): Promise<boolean> {
   const mime = doc.mime_type ?? "";
   const isImage = mime.startsWith("image/") || /\.(jpe?g|png|webp|gif)$/i.test(name);
 
+  if (aw === "admin_p_webimg") {
+    if (!isImage) { await ctx.reply("🖼 That isn't an image. Send a photo (or a .jpg/.png file), or an https image link."); ctx.session.awaiting = "admin_p_webimg"; return true; }
+    await addWebImageFromAdmin(ctx, { fileId: doc.file_id });
+    return true;
+  }
   if (aw === "admin_p_image") {
     if (!isImage) { await ctx.reply("🖼 That isn't an image. Send a photo (or a .jpg/.png file), or paste an https image link."); return true; }
     await setProductImageFromFileId(ctx, doc.file_id, true);

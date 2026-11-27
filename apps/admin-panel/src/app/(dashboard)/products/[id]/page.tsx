@@ -15,6 +15,7 @@ interface Product {
   id: string; name: string; description: string | null; status: string; fulfillmentMode: string;
   imageUrl: string | null; iconEmoji: string | null;
   howToUse: string | null; terms: string | null; websiteUrl: string | null;
+  webImages?: string[];
   salePercentBp: number | null; saleStartsAt: string | null; saleEndsAt: string | null;
   variants: Variant[];
 }
@@ -30,6 +31,9 @@ export default function ProductDetail() {
   const qc = useQueryClient();
   const toast = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
+  const webFileRef = useRef<HTMLInputElement>(null);
+  const [webImages, setWebImages] = useState<string[]>([]);
+  const [webLink, setWebLink] = useState("");
   const { data, isLoading } = useQuery({ queryKey: ["product", id], queryFn: () => apiData<Product>(`/products/${id}`) });
 
   const [fields, setFields] = useState({
@@ -45,6 +49,7 @@ export default function ProductDetail() {
       salePercent: data.salePercentBp ? String(data.salePercentBp / 100) : "",
       saleStartsAt: toLocal(data.saleStartsAt), saleEndsAt: toLocal(data.saleEndsAt),
     });
+    if (data) setWebImages(data.webImages ?? []);
   }, [data]);
 
   const save = useMutation({
@@ -54,6 +59,8 @@ export default function ProductDetail() {
         name: fields.name, description: fields.description, status: fields.status,
         fulfillmentMode: fields.fulfillmentMode, imageUrl: fields.imageUrl, iconEmoji: fields.iconEmoji,
         howToUse: fields.howToUse, terms: fields.terms, websiteUrl: fields.websiteUrl,
+        // Only when changed here, so a save never wipes pictures added from the bot meanwhile.
+        ...(JSON.stringify(webImages) !== JSON.stringify(data?.webImages ?? []) ? { webImages } : {}),
         salePercentBp: Number.isFinite(pct) ? pct : 0,
         saleStartsAt: toIso(fields.saleStartsAt), saleEndsAt: toIso(fields.saleEndsAt),
       };
@@ -68,6 +75,22 @@ export default function ProductDetail() {
     onSuccess: (r) => { setFields((f) => ({ ...f, imageUrl: r.url })); toast("Image uploaded — click Save to keep it"); },
     onError: (e) => toast(errorMessage(e), "error"),
   });
+
+  const uploadWeb = useMutation({
+    mutationFn: async (files: File[]) => {
+      const urls: string[] = [];
+      for (const f of files) urls.push((await uploadFile<{ url: string }>("/media/upload", f)).url);
+      return urls;
+    },
+    onSuccess: (urls) => { setWebImages((w) => [...new Set([...w, ...urls])].slice(0, 8)); toast("Uploaded — click Save to keep it"); },
+    onError: (e) => toast(errorMessage(e), "error"),
+  });
+  const addWebLink = () => {
+    const u = webLink.trim();
+    if (!/^https?:\/\/\S+$/i.test(u)) { toast("Paste an https image link", "error"); return; }
+    setWebImages((w) => [...new Set([...w, u])].slice(0, 8));
+    setWebLink("");
+  };
 
   const announce = useMutation({
     mutationFn: (pin: boolean) => apiData<{ targets?: number }>(`/products/${id}/announce`, { method: "POST", body: { pin } }),
@@ -102,6 +125,32 @@ export default function ProductDetail() {
             </div>
           </div>
           {fields.imageUrl.trim() ? <div className="md:col-span-2"><img src={fields.imageUrl} alt="preview" className="max-h-44 rounded-lg border border-slate-200" /></div> : null}
+
+          <div className="md:col-span-2">
+            <Label>🌐 Website images (web shop product page, up to 8 — first is the main picture)</Label>
+            <p className="mb-2 text-xs text-slate-400">Empty = the website uses the product image above.</p>
+            <div className="flex flex-wrap gap-3">
+              {webImages.map((u, i) => (
+                <div key={u} className="relative w-28">
+                  <img src={u} alt="" className={`h-24 w-28 rounded-lg border object-cover ${i === 0 ? "border-indigo-500 ring-2 ring-indigo-300" : "border-slate-200"}`} />
+                  <div className="mt-1 flex gap-1 text-xs">
+                    {i > 0
+                      ? <button type="button" className="text-indigo-600" onClick={() => setWebImages((w) => [w[i]!, ...w.filter((_, j) => j !== i)])}>⭐ Main</button>
+                      : <span className="text-indigo-600">⭐ Main</span>}
+                    <button type="button" className="ml-auto text-red-600" onClick={() => setWebImages((w) => w.filter((_, j) => j !== i))}>🗑 Remove</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {webImages.length < 8 ? (
+              <div className="mt-2 flex items-center gap-2">
+                <Input value={webLink} onChange={(e) => setWebLink(e.target.value)} placeholder="Paste an image link…" onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addWebLink(); } }} />
+                <Button variant="secondary" onClick={addWebLink}>Add link</Button>
+                <input ref={webFileRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files ?? []).slice(0, 8 - webImages.length); if (fs.length) uploadWeb.mutate(fs); e.target.value = ""; }} />
+                <Button variant="secondary" onClick={() => webFileRef.current?.click()} disabled={uploadWeb.isPending}>{uploadWeb.isPending ? "Uploading…" : "Upload"}</Button>
+              </div>
+            ) : null}
+          </div>
         </div>
         <div className="mt-3 flex gap-2">
           <Button onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>

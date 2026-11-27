@@ -164,7 +164,7 @@ export async function webShopProduct(productId: string, currency: Currency, user
   const p = await getProductView(productId, currency, userId, "DIRECT");
   const [rating, slugRow, stock] = await Promise.all([
     productRating(productId).catch(() => null),
-    prisma.product.findUnique({ where: { id: productId }, select: { slug: true, imageUrl: true, type: true } }),
+    prisma.product.findUnique({ where: { id: productId }, select: { slug: true, imageUrl: true, type: true, webImages: true } }),
     Promise.resolve(p.variants.map((v) => v.stock)),
   ]);
   const unlimited = (n: number) => n >= 1_000_000 || n >= UNLIMITED_STOCK;
@@ -173,7 +173,9 @@ export async function webShopProduct(productId: string, currency: Currency, user
     slug: slugRow?.slug ?? null,
     name: p.name.replace(/<[^>]+>/g, ""),
     iconEmoji: p.iconEmoji,
-    imageUrl: publicImageUrl(slugRow?.imageUrl ?? p.imageUrl),
+    imageUrl: publicImageUrl(slugRow?.webImages?.[0] ?? slugRow?.imageUrl ?? p.imageUrl),
+    // The website gallery (admin: product → 🌐 Website images); the bot image when there is none.
+    images: (slugRow?.webImages?.length ? slugRow.webImages : [slugRow?.imageUrl ?? p.imageUrl]).map((u) => publicImageUrl(u)).filter((u): u is string => Boolean(u)),
     unit: slugRow?.type === "LICENSE_KEY" ? "code" : slugRow?.type === "DIGITAL_ACCOUNT" ? "account" : null,
     description: formatLines(strip(p.descriptionHtml ?? (p.description ? p.description.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : null)), "desc"),
     howToUse: formatLines(strip(p.howToUse), "steps"),

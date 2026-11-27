@@ -84,6 +84,7 @@ header.top{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);backgroun
 .modal.open{opacity:1;transform:translate(-50%,-50%);pointer-events:auto}.modal-bg.open{display:block}
 .mh{display:flex;justify-content:space-between;align-items:center;padding:16px 18px 0}.x{background:var(--card);border:0;color:var(--tx);width:36px;height:36px;border-radius:12px;font-size:18px;cursor:pointer}
 .mb{padding:14px 18px 20px}
+.gal{display:flex;gap:8px;margin:10px 0 2px;overflow-x:auto}.gal img{width:64px;height:52px;object-fit:cover;border-radius:10px;border:2px solid transparent;cursor:pointer;opacity:.7;flex:none}.gal img.on{border-color:var(--acc,#7c5cff);opacity:1}
 .pimg{height:200px;border-radius:18px;background:linear-gradient(135deg,rgba(124,92,255,.35),rgba(34,211,238,.2));display:grid;place-items:center;font-size:72px;overflow:hidden}.pimg img{width:100%;height:100%;object-fit:cover}
 .pname{font-size:23px;font-weight:800;margin:14px 0 6px;letter-spacing:-.3px}
 .price{font-size:26px;font-weight:800}.price .was{font-size:16px;margin-left:8px}
@@ -281,7 +282,10 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
     var maxQ = v && v.stock != null ? v.stock : 100000;
     var price = unitPrice(), total = price == null ? null : price * cur.qty;
     var warranty = p.warranty ? (p.warranty.hours ? (p.warranty.hours % 24 === 0 ? (p.warranty.hours / 24) + "-day" : p.warranty.hours + "-hour") + " replacement warranty" : "Replacement warranty") : "No replacement warranty";
-    var h = '<div class="pimg">' + (p.imageUrl ? '<img src="' + esc(p.imageUrl) + '" alt="">' : esc(p.iconEmoji || "🛍")) + '</div>'
+    var imgs = p.images && p.images.length ? p.images : (p.imageUrl ? [p.imageUrl] : []);
+    var gi = Math.min(cur.img || 0, Math.max(0, imgs.length - 1));
+    var h = '<div class="pimg">' + (imgs.length ? '<img id="pmain" src="' + esc(imgs[gi]) + '" alt="">' : esc(p.iconEmoji || "🛍")) + '</div>'
+      + (imgs.length > 1 ? '<div class="gal">' + imgs.map(function(u, i){ return '<img data-gi="' + i + '" class="' + (i === gi ? "on" : "") + '" loading="lazy" src="' + esc(u) + '" alt="">'; }).join("") + '</div>' : "")
       + '<div class="pname">' + esc((p.iconEmoji ? p.iconEmoji + " " : "") + p.name) + '</div>'
       + '<div class="price">' + money(v && v.priceMinor, p.currency) + (p.unit ? '<span class="sub"> / ' + p.unit + '</span>' : "") + (v && v.wasMinor ? '<span class="was">' + money(v.wasMinor, p.currency) + '</span>' : "") + '</div>'
       + (p.bulk && p.bulk.length ? '<div class="bulk">' + p.bulk.map(function(t){ return "<span>📦 " + t.minQty + "+ → " + money(t.unitPriceMinor, p.currency) + "</span>"; }).join("") + '</div>' : "")
@@ -300,6 +304,7 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
       h += '<button class="btn ghost block" disabled>❌ Sold out</button>' + (cfg.bot && p.slug ? '<div class="sub" style="margin-top:10px;text-align:center"><a target="_blank" rel="noopener" href="https://t.me/' + esc(cfg.bot) + '?start=p_' + esc(p.slug) + '">🔔 Get notified in Telegram</a></div>' : "");
     }
     $("mt").textContent = ""; $("mbody").innerHTML = h;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-gi]"), function(el){ el.onclick = function(){ cur.img = Number(el.getAttribute("data-gi")) || 0; $("pmain").src = imgs[cur.img]; Array.prototype.forEach.call(document.querySelectorAll("[data-gi]"), function(x){ x.className = x === el ? "on" : ""; }); }; });
     Array.prototype.forEach.call(document.querySelectorAll("[data-v]"), function(el){ el.onclick = function(){ var x = p.variants.filter(function(y){ return y.id === el.getAttribute("data-v"); })[0]; if (x && x.inStock) { cur.v = x; cur.qty = 1; renderProduct(); } }; });
     var setQ = function(n){ n = Math.max(1, Math.min(maxQ, Math.floor(Number(n) || 1))); cur.qty = n; renderProduct(); };
     if ($("qm")) { $("qm").onclick = function(){ setQ(cur.qty - 1); }; $("qp").onclick = function(){ setQ(cur.qty + 1); }; $("qi").onchange = function(){ setQ($("qi").value); }; }

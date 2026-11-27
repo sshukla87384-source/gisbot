@@ -114,7 +114,7 @@ export async function buildMiniAppCatalog(currency: Currency): Promise<MiniAppCa
     const counted = variants.filter((v) => v.units !== UNLIMITED_STOCK);
     const stock = counted.length === 0 ? null : counted.reduce((s, v) => s + v.units, 0);
     out.push({
-      id: p.id, slug: p.slug, name: p.name, description: plainDescription(p.description, p.descriptionHtml) || null, imageUrl: publicImageUrl(p.imageUrl), iconEmoji: p.iconEmoji, categoryId: p.categoryId,
+      id: p.id, slug: p.slug, name: p.name, description: plainDescription(p.description, p.descriptionHtml) || null, imageUrl: publicImageUrl(p.webImages?.[0] ?? p.imageUrl), iconEmoji: p.iconEmoji, categoryId: p.categoryId,
       fromPriceMinor: cheapest.priceMinor, wasPriceMinor: onSale ? cheapest.basePriceMinor : null, onSale, inStock, stock,
       rating: r && r.count > 0 ? Math.round(r.avg * 10) / 10 : null, ratingCount: r?.count ?? 0,
       variants: variants.map((v) => ({ id: v.id, name: v.name, priceMinor: v.priceMinor, inStock: v.inStock })),

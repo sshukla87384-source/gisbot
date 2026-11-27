@@ -163,7 +163,7 @@ import QRCode from "qrcode";
 import type { Ctx } from "./ctx.js";
 import { redisSessionStorage } from "./session.js";
 import { flowEnd, flowRemember, flowSetCard, flowStart, flowStep } from "./flow.js";
-import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminDocument, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
+import { addWebImageFromAdmin, adminCommand, askReAddBlocked, handleAdminCallback, handleAdminDocument, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
 import { QUICK_BAR_RE, QUICK_BAR_VERSION, quickBarKeyboard, sbtn } from "./keyboard.js";
 import { LOCALES, t } from "./i18n.js";
@@ -1133,6 +1133,12 @@ export function createBot(): Bot<Ctx> {
     }
     if (aw === "binance_txnid" || aw === "wallet_free_txn") {
       await ctx.reply("📸 Thanks! Screenshots can't be verified automatically — please <b>copy the Order ID</b> from the Binance payment receipt and paste it here as text.", { parse_mode: "HTML" });
+      return;
+    }
+    if (aw === "admin_p_webimg" && (await isBotAdmin(ctx.from?.id))) {
+      const ph = ctx.message.photo;
+      const fid = ph[ph.length - 1]?.file_id;
+      if (fid) await addWebImageFromAdmin(ctx, { fileId: fid });
       return;
     }
     if (aw !== "admin_p_image") return;

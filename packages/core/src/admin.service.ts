@@ -604,6 +604,40 @@ export async function hostImageFromUrl(sourceUrl: string, fileName = "photo"): P
   }
 }
 
+// ── Web shop images (gallery on the website product page) ──
+
+const MAX_WEB_IMAGES = 8;
+
+export async function getProductWebImages(productId: string): Promise<{ images: string[]; botImage: string | null }> {
+  const p = await prisma.product.findUnique({ where: { id: productId }, select: { webImages: true, imageUrl: true } });
+  return { images: p?.webImages ?? [], botImage: p?.imageUrl && /^https?:\/\//i.test(p.imageUrl) ? p.imageUrl : null };
+}
+
+/** Add an image (an https URL, already hosted) to the website gallery. */
+export async function addProductWebImage(productId: string, url: string): Promise<{ ok: boolean; count: number; reason?: string }> {
+  if (!/^https?:\/\/\S+$/i.test(url)) return { ok: false, count: 0, reason: "not a web link" };
+  const { images } = await getProductWebImages(productId);
+  if (images.includes(url)) return { ok: true, count: images.length };
+  if (images.length >= MAX_WEB_IMAGES) return { ok: false, count: images.length, reason: `up to ${MAX_WEB_IMAGES} images` };
+  await prisma.product.update({ where: { id: productId }, data: { webImages: [...images, url] } });
+  await invalidate("cat:*");
+  return { ok: true, count: images.length + 1 };
+}
+
+/** Remove one image, make one the main (first), or clear all. */
+export async function editProductWebImages(productId: string, action: "remove" | "main" | "clear", index = 0): Promise<string[]> {
+  const { images } = await getProductWebImages(productId);
+  let next = images;
+  if (action === "clear") next = [];
+  else if (index >= 0 && index < images.length) {
+    if (action === "remove") next = images.filter((_, i) => i !== index);
+    else next = [images[index]!, ...images.filter((_, i) => i !== index)];
+  }
+  await prisma.product.update({ where: { id: productId }, data: { webImages: next } });
+  await invalidate("cat:*");
+  return next;
+}
+
 export async function setProductImage(productId: string, imageUrl: string): Promise<void> {
   await prisma.product.update({ where: { id: productId }, data: { imageUrl } });
   await invalidate("cat:*");
