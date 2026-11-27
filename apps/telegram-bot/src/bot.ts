@@ -162,7 +162,7 @@ import { redisSessionStorage } from "./session.js";
 import { flowEnd, flowRemember, flowSetCard, flowStart, flowStep } from "./flow.js";
 import { adminCommand, askReAddBlocked, handleAdminCallback, handleAdminDocument, handleAdminText, isBotAdmin, notifyAdminsForApproval, setProductImageFromFileId } from "./admin.js";
 import { ERROR_COPY, escapeHtml, fmt } from "./ui.js";
-import { sbtn } from "./keyboard.js";
+import { QUICK_BAR_RE, QUICK_BAR_VERSION, quickBarKeyboard, sbtn } from "./keyboard.js";
 import { LOCALES, t } from "./i18n.js";
 import { withPurchaseAnimation, successCard, num } from "./premium.js";
 import { e as pe, networkEmoji } from "./emoji.js";
@@ -686,6 +686,18 @@ export function createBot(): Bot<Ctx> {
   };
 
   // ── Commands ──
+  // ── Quick bar: six always-visible buttons under the message box ──
+  // Sent once per chat (and again whenever the bar's version changes), after
+  // whatever the update itself showed, so it never lands above a screen.
+  bot.use(async (ctx, next) => {
+    await next();
+    if (ctx.chat?.type !== "private" || !ctx.from || ctx.chat.id !== ctx.from.id) return;
+    if ((ctx.session.quickBarV ?? 0) >= QUICK_BAR_VERSION) return;
+    ctx.session.quickBarV = QUICK_BAR_VERSION;
+    await ctx.reply("⌨️ <b>Quick menu</b> is ready below 👇", { parse_mode: "HTML", reply_markup: quickBarKeyboard() })
+      .catch(() => { ctx.session.quickBarV = 0; });
+  });
+
   bot.command("start", async (ctx) => {
     const payload = ctx.match.trim();
     if (payload.startsWith(PRODUCT_DEEPLINK_PREFIX)) {
@@ -756,6 +768,23 @@ export function createBot(): Bot<Ctx> {
     return ctx.reply(await trackText(ctx.user.id, num), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📦 My orders", cb("ord", "list", 1)).text("🏠 Menu", "mnu:home") });
   });
   bot.command("shop", async (ctx) => render(ctx, await views.shopHomeView(ctx.user, 1), false));
+  // Quick-bar taps arrive as plain text ("🛍 Shop"). A tap also cancels any
+  // half-finished step, the way the inline 🏠 buttons do.
+  bot.hears(QUICK_BAR_RE, async (ctx, next) => {
+    if (ctx.chat?.type !== "private") return next();
+    const word = (ctx.match?.[1] ?? "").toLowerCase();
+    ctx.session.awaiting = null;
+    if (word === "home") return showHome(ctx);
+    await ctx.deleteMessage().catch(() => undefined);
+    switch (word) {
+      case "shop": return void (await render(ctx, await views.shopHomeView(ctx.user, 1), false));
+      case "wallet": return void (await render(ctx, await views.walletView(ctx.user), false));
+      case "orders": return void (await render(ctx, await views.ordersView(ctx.user, 1), false));
+      case "account": return void (await render(ctx, await views.profileView(ctx.user), false));
+      case "support": return void (await render(ctx, await views.supportHomeView(ctx.user), false));
+      default: return next();
+    }
+  });
   bot.command("cart", async (ctx) => render(ctx, await views.cartViewKb(ctx.user), false));
   bot.command("orders", async (ctx) => render(ctx, await views.ordersView(ctx.user, 1), false));
   bot.command("wallet", async (ctx) => render(ctx, await views.walletView(ctx.user), false));

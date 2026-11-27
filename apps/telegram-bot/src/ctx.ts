@@ -330,6 +330,8 @@ export interface SessionData {
   pendingStock?: { variantId: string; enc: string; count: number };
   /** True on the update where the user was just created. */
   isNewUser?: boolean;
+  /** Version of the quick bar (reply keyboard) this chat already has. */
+  quickBarV?: number;
 }
 
 export type BotUser = User & { roleNames: string[] };
