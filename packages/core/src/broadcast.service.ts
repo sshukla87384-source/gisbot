@@ -53,8 +53,11 @@ async function deliver(broadcast: {
       : undefined;
   // One pipelined bulk-add per 500 recipients, at low priority so a marketing
   // blast never sits in front of a paid delivery on the shared outbox queue.
+  // No photo/video but a link in the text (a YouTube video, a page): show it
+  // as a big preview above the message.
+  const link = broadcast.imageUrl ? null : (text.match(/https?:\/\/[^\s<>"']+/)?.[0] ?? null);
   const sent = await enqueueTelegramBulk(
-    ids.map((id) => ({ telegramId: id, text, opts: { photo: broadcast.imageUrl ?? undefined, buttons, pin: broadcast.pin } })),
+    ids.map((id) => ({ telegramId: id, text, opts: { photo: broadcast.imageUrl ?? undefined, ...(link ? { linkPreview: link } : {}), buttons, pin: broadcast.pin } })),
   );
   await prisma.broadcast.update({
     where: { id: broadcast.id },

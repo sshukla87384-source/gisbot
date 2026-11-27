@@ -1589,7 +1589,8 @@ async function finishBroadcast(ctx: Ctx): Promise<void> {
   });
   ctx.session.bcBody = ctx.session.bcBtnText = ctx.session.bcBtnUrl = undefined;
   ctx.session.bcPhoto = undefined;
-  await ctx.reply(`📢 Broadcast${photo ? " (with photo)" : ""} queued to ${res.targets} users.${res.targets ? "" : " (no eligible users yet)"}`);
+  const kind = !photo ? "" : photo.startsWith("video:") ? " (with video)" : photo.startsWith("animation:") ? " (with GIF)" : " (with photo)";
+  await ctx.reply(`📢 Broadcast${kind} queued to ${res.targets} users.${res.targets ? "" : " (no eligible users yet)"}`);
   return sendPanel(ctx, false);
 }
 
@@ -5506,7 +5507,15 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
     case "bc": {
       ctx.session.awaiting = "admin_broadcast";
       ctx.session.bcBody = ctx.session.bcBtnText = ctx.session.bcBtnUrl = undefined;
-      await ctx.reply("📢 Send the message to broadcast to <b>all</b> users.\nYou can include <b>premium custom emoji</b> — they're sent exactly as you type them. 🎨", { parse_mode: "HTML" });
+      ctx.session.bcPhoto = undefined;
+      await ctx.reply([
+        "📢 <b>Broadcast to all users</b>",
+        "",
+        "Send any of these:",
+        "• <b>Text</b> (premium emoji are kept) 🎨",
+        "• a <b>photo</b>, a <b>short video</b> or a <b>GIF</b> — with the text as its caption, or send the text after",
+        "• a <b>YouTube link</b> inside the text — it shows as a big video preview",
+      ].join("\n"), { parse_mode: "HTML" });
       return;
     }
     case "bcprod": return broadcastProductPicker(ctx);
@@ -7116,7 +7125,9 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
     // Listen for the photo this message invites (the step had already ended,
     // so the photo the admin sent next was dropped without a reply).
     if (!ctx.session.bcPhoto) ctx.session.awaiting = "admin_bc_photo";
-    await ctx.reply(`📢 <b>Ready to send.</b>${ctx.session.bcPhoto ? " 🖼 Photo attached." : " Send a photo now to attach one."}\n\nAttach a product or the menu, or send now:`, { parse_mode: "HTML", reply_markup: kb });
+    const media = ctx.session.bcPhoto ?? "";
+    const attached = media.startsWith("video:") ? " 🎬 Video attached." : media.startsWith("animation:") ? " 🎬 GIF attached." : media ? " 🖼 Photo attached." : " Send a <b>photo, short video or GIF</b> now to attach one — or put a YouTube link in the text for a big video preview.";
+    await ctx.reply(`📢 <b>Ready to send.</b>${attached}\n\nAttach a product or the menu, or send now:`, { parse_mode: "HTML", reply_markup: kb });
     return true;
   }
 

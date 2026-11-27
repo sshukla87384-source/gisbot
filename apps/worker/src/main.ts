@@ -166,7 +166,16 @@ async function main(): Promise<void> {
         } else if (job.data.photo) {
           // Caption limit is 1024 chars; trim defensively.
           const caption = job.data.text.length > 1024 ? `${job.data.text.slice(0, 1021)}…` : job.data.text;
-          msg = await telegram.sendPhoto(job.data.telegramId, job.data.photo, { caption, parse_mode: "HTML", reply_markup });
+          // "video:<file_id>" / "animation:<file_id>" — a broadcast can carry a
+          // short video or a GIF as well as a photo (same field, tagged).
+          const media = job.data.photo;
+          if (media.startsWith("video:")) {
+            msg = await telegram.sendVideo(job.data.telegramId, media.slice(6), { caption, parse_mode: "HTML", reply_markup, supports_streaming: true });
+          } else if (media.startsWith("animation:")) {
+            msg = await telegram.sendAnimation(job.data.telegramId, media.slice(10), { caption, parse_mode: "HTML", reply_markup });
+          } else {
+            msg = await telegram.sendPhoto(job.data.telegramId, media, { caption, parse_mode: "HTML", reply_markup });
+          }
         } else if (job.data.text.length > TELEGRAM_TEXT_MAX) {
           // Too long for one message. Split it HERE, on line boundaries, while
           // the markup is still intact — letting Telegram reject it and falling
@@ -181,6 +190,13 @@ async function main(): Promise<void> {
             });
             if (msg?.message_id) sentIds.push(msg.message_id);
           }
+        } else if (job.data.linkPreview) {
+          // A broadcast with a YouTube / web link: the link's video or page
+          // shows as a big preview on top of the text.
+          msg = await telegram.sendMessage(job.data.telegramId, job.data.text, {
+            parse_mode: "HTML", reply_markup,
+            link_preview_options: { url: job.data.linkPreview, prefer_large_media: true, show_above_text: true },
+          });
         } else {
           msg = await telegram.sendMessage(job.data.telegramId, job.data.text, { parse_mode: "HTML", reply_markup });
         }

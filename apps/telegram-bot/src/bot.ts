@@ -1000,6 +1000,44 @@ export function createBot(): Bot<Ctx> {
     }
   });
 
+  // Broadcast with a short video or a GIF (the photo path is below). Stored in
+  // the same slot as a photo, tagged "video:" / "animation:", which the worker
+  // sends with sendVideo / sendAnimation.
+  bot.on(["message:video", "message:animation"], async (ctx, next) => {
+    if (!((ctx.session.awaiting === "admin_broadcast" || ctx.session.awaiting === "admin_bc_photo") && (await isBotAdmin(ctx.from?.id)))) return next();
+    const anim = ctx.message.animation;
+    const vid = ctx.message.video;
+    const fileId = anim?.file_id ?? vid?.file_id;
+    if (!fileId) return next();
+    const size = anim?.file_size ?? vid?.file_size ?? 0;
+    if (size > 50 * 1024 * 1024) {
+      await ctx.reply("⚠️ That video is over 50 MB — too big to broadcast. Send a shorter one, or post it on YouTube and put the link in the text.");
+      return;
+    }
+    ctx.session.bcPhoto = `${anim ? "animation" : "video"}:${fileId}`;
+    const cap = (ctx.message.caption ?? "").trim();
+    if (cap) ctx.session.bcBody = entitiesToTelegramHtml(ctx.message.caption ?? "", ctx.message.caption_entities).trim();
+    const body = ctx.session.bcBody ?? "";
+    ctx.session.awaiting = body ? null : "admin_broadcast";
+    const what = anim ? "GIF" : "Video";
+    await ctx.reply(
+      body
+        ? (body.length > 1024
+            ? `🎬 ${what} attached — but the text is ${body.length} characters and a caption can only be 1024. Shorten it, or send without the ${what.toLowerCase()}.`
+            : `🎬 <b>${what} attached.</b> Now choose how to send it:`)
+        : `🎬 <b>${what} attached.</b> Now send the broadcast <b>text</b>:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: body && body.length <= 1024
+          ? new InlineKeyboard()
+              .text("📨 Send now", cb("adm", "bcsend")).row()
+              .text(`🗑 Remove ${what.toLowerCase()}`, cb("adm", "bcnophoto")).row()
+              .text("✖️ Cancel", cb("adm", "home"))
+          : undefined,
+      },
+    );
+  });
+
   bot.on("message:photo", async (ctx) => {
     // Admin attaching an image to a broadcast. The outbox already supported
     // photo sends end to end — OutboxOptions.photo, both enqueue helpers and the

@@ -57,7 +57,9 @@ export interface OutboxJob {
    * delivery) — for closing cards and banners that are stale after one use.
    */
   clutter?: boolean;
-  photo?: string; // optional image URL → sent as photo with text as caption
+  photo?: string; // optional image URL → sent as photo with text as caption ("video:<id>" / "animation:<id>" for a video / GIF)
+  /** Text message: show this link (e.g. a YouTube video) as a big preview above the text. */
+  linkPreview?: string;
   buttons?: OutboxButton[]; // optional inline call-to-action buttons (URL buttons)
   pin?: boolean; // pin the sent message in the chat
   document?: { filename: string; content: string }; // optional .txt attachment; text becomes the caption
@@ -72,6 +74,7 @@ export interface OutboxJob {
 }
 export interface OutboxOptions {
   photo?: string;
+  linkPreview?: string;
   buttons?: OutboxButton[];
   followUp?: { text: string; buttons?: OutboxButton[]; clutter?: boolean };
   pin?: boolean;
@@ -141,6 +144,7 @@ export async function enqueueTelegramMessage(
     telegramId: telegramId.toString(),
     text,
     ...(opts.photo ? { photo: opts.photo } : {}),
+    ...(opts.linkPreview ? { linkPreview: opts.linkPreview } : {}),
     ...(opts.buttons && opts.buttons.length > 0 ? { buttons: opts.buttons } : {}),
     ...(opts.followUp ? { followUp: opts.followUp } : {}),
     ...(opts.pin ? { pin: true } : {}),
@@ -175,6 +179,7 @@ export async function enqueueTelegramBulk(
           telegramId: j.telegramId.toString(),
           text: j.text,
           ...(j.opts?.photo ? { photo: j.opts.photo } : {}),
+          ...(j.opts?.linkPreview ? { linkPreview: j.opts.linkPreview } : {}),
           ...(j.opts?.buttons && j.opts.buttons.length > 0 ? { buttons: j.opts.buttons } : {}),
           ...(j.opts?.pin ? { pin: true } : {}),
         } satisfies OutboxJob,
