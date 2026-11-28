@@ -3,7 +3,8 @@ import { orderUnitsFor, txTimeoutForUnits } from "./tx-budget.js";
 import { BINANCE_SESSION_MIN, UPI_SESSION_MIN } from "./binance-window.js";
 import { nextOrderNumber, prisma, type Currency } from "@gis/database";
 import { CoreError, cb, effectiveHours, encryptSecret, decryptSecret, formatMinor, type CurrencyCode, isCoreError } from "@gis/shared";
-import { enqueueAdminAlert, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_BUTTONS, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
+import { enqueueAdminAlert, enqueueEmail, enqueueTelegramMessage, enqueueTelegramDocument, DELIVERY_BUTTONS, DELIVERY_FOLLOWUP, deliveryButtons } from "../queues.js";
+import { emailSendingConfigured } from "../smtp.js";
 import { logError, logWallet } from "../logs.service.js";
 import { scheduleFollowup } from "../followup.service.js";
 import { copyButtonsFor, repairAccountPair } from "./assign.js";
@@ -603,7 +604,7 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   const item = await prisma.orderItem.findUnique({
     where: { id: orderItemId },
-    include: { order: { include: { user: { select: { telegramId: true, telegramHandle: true, firstName: true, referralCode: true } } } }, variant: { include: { product: true } } },
+    include: { order: { include: { user: { select: { telegramId: true, telegramHandle: true, firstName: true, referralCode: true, email: true, emailVerified: true } } } }, variant: { include: { product: true } } },
   });
   if (!item) return { ok: false, reason: "NOT_FOUND" };
   if (item.fulfilledAt) return { ok: false, reason: "ALREADY_DELIVERED", orderNumber: item.order.orderNumber };
@@ -656,6 +657,14 @@ export async function manualFulfillItem(orderItemId: string, secretText: string)
     // Deliver the item and nothing else. The thank-you, referral nudge and
     // delivery instructions are ORDER-level and were already sent at payment —
     // re-sending them here is what produced the duplicated messages.
+  } else if (!viaApi && item.order.user.email && item.order.user.emailVerified && emailSendingConfigured()) {
+    // A website customer without Telegram: the item by email (also in Orders on the site).
+    const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    await enqueueEmail({
+      to: item.order.user.email,
+      subject: `${loadConfig().STORE_NAME} — ${item.productNameSnap} delivered (${item.order.orderNumber})`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:560px"><h2>✅ Delivered</h2><p>Order <b>${esc(item.order.orderNumber)}</b> · <b>${esc(item.productNameSnap)}</b></p><pre style="background:#f3f3f3;padding:12px;border-radius:8px;white-space:pre-wrap">${esc(clean)}</pre><p style="color:#666">Keep this private. It is also saved in <b>Orders</b> on our website.</p></div>`,
+    }).catch(() => undefined);
   }
   return { ok: true, orderNumber: item.order.orderNumber, remaining: remainingItems, completed: allDone, viaApi };
 }

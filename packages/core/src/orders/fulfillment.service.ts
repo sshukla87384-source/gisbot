@@ -16,6 +16,7 @@ import { referralNudgeMessage, shouldSendReferralNudge } from "../users/user.ser
 import { deliveryInstructionsMessage } from "../admin.service.js";
 import { grantReferralRewardTx } from "../referral.service.js";
 import { creditCryptoTopup, cryptoNetwork, getCryptoCard, paidFraction, topupIdFromOrderRef } from "./crypto-checkout.service.js";
+import { emailSendingConfigured } from "../smtp.js";
 
 /**
  * Webhook-driven fulfillment (PRD §6.1 steps 6-13, Security doc §5).
@@ -477,7 +478,7 @@ async function handleSuccess(eventId: string, normalized: NormalizedPaymentEvent
       });
     }
     await notifyOrderToAdmins(outcome.orderId, "Gateway");
-    if (outcome.email && loadConfig().RESEND_API_KEY) {
+    if (outcome.email && emailSendingConfigured()) {
       await enqueueEmail({
         to: outcome.email,
         subject: `${loadConfig().STORE_NAME} — payment received (${outcome.orderNumber})`,

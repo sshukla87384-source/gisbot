@@ -167,10 +167,15 @@ import {
   setProductActivationGuide,
   getChannelsConfig,
   setChannelsConfig,
+  FEED_EMOJI_SLOTS,
+  cleanFeedEmoji,
+  sampleFeedTexts,
+  type FeedEmojiSlot,
   addLinkedChat,
   removeLinkedChat,
   getShopWebsite,
   webShopBaseUrl,
+  emailLoginAvailable,
   isWebShopUrl,
   setShopWebsite,
   setProductWebsite,
@@ -1295,10 +1300,34 @@ async function webShopAdminView(ctx: Ctx): Promise<void> {
       ? `🌐 Bot website buttons open your other website: <code>${escapeHtml(site)}</code>`
       : on && url ? "✅ <b>Synced:</b> every product's 🌐 Buy on our website button opens <b>that product</b> on the web shop; the menu and quick bar open its home page. Automatic for new products too." : "",
     "",
-    "<b>Login setup (once):</b> BotFather → /setdomain → pick this bot → send the web shop's domain (for now the <code>api.</code> domain above). Without it the Telegram login button says \"Bot domain invalid\".",
+    "<b>Login:</b> customers choose ✈️ <b>Telegram</b> (they confirm in this bot — no BotFather setup) or ✉️ <b>Email</b> (a 6-digit code).",
+    emailLoginAvailable() ? "✉️ Email login: <b>ON</b>" : "✉️ Email login: <b>OFF</b> — set <code>SMTP_HOST</code>, <code>SMTP_USER</code>, <code>SMTP_PASS</code>, <code>EMAIL_FROM</code> (or Resend) in .env, then deploy.",
     "",
     "<b>Own domain:</b> point its DNS A record to the server, set <code>SHOP_DOMAIN=yourdomain.com</code> in .env, run <code>./infrastructure/scripts/get-shop-cert.sh full</code>, then /setdomain to the new domain. The bot's 🌐 buttons switch to the new domain by themselves.",
   ].filter(Boolean).join("\n"), kb, true);
+}
+
+/** 🎨 The order-feed post's emoji, one per slot — premium emoji welcome. */
+async function feedEmojiView(ctx: Ctx): Promise<void> {
+  const c = await getChannelsConfig();
+  const kb = new InlineKeyboard();
+  const slots = Object.entries(FEED_EMOJI_SLOTS) as Array<[FeedEmojiSlot, { def: string; label: string }]>;
+  for (const [k, v] of slots) {
+    const cur = c.feedEmoji[k];
+    const id = cur?.match(/emoji-id="(\d+)"/)?.[1];
+    const glyph = cur ? cur.replace(/<[^>]+>/g, "") : v.def;
+    kb.add(sbtn(`${glyph} ${v.label}${cur ? (id ? " ⭐" : " ✏️") : ""}`, cb("adm", "chfe", k), undefined, id)).row();
+  }
+  kb.add(sbtn("👁 Preview (sent here)", cb("adm", "chfeprev"), "primary")).row();
+  if (Object.keys(c.feedEmoji).length) kb.text("♻️ Reset all to default", cb("adm", "chfereset")).row();
+  kb.text("◀️ Back", cb("adm", "chans"));
+  await show(ctx, [
+    "🎨 <b>Order feed emoji</b>",
+    "",
+    "Tap a line, then send <b>one emoji</b> — a <b>premium (custom) emoji</b> works too. ⭐ = premium set, ✏️ = changed.",
+    "",
+    "Every post in your order-feed group / channel uses these. API orders say <b>New API order!</b>, website orders <b>New website order!</b>.",
+  ].join("\n"), kb, true);
 }
 
 /** 📢 Channels & groups: must-join list and order-feed list. */
@@ -1313,6 +1342,7 @@ async function channelsView(ctx: Ctx): Promise<void> {
   kb.add(sbtn("➕ Add order-feed channel / group", cb("adm", "chadd", "feed"), "primary")).row();
   kb.text(c.feedShowPrice ? "💰 Feed shows price: ON" : "💰 Feed shows price: OFF", cb("adm", "chprice")).row();
   kb.text(c.feedMustJoin ? "🔒 Order feed must be joined too: ON" : "🔓 Order feed must be joined too: OFF", cb("adm", "chfeedmj")).row();
+  kb.text("🎨 Feed emoji & 👁 preview", cb("adm", "chfeemo")).row();
   kb.text("◀️ Back", cb("adm", "m_content"));
   await show(ctx, [
     "📢 <b>Channels & groups</b>",
@@ -5109,6 +5139,27 @@ export async function handleAdminCallback(ctx: Ctx, action: string, args: string
       await setChannelsConfig({ feedShowPrice: !c.feedShowPrice });
       return channelsView(ctx);
     }
+    case "chfeemo": return feedEmojiView(ctx);
+    case "chfe": {
+      if (!(id in FEED_EMOJI_SLOTS)) return feedEmojiView(ctx);
+      ctx.session.feedSlot = id;
+      ctx.session.awaiting = "admin_feed_emoji";
+      const slot = FEED_EMOJI_SLOTS[id as FeedEmojiSlot];
+      await askStep(ctx, `🎨 <b>${slot.label}</b>\n\nSend one emoji for this place — a premium (custom) emoji works too.\nSend <code>-</code> to go back to the default ${slot.def}.`);
+      return;
+    }
+    case "chfeprev": {
+      const c = await getChannelsConfig();
+      for (const t of sampleFeedTexts(c)) {
+        await ctx.reply(t, { parse_mode: "HTML" }).catch(() => ctx.reply(t.replace(/<[^>]+>/g, "")).catch(() => undefined));
+      }
+      flash(ctx, "👁 Preview sent below.");
+      return;
+    }
+    case "chfereset":
+      await setChannelsConfig({ feedEmoji: {} });
+      flash(ctx, "♻️ Feed emoji reset.");
+      return feedEmojiView(ctx);
     case "chadd": {
       ctx.session.chanKind = id === "feed" ? "orderFeed" : "mustJoin";
       ctx.session.awaiting = "admin_chan_add";
@@ -5906,6 +5957,33 @@ export async function handleAdminText(ctx: Ctx, awaiting: NonNullable<Ctx["sessi
       return true;
     }
     await addWebImageFromAdmin(ctx, { url });
+    return true;
+  }
+  if (awaiting === "admin_feed_emoji") {
+    const slot = ctx.session.feedSlot as FeedEmojiSlot | undefined;
+    ctx.session.feedSlot = undefined;
+    if (!slot || !(slot in FEED_EMOJI_SLOTS)) { await feedEmojiView(ctx); return true; }
+    const c = await getChannelsConfig();
+    const next = { ...c.feedEmoji };
+    if (text.trim() === "-") {
+      delete next[slot];
+    } else {
+      const raw = ctx.message?.text ?? text;
+      const ent = ((ctx.message?.entities ?? []) as Array<{ type: string; offset: number; length: number; custom_emoji_id?: string }>).find((e) => e.type === "custom_emoji" && e.custom_emoji_id);
+      const val = ent
+        ? cleanFeedEmoji(`<tg-emoji emoji-id="${ent.custom_emoji_id}">${raw.slice(ent.offset, ent.offset + ent.length)}</tg-emoji>`)
+        : cleanFeedEmoji(raw.trim().match(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/u)?.[0] ?? "");
+      if (!val) {
+        ctx.session.feedSlot = slot;
+        ctx.session.awaiting = "admin_feed_emoji";
+        await ctx.reply("Send just one emoji (a premium one works too), or - for the default.");
+        return true;
+      }
+      next[slot] = val;
+    }
+    await setChannelsConfig({ feedEmoji: next });
+    await ctx.reply("✅ Saved.");
+    await feedEmojiView(ctx);
     return true;
   }
   if (awaiting === "admin_ui_label") {

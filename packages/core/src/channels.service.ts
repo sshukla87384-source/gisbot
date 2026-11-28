@@ -36,10 +36,46 @@ export interface ChannelsConfig {
   feedShowPrice: boolean;
   /** The order-feed chats must be joined too (on by default). */
   feedMustJoin: boolean;
+  /** Emoji used in the order-feed post, per slot (premium <tg-emoji> or a plain emoji). */
+  feedEmoji: Partial<Record<FeedEmojiSlot, string>>;
+}
+
+/** The places in an order-feed post that carry an emoji (admin: 📢 Channels → 🎨 Feed emoji). */
+export const FEED_EMOJI_SLOTS = {
+  bot: { def: "🛒", label: "Header — order in the bot" },
+  web: { def: "🌐", label: "Header — website order" },
+  api: { def: "🔌", label: "Header — API order" },
+  item: { def: "📦", label: "Product (when it has no emoji)" },
+  price: { def: "💰", label: "Amount" },
+  buyer: { def: "👤", label: "Buyer" },
+  via: { def: "📲", label: "Ordered via" },
+  instant: { def: "⚡", label: "Delivered instantly" },
+  manual: { def: "🕐", label: "Delivered by the team" },
+} as const;
+export type FeedEmojiSlot = keyof typeof FEED_EMOJI_SLOTS;
+
+/** Only a premium emoji tag or a short plain emoji is stored — never arbitrary HTML. */
+export function cleanFeedEmoji(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  const m = t.match(/^<tg-emoji emoji-id="(\d{5,25})">([^<>&]{1,16})<\/tg-emoji>$/);
+  if (m) return `<tg-emoji emoji-id="${m[1]}">${m[2]}</tg-emoji>`;
+  if (t && t.length <= 16 && !/[<>&]/.test(t) && /\p{Extended_Pictographic}/u.test(t)) return t;
+  return null;
+}
+
+function cleanFeedEmojiMap(x: unknown): Partial<Record<FeedEmojiSlot, string>> {
+  const out: Partial<Record<FeedEmojiSlot, string>> = {};
+  if (!x || typeof x !== "object") return out;
+  for (const k of Object.keys(FEED_EMOJI_SLOTS) as FeedEmojiSlot[]) {
+    const v = cleanFeedEmoji((x as Record<string, unknown>)[k]);
+    if (v) out[k] = v;
+  }
+  return out;
 }
 
 const KEY = "channels.cfg";
-const DEFAULT: ChannelsConfig = { forceJoin: true, mustJoin: [], orderFeed: [], feedShowPrice: true, feedMustJoin: true };
+const DEFAULT: ChannelsConfig = { forceJoin: true, mustJoin: [], orderFeed: [], feedShowPrice: true, feedMustJoin: true, feedEmoji: {} };
 let cache: { at: number; v: ChannelsConfig } | null = null;
 
 function cleanList(x: unknown): LinkedChat[] {
@@ -68,6 +104,7 @@ export async function getChannelsConfig(): Promise<ChannelsConfig> {
         orderFeed: cleanList(r.orderFeed),
         feedShowPrice: r.feedShowPrice !== false,
         feedMustJoin: r.feedMustJoin !== false,
+        feedEmoji: cleanFeedEmojiMap(r.feedEmoji),
       };
     }
   } catch { /* defaults */ }
@@ -120,6 +157,48 @@ function maskName(n: string): string {
   return `${s.slice(0, 2)}***${s.slice(-1)}`;
 }
 
+export interface FeedOrder {
+  channel: string;
+  currency: string;
+  valueMinor: number;
+  buyer: string;
+  lines: Array<{ icon: string | null; name: string; variant: string; qty: number }>;
+  more: number;
+  instant: boolean;
+}
+
+/** The feed post itself — shared by the real post and the admin's 👁 Preview. */
+export function buildFeedText(o: FeedOrder, cfg: Pick<ChannelsConfig, "feedShowPrice" | "feedEmoji">): string {
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const e = (k: FeedEmojiSlot): string => cfg.feedEmoji[k] ?? FEED_EMOJI_SLOTS[k].def;
+  const kind = o.channel === "API" ? "api" : o.channel === "WEB" ? "web" : "bot";
+  const head = kind === "api" ? `${e("api")} <b>New API order!</b>` : kind === "web" ? `${e("web")} <b>New website order!</b>` : `${e("bot")} <b>New order!</b>`;
+  const via = kind === "api" ? "<b>API order</b> (reseller)" : kind === "web" ? "Website" : "Telegram bot";
+  const items = o.lines.map((l) => `${l.icon || e("item")} <b>${esc(l.name)}</b>${l.variant ? ` · ${esc(l.variant)}` : ""} <b>×${l.qty}</b>`);
+  if (o.more > 0) items.push(`<i>… +${o.more} more</i>`);
+  return [
+    head,
+    "",
+    ...items,
+    "",
+    ...(cfg.feedShowPrice ? [`${e("price")} <b>Total:</b> ${formatMinor(o.valueMinor, o.currency as CurrencyCode)}`] : []),
+    `${e("buyer")} <b>${kind === "api" ? "Reseller" : "Buyer"}:</b> ${esc(o.buyer)}`,
+    `${e("via")} <b>Via:</b> ${via}`,
+    "",
+    o.instant ? `${e("instant")} <i>Delivered instantly</i>` : `${e("manual")} <i>Being delivered by our team</i>`,
+  ].join("\n");
+}
+
+/** A sample post per kind, for the admin's preview. */
+export function sampleFeedTexts(cfg: Pick<ChannelsConfig, "feedShowPrice" | "feedEmoji">): string[] {
+  const base = { currency: "USD", valueMinor: 1299, more: 0 };
+  return [
+    buildFeedText({ ...base, channel: "DIRECT", buyer: "Sa***m", instant: true, lines: [{ icon: null, name: "Netflix Premium 1 Month", variant: "", qty: 1 }] }, cfg),
+    buildFeedText({ ...base, channel: "WEB", buyer: "Ra***l", instant: true, lines: [{ icon: null, name: "Spotify Premium", variant: "12 months", qty: 2 }] }, cfg),
+    buildFeedText({ ...base, channel: "API", buyer: "Re***r", instant: false, lines: [{ icon: null, name: "ChatGPT Plus", variant: "", qty: 5 }] }, cfg),
+  ];
+}
+
 /**
  * Post one paid order to every order-feed chat. Once per order, whichever
  * payment rail confirmed it (they all pass through notifyOrderToAdmins).
@@ -132,39 +211,42 @@ export async function postOrderToFeed(orderId: string): Promise<void> {
   const o = await prisma.order.findUnique({
     where: { id: orderId },
     select: {
-      currency: true, subtotalMinor: true, discountMinor: true, createdAt: true,
-      user: { select: { firstName: true, telegramHandle: true } },
-      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, variant: { select: { product: { select: { iconEmoji: true, nameHtml: true, name: true } } } } } },
+      currency: true, subtotalMinor: true, discountMinor: true, createdAt: true, channel: true,
+      user: { select: { firstName: true, telegramHandle: true, email: true } },
+      items: { select: { productNameSnap: true, variantNameSnap: true, quantity: true, variant: { select: { product: { select: { iconEmoji: true, nameHtml: true, name: true, fulfillmentMode: true, supplierId: true } } } } } },
     },
   });
   if (!o || o.items.length === 0) return;
-  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const groups = groupOrderLines(o.items);
-  // The product's own (premium) emoji where it has one, else 📦.
+  // The product's own (premium) emoji where it has one.
   const iconOf = new Map<string, string>();
   for (const i of o.items) {
     if (iconOf.has(i.productNameSnap)) continue;
     const pr = i.variant.product;
-    iconOf.set(i.productNameSnap, productEmojiHtml(pr.iconEmoji, pr.nameHtml, pr.name) || "📦");
+    const ic = productEmojiHtml(pr.iconEmoji, pr.nameHtml, pr.name);
+    if (ic) iconOf.set(i.productNameSnap, ic);
   }
-  const lines = groups.slice(0, 6).map((g) => {
-    const vn = g.variantNameSnap.trim().toLowerCase() === "standard" ? "" : ` · ${esc(g.variantNameSnap)}`;
-    const name = g.productNameSnap.replace(/^\s*\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*\s*/u, "");
-    return `${iconOf.get(g.productNameSnap) ?? "📦"} <b>${esc(name)}</b>${vn} ×${g.quantity}`;
-  });
-  if (groups.length > 6) lines.push(`… +${groups.length - 6} more`);
-  const value = Math.max(0, o.subtotalMinor - o.discountMinor);
-  const text = [
-    "🛒 <b>New order!</b>",
-    "",
-    ...lines,
-    ...(cfg.feedShowPrice ? [`💰 ${formatMinor(value, o.currency as CurrencyCode)}`] : []),
-    `👤 ${esc(maskName(o.user.firstName ?? o.user.telegramHandle ?? ""))}`,
-    "",
-    "<i>⚡ Delivered instantly by our bot</i>",
-  ].join("\n");
+  const instant = o.items.every((i) => i.variant.product.fulfillmentMode === "AUTOMATIC" || i.variant.product.supplierId !== null);
+  const text = buildFeedText({
+    channel: o.channel,
+    currency: o.currency,
+    valueMinor: Math.max(0, o.subtotalMinor - o.discountMinor),
+    buyer: maskName(o.user.firstName ?? o.user.telegramHandle ?? o.user.email?.split("@")[0] ?? ""),
+    lines: groups.slice(0, 6).map((g) => ({
+      icon: iconOf.get(g.productNameSnap) ?? null,
+      name: g.productNameSnap.replace(/^\s*\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*\s*/u, ""),
+      variant: g.variantNameSnap.trim().toLowerCase() === "standard" ? "" : g.variantNameSnap,
+      qty: g.quantity,
+    })),
+    more: Math.max(0, groups.length - 6),
+    instant,
+  }, cfg);
   const bot = loadConfig().BOT_USERNAME;
-  const buttons = bot ? [{ text: "🛍 Order now", url: `https://t.me/${bot.replace(/^@/, "")}` }] : [];
+  const site = await import("./admin.service.js").then((m) => m.getShopWebsiteLink()).catch(() => null);
+  const buttons = [
+    ...(bot ? [{ text: "🛍 Order in the bot", url: `https://t.me/${bot.replace(/^@/, "")}` }] : []),
+    ...(site ? [{ text: "🌐 Order on the website", url: site }] : []),
+  ];
   for (const c of cfg.orderFeed) {
     await enqueueTelegramMessage(c.chatId, text, { buttons }).catch(() => undefined);
   }

@@ -98,6 +98,9 @@ import {
   enqueueAdminAlert,
   activeMustJoin,
   getShopWebsiteLink,
+  approveBotLogin,
+  botLoginIsLink,
+  isBotLoginToken,
   type LinkedChat,
   capTelegramHtml,
   entitiesToTelegramHtml,
@@ -755,6 +758,8 @@ export function createBot(): Bot<Ctx> {
       ctx.session.fjMsgId = undefined;
       return showHome(ctx);
     }
+    // Logging in to the website (/start wl_… and its ✅ button) is never gated.
+    if (/^\/start wl_/.test(ctx.message?.text ?? "") || data.startsWith("wl:")) return next();
     // The admin panel (and logging in to it) is never gated.
     if (data.startsWith("adm:") || /^\/(shriji|admin)\b/i.test(ctx.message?.text ?? "") || (ctx.session.awaiting ?? "").startsWith("admin_")) return next();
     if (await isBotAdmin(ctx.from.id)) return next();
@@ -802,6 +807,24 @@ export function createBot(): Bot<Ctx> {
 
   bot.command("start", async (ctx) => {
     const payload = ctx.match.trim();
+    // 🌐 "Log in with Telegram" on the website: confirm here, the page logs in.
+    if (payload.startsWith("wl_")) {
+      const token = payload.slice(3);
+      await ctx.deleteMessage().catch(() => undefined);
+      if (!isBotLoginToken(token)) { await ctx.reply("⚠️ That login link is not valid. Go back to the website and tap Log in with Telegram again."); return; }
+      const link = await botLoginIsLink(token);
+      await ctx.reply([
+        link ? "🔗 <b>Link this Telegram to your website account?</b>" : "🌐 <b>Log in to our website?</b>",
+        "",
+        link ? "Your bot and website will share one wallet and order list." : "You will be logged in on the website with this Telegram account — same wallet and orders as here.",
+        "",
+        "⚠️ Only tap ✅ if <b>you</b> just clicked “Log in with Telegram” on our website.",
+      ].join("\n"), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text(link ? "✅ Yes, link it" : "✅ Yes, log me in", `wl:ok:${token}`).text("✖️ No", "wl:no"),
+      });
+      return;
+    }
     if (payload.startsWith(PRODUCT_DEEPLINK_PREFIX)) {
       const productId = await getProductIdBySlug(payload.slice(PRODUCT_DEEPLINK_PREFIX.length));
       if (productId) { ctx.session.buyProductId = productId; return render(ctx, await views.productView(ctx.user, productId), false); }
@@ -859,6 +882,19 @@ export function createBot(): Bot<Ctx> {
     }
     return showHome(ctx);
   });
+  bot.callbackQuery(/^wl:ok:([A-Za-z0-9]{24})$/, async (ctx) => {
+    const token = ctx.match[1] ?? "";
+    const ok = await approveBotLogin(token, ctx.user.id).catch(() => false);
+    await ctx.answerCallbackQuery({ text: ok ? "✅ Done — go back to the website" : "This login link expired" }).catch(() => undefined);
+    await ctx.editMessageText(ok
+      ? "✅ <b>Confirmed.</b> Go back to the website — it logs you in by itself in a few seconds."
+      : "⌛ This login link expired. On the website tap <b>Log in with Telegram</b> again.", { parse_mode: "HTML" }).catch(() => undefined);
+  });
+  bot.callbackQuery("wl:no", async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Cancelled" }).catch(() => undefined);
+    await ctx.editMessageText("✖️ Cancelled — nobody was logged in.").catch(() => undefined);
+  });
+
   bot.command("menu", async (ctx) => showHome(ctx));
   // /track GIS-2026-000123 — status of one order, no secrets, shareable.
   bot.command("track", async (ctx) => {

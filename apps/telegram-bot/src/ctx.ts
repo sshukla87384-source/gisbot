@@ -38,6 +38,7 @@ export interface SessionData {
     | "admin_p_site"
     | "admin_p_icon"
     | "admin_ui_label"
+    | "admin_feed_emoji"
     | "admin_p_webimg"
     | "admin_p_howto"
     | "admin_p_terms"
@@ -198,6 +199,8 @@ export interface SessionData {
   supSearch?: string;
   /** Which list the admin is adding a chat to (must-join / order feed). */
   chanKind?: "mustJoin" | "orderFeed";
+  /** 🎨 Feed emoji: which slot the admin is setting. */
+  feedSlot?: string;
   supFilter?: "all" | "visible" | "hidden" | "deleted" | "new";
   /** "quick" = tapping a row publishes/hides it instantly; "select" = tapping ticks it. */
   supMode?: "select" | "quick";

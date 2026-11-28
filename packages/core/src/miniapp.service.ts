@@ -12,7 +12,8 @@ import { getLedger, getWallet } from "./wallet/wallet.service.js";
 import { checkoutWithWallet, type CheckoutResult } from "./orders/checkout.service.js";
 import { listOrders, revealOrderDeliveries } from "./orders/order.service.js";
 import { copyButtonsFor, buildCombinedDeliveryText, buildDeliveryText, buildDeliveryTxt, combinedDeliveryButtons, credsOf, DELIVERY_FILE_THRESHOLD, type DeliveryLine } from "./orders/assign.js";
-import { DELIVERY_FOLLOWUP, deliveryButtons, enqueueTelegramDocument, enqueueTelegramMessage } from "./queues.js";
+import { DELIVERY_FOLLOWUP, deliveryButtons, enqueueEmail, enqueueTelegramDocument, enqueueTelegramMessage } from "./queues.js";
+import { emailSendingConfigured } from "./smtp.js";
 import { sendDeliveredOrderMessages } from "./orders/delivery-notify.js";
 import { clearChatClutter } from "./orders/pay-prompt.service.js";
 import { firstOrderAllowed, listMyGifts } from "./growth.service.js";
@@ -269,7 +270,7 @@ export async function miniAppReferral(userId: string, referralCode: string, botU
   };
 }
 
-export async function miniAppProfileFull(userId: string, telegramId: bigint) {
+export async function miniAppProfileFull(userId: string, telegramId: bigint | null) {
   const [u, tier, tickets, orders] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId }, select: { firstName: true, telegramHandle: true, currency: true, locale: true, isVip: true, createdAt: true } }),
     tierOf(userId).catch(() => null),
@@ -277,7 +278,7 @@ export async function miniAppProfileFull(userId: string, telegramId: bigint) {
     prisma.order.count({ where: { userId, status: { in: ["COMPLETED", "PAID", "PENDING_FULFILLMENT"] } } }),
   ]);
   return {
-    telegramId: telegramId.toString(),
+    telegramId: telegramId === null ? null : telegramId.toString(),
     firstName: u?.firstName ?? null,
     handle: u?.telegramHandle ?? null,
     currency: (u?.currency ?? "USD") as Currency,
@@ -303,10 +304,11 @@ export type MiniAppBuyResult =
  * the delivery also goes to the chat exactly as a bot purchase would.
  */
 export async function miniAppBuyWithWallet(
-  user: { id: string; telegramId: bigint; currency: Currency },
+  user: { id: string; telegramId: bigint | null; currency: Currency; email?: string | null },
   variantId: string,
   qty: number,
   quote?: { totalMinor: number; currency: Currency },
+  opts: { source?: "WEB" } = {},
 ): Promise<MiniAppBuyResult> {
   const quantity = Math.max(1, Math.min(100_000, Math.round(qty)));
   const redis = getRedis();
@@ -333,7 +335,7 @@ export async function miniAppBuyWithWallet(
     const maxTotalMinor = quote ? Math.ceil(approx * 1.01) + 1 : undefined;
     let result: CheckoutResult;
     try {
-      result = await checkoutWithWallet(user.id, "DIRECT", { direct: [{ variantId, quantity }], ...(maxTotalMinor !== undefined ? { maxTotalMinor } : {}) });
+      result = await checkoutWithWallet(user.id, "DIRECT", { direct: [{ variantId, quantity }], ...(maxTotalMinor !== undefined ? { maxTotalMinor } : {}), ...(opts.source ? { source: opts.source } : {}) });
     } catch (e) {
       const code = isCoreError(e) ? e.code : "";
       if (code === "VALIDATION_FAILED" && isCoreError(e) && e.message === "PRICE_CHANGED") {
@@ -344,7 +346,9 @@ export async function miniAppBuyWithWallet(
       if (code === "OUT_OF_STOCK" || code === "CART_ITEM_UNAVAILABLE") return { ok: false, reason: "stock", message: "Not enough stock for that right now — please pick another option." };
       return { ok: false, reason: "error", message: "Could not complete the purchase. Nothing was charged." };
     }
-    await dispatchDeliveriesToTelegram(user.telegramId, result, user.id).catch(() => undefined);
+    // Telegram when the customer has it; an email-only (website) customer gets the keys by email.
+    if (user.telegramId !== null) await dispatchDeliveriesToTelegram(user.telegramId, result, user.id).catch(() => undefined);
+    else if (user.email) await emailDeliveredOrder(user.email, result).catch(() => undefined);
     return {
       ok: true,
       orderId: result.orderId,
@@ -357,6 +361,24 @@ export async function miniAppBuyWithWallet(
   } finally {
     await redis.del(lockKey).catch(() => undefined);
   }
+}
+
+/** The order (and its keys) by email, for a customer without Telegram. */
+async function emailDeliveredOrder(email: string, r: CheckoutResult): Promise<void> {
+  if (!emailSendingConfigured()) return;
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const store = loadConfig().STORE_NAME;
+  const blocks = r.deliveries.map((d) => {
+    const vals = deliveredValues({ kind: d.kind, ...d.secret });
+    const name = `${d.productName}${d.variantName && !/^standard$/i.test(d.variantName) ? ` · ${d.variantName}` : ""}`;
+    return `<div style="border:1px solid #ddd;border-radius:10px;padding:12px;margin:10px 0"><b>${esc(name)}</b>${vals.map((v) => `<div style="margin-top:6px"><span style="color:#666">${esc(v.label)}:</span> <code style="background:#f3f3f3;padding:2px 6px;border-radius:4px">${esc(v.value)}</code></div>`).join("")}</div>`;
+  }).join("");
+  const pending = r.pendingManualItems > 0 ? `<p>⏳ ${r.pendingManualItems} item(s) are being prepared by our team — you will find them in <b>Orders</b> on the website.</p>` : "";
+  await enqueueEmail({
+    to: email,
+    subject: `${store} — order ${r.orderNumber} (${formatMinor(r.totalMinor, r.currency as CurrencyCode)})`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px"><h2>✅ Order successful</h2><p>Order <b>${esc(r.orderNumber)}</b> · ${esc(formatMinor(r.totalMinor, r.currency as CurrencyCode))}</p>${blocks}${pending}<p style="color:#666">Keep this email private. Your items are always saved in <b>Orders</b> on our website.</p></div>`,
+  });
 }
 
 async function dispatchDeliveriesToTelegram(telegramId: bigint, r: CheckoutResult, userId: string): Promise<void> {

@@ -111,7 +111,7 @@ header.top{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);backgroun
 .tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:none;background:rgba(18,21,42,.96);backdrop-filter:blur(12px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
 .tab{flex:1;text-align:center;padding:9px 0 7px;font-size:11px;color:var(--mut);cursor:pointer;font-weight:600}.tab span{display:block;font-size:21px;line-height:1.25}.tab.on{color:#fff}
 footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
-.loginbox{text-align:center;padding:10px 0}
+.loginbox{text-align:center;padding:10px 0}.loginbox input{box-sizing:border-box;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;color:var(--tx);font-size:16px;font-family:inherit;outline:0}.loginbox input:focus{border-color:var(--acc)}
 @media (max-width:820px){.nav{display:none}.hero{grid-template-columns:1fr;padding:22px}.hero h1{font-size:26px}.tabs{display:flex}.grid{grid-template-columns:repeat(2,1fr);gap:10px}.cn{font-size:13.5px}.cp b{font-size:16px}.bar{gap:8px}.logo span{display:none}}
 </style>
 </head>
@@ -202,23 +202,77 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
   $("logo").onclick = function(){ go("shop"); };
   $("heroShop").onclick = function(){ $("chips").scrollIntoView({ behavior: "smooth" }); };
 
-  // ── login ──
+  // ── login: Telegram (confirm in our bot) or email (6-digit code) ──
+  var loginAfter = null;
+  function loggedIn(msg){
+    closeModal(); toast(msg || "Welcome! 👋");
+    return loadMe().then(function(){ if (loginAfter) { var f = loginAfter; loginAfter = null; f(); } else if (document.getElementById("p-account").classList.contains("on")) loadAccount(); });
+  }
   function needLogin(after){
     loginAfter = after || null;
-    if (!cfg.bot) { openModal("Log in", '<div class="loginbox">Login is not configured yet.</div>'); return; }
-    openModal("Log in with Telegram", '<div class="loginbox"><p>Use the same Telegram account as in our bot — your wallet and orders are shared.</p><div id="tgw"></div><p class="sub" style="margin-top:14px">New here? Logging in creates your account.</p></div>');
-    var s = document.createElement("script");
-    s.async = true; s.src = "https://telegram.org/js/telegram-widget.js?22";
-    s.setAttribute("data-telegram-login", cfg.bot); s.setAttribute("data-size", "large"); s.setAttribute("data-radius", "12");
-    s.setAttribute("data-request-access", "write"); s.setAttribute("data-onauth", "__tgAuth(user)");
-    $("tgw").appendChild(s);
+    var h = '<div class="loginbox"><p class="sub">Log in or create your account — it takes a few seconds.</p>';
+    if (cfg.bot) h += '<button class="btn block" id="lgTg">✈️ Continue with Telegram</button><p class="sub" style="margin:6px 0 14px">Same wallet and orders as in our Telegram bot.</p>';
+    if (cfg.emailLogin) h += '<button class="btn ghost block" id="lgMail">✉️ Continue with Email</button><p class="sub" style="margin-top:6px">We email you a 6-digit code — no password.</p>';
+    if (!cfg.bot && !cfg.emailLogin) h += '<p>Login is not configured yet.</p>';
+    h += '</div>';
+    openModal("Log in", h);
+    if ($("lgTg")) $("lgTg").onclick = function(){ telegramLogin("auth/bot/start"); };
+    if ($("lgMail")) $("lgMail").onclick = function(){ emailLogin("auth/email/start", "auth/email/verify"); };
   }
-  var loginAfter = null;
-  window.__tgAuth = function(user){
-    var ref = null; try { ref = localStorage.getItem("ref"); } catch (e) {}
-    var body = {}; for (var k in user) body[k] = user[k]; if (ref) body.ref = ref;
-    api("auth/telegram", body).then(function(){ closeModal(); toast("Welcome! 👋"); return loadMe(); }).then(function(){ if (loginAfter) { var f = loginAfter; loginAfter = null; f(); } }).catch(function(e){ toast(e.message); });
-  };
+  /** Telegram: get a one-time link, the customer taps ✅ in the bot, this page polls. */
+  function telegramLogin(startPath){
+    $("mbody").innerHTML = '<div class="loginbox"><p>⏳ Preparing…</p></div>';
+    api(startPath, {}).then(function(r){
+      $("mt").textContent = "Log in with Telegram";
+      $("mbody").innerHTML = '<div class="loginbox"><div style="font-size:46px">✈️</div>'
+        + '<p><b>1.</b> Tap the button — our bot opens in Telegram.<br><b>2.</b> Tap <b>✅ Yes</b> there.<br><b>3.</b> Come back here — you are logged in automatically.</p>'
+        + '<a class="btn block" id="tgOpen" target="_blank" rel="noopener" href="' + esc(r.url) + '">Open Telegram</a>'
+        + '<p class="sub" id="tgWait" style="margin-top:14px">Waiting for your confirmation…</p>'
+        + '<p class="sub">Telegram didn\u2019t open? <a href="' + esc(r.url) + '" target="_blank" rel="noopener">Use this link</a> or install Telegram first.</p></div>';
+      var tries = 0;
+      clearInterval(closeModal._poll);
+      closeModal._poll = setInterval(function(){
+        if (++tries > 300) { clearInterval(closeModal._poll); $("tgWait").textContent = "⌛ The link expired — close this and try again."; return; }
+        api("auth/bot/poll", { token: r.token }).then(function(x){
+          if (x.state === "ok") { clearInterval(closeModal._poll); loggedIn(x.linked ? "✅ Telegram linked" : null); }
+          else if (x.state === "expired") { clearInterval(closeModal._poll); $("tgWait").textContent = "⌛ The link expired — close this and try again."; }
+        }).catch(function(e){ clearInterval(closeModal._poll); $("tgWait").textContent = "⚠️ " + e.message; });
+      }, 2000);
+    }).catch(function(e){ $("mbody").innerHTML = '<div class="loginbox"><p>⚠️ ' + esc(e.message) + '</p></div>'; });
+  }
+  /** Email: send a code, type it in. Same flow adds an email to a Telegram account. */
+  function emailLogin(startPath, verifyPath, title){
+    $("mt").textContent = title || "Log in with Email";
+    $("mbody").innerHTML = '<div class="loginbox" style="text-align:left"><label class="sub">Your email</label>'
+      + '<input id="em" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com" style="width:100%;margin:6px 0 12px">'
+      + '<button class="btn block" id="emSend">Send code</button>'
+      + '<div id="emStep2" style="display:none;margin-top:16px"><label class="sub">6-digit code from the email</label>'
+      + '<input id="emCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" style="width:100%;margin:6px 0 12px;letter-spacing:6px;font-size:20px;text-align:center">'
+      + '<button class="btn ok block" id="emGo">Continue</button><p class="sub" style="margin-top:10px">No email? Check spam, or <a href="#" id="emAgain">send again</a>.</p></div></div>';
+    var email = "";
+    var send = function(){
+      email = ($("em").value || "").trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast("Enter a valid email"); return; }
+      $("emSend").disabled = true; $("emSend").textContent = "⏳ Sending…";
+      api(startPath, { email: email }).then(function(){
+        $("emSend").textContent = "✅ Code sent to " + email; $("emStep2").style.display = "block"; $("emCode").focus();
+      }).catch(function(e){ toast(e.message); $("emSend").disabled = false; $("emSend").textContent = "Send code"; });
+    };
+    var verify = function(){
+      var code = ($("emCode").value || "").replace(/\D/g, "");
+      if (code.length !== 6) { toast("Enter the 6-digit code"); return; }
+      var ref = null; try { ref = localStorage.getItem("ref"); } catch (e) {}
+      var body = { email: email, code: code }; if (ref) body.ref = ref;
+      $("emGo").disabled = true;
+      api(verifyPath, body).then(function(){ loggedIn(verifyPath === "auth/email/verify" ? null : "✅ Email added"); }).catch(function(e){ toast(e.message); $("emGo").disabled = false; });
+    };
+    $("emSend").onclick = send;
+    $("em").onkeydown = function(e){ if (e.key === "Enter") send(); };
+    $("emGo").onclick = verify;
+    $("emCode").onkeydown = function(e){ if (e.key === "Enter") verify(); };
+    $("emCode").oninput = function(){ if (($("emCode").value || "").replace(/\D/g, "").length === 6) verify(); };
+    $("emAgain").onclick = function(e){ e.preventDefault(); $("emSend").disabled = false; send(); };
+  }
 
   function loadMe(){
     return api("me").then(function(d){ me = d; currency = d.currency || currency; $("cur").value = currency; header(); }).catch(function(){ me = null; header(); });
@@ -385,7 +439,7 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
 
   // ── orders ──
   var ST = { COMPLETED: ["✅ Delivered", "g"], PAID: ["💳 Paid", "y"], PENDING_FULFILLMENT: ["🕐 Being prepared", "y"], AWAITING_STOCK: ["📦 Waiting for stock", "y"], PENDING_PAYMENT: ["⌛ Awaiting payment", "y"], CANCELLED: ["🚫 Cancelled", "r"], EXPIRED: ["⌛ Expired", "r"], REFUNDED: ["↩️ Refunded", "r"], PARTIALLY_REFUNDED: ["↩️ Part refunded", "y"], MANUAL_REVIEW: ["🔍 In review", "y"] };
-  function gate(el, title){ el.innerHTML = '<div class="panel" style="text-align:center"><div style="font-size:44px">🔐</div><h3>' + title + '</h3><p class="sub">Log in with the Telegram account you use in our bot.</p><button class="btn" id="gl">Log in with Telegram</button></div>'; $("gl").onclick = function(){ needLogin(); }; }
+  function gate(el, title){ el.innerHTML = '<div class="panel" style="text-align:center"><div style="font-size:44px">🔐</div><h3>' + title + '</h3><p class="sub">Log in with Telegram or with your email.</p><button class="btn" id="gl">🔐 Log in</button></div>'; $("gl").onclick = function(){ needLogin(); }; }
   function loadOrders(page){
     var el = $("p-orders"); if (!me) { gate(el, "Your orders"); return; }
     el.innerHTML = '<div class="sec-t"><h2>📦 My orders</h2></div><div class="sk" style="height:200px"></div>';
@@ -438,10 +492,13 @@ footer{color:var(--mut);font-size:13px;text-align:center;padding:30px 0 10px}
           + '<div class="row"><span>👥 Invited</span><b>' + r.invited + '</b></div><div class="row"><span>🛒 Bought</span><b>' + r.purchased + '</b></div><div class="row"><span>💵 Earned</span><b>' + money(r.earnedMinor, r.currency) + '</b></div>'
           + (r.held && r.held.readyMinor > 0 ? '<button class="btn ok block" id="rc">Claim ' + money(r.held.readyMinor, r.held.currency) + '</button>' : "") + '</div>';
       }
-      h += '<div class="panel"><h3>⚙️ Settings</h3><div class="row"><span>Currency</span><b>' + esc(u.currency) + '</b></div><div class="row"><span>Telegram ID</span><code>' + esc(u.telegramId) + '</code></div>'
+      h += '<div class="panel"><h3>⚙️ Settings</h3><div class="row"><span>Currency</span><b>' + esc(u.currency) + '</b></div><div class="row"><span>✈️ Telegram</span>' + (u.telegramId ? '<b>Linked' + (u.handle ? ' · @' + esc(u.handle) : "") + '</b>' : (cfg.bot ? '<button class="btn ghost" id="lnTg" style="padding:8px 12px">🔗 Link Telegram</button>' : '<span class="sub">—</span>')) + '</div>'
+        + '<div class="row"><span>✉️ Email</span>' + (u.email ? '<b>' + esc(u.email) + '</b>' : (cfg.emailLogin ? '<button class="btn ghost" id="lnMail" style="padding:8px 12px">➕ Add email</button>' : '<span class="sub">—</span>')) + '</div>'
         + (cfg.bot ? '<a class="btn ghost block" style="text-align:center;margin:10px 0" target="_blank" rel="noopener" href="https://t.me/' + esc(cfg.bot) + '">✈️ Open the bot</a>' : "") + '<button class="btn ghost block" id="lo">🚪 Log out</button></div>';
       el.innerHTML = h;
       if ($("rc")) $("rc").onclick = function(){ api("referral/claim", {}).then(function(c){ toast(c.credited ? "✅ Added to your wallet" : "Nothing to claim yet"); loadMe(); loadAccount(); }).catch(function(e){ toast(e.message); }); };
+      if ($("lnTg")) $("lnTg").onclick = function(){ openModal("Link Telegram", ""); telegramLogin("account/telegram/start"); };
+      if ($("lnMail")) $("lnMail").onclick = function(){ openModal("Add email", ""); emailLogin("account/email/start", "account/email/verify", "Add your email"); };
       $("lo").onclick = function(){ api("auth/logout", {}).then(function(){ me = null; header(); go("shop"); toast("Logged out"); }); };
     }).catch(function(e){ el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
   }

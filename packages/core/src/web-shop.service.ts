@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomInt, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "@gis/config";
 import { prisma, type Currency } from "@gis/database";
 import { REFERRAL_PREFIX } from "@gis/shared";
@@ -8,6 +8,8 @@ import { resolveTelegramUser } from "./users/user.service.js";
 import { sanitizeTelegramHtml } from "./tg-html.js";
 import { publicImageUrl } from "./miniapp.service.js";
 import { getRedis, invalidate } from "./redis.js";
+import { enqueueEmail } from "./queues.js";
+import { emailSendingConfigured } from "./smtp.js";
 
 /**
  * The shop as a normal website (apps/api serves the page at /shop).
@@ -120,18 +122,226 @@ export function readWebSession(token: string | undefined | null): { id: string; 
   }
 }
 
+export interface WebShopUser {
+  id: string;
+  /** null for a customer who signed up with email on the website. */
+  telegramId: bigint | null;
+  email: string | null;
+  currency: Currency;
+  firstName: string | null;
+  referralCode: string;
+}
+
 /** The signed-in customer, or null (unknown, banned or logged out). */
-export async function webSessionUser(token: string | undefined | null): Promise<{ id: string; telegramId: bigint; currency: Currency; firstName: string | null; referralCode: string } | null> {
+export async function webSessionUser(token: string | undefined | null): Promise<WebShopUser | null> {
   const s = readWebSession(token);
   if (!s) return null;
   if (s.v !== (await sessionVersion(s.id))) return null; // logged out since
   const id = s.id;
   const u = await prisma.user.findFirst({
     where: { id, status: "ACTIVE" },
-    select: { id: true, telegramId: true, currency: true, firstName: true, referralCode: true },
+    select: { id: true, telegramId: true, email: true, emailVerified: true, currency: true, firstName: true, referralCode: true },
   });
-  if (!u || u.telegramId === null) return null;
-  return { id: u.id, telegramId: u.telegramId, currency: u.currency as Currency, firstName: u.firstName, referralCode: u.referralCode };
+  if (!u) return null;
+  // A customer reaches the shop with Telegram or with a verified email.
+  if (u.telegramId === null && !(u.email && u.emailVerified)) return null;
+  return { id: u.id, telegramId: u.telegramId, email: u.emailVerified ? u.email : null, currency: u.currency as Currency, firstName: u.firstName, referralCode: u.referralCode };
+}
+
+// ── Email login (one-time code) ──────────────────────────────────────────────
+
+const EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/;
+const CODE_TTL_SEC = 600;
+const CODE_MAX_TRIES = 5;
+
+export function normalizeEmail(raw: string): string | null {
+  const e = String(raw ?? "").trim().toLowerCase();
+  return e.length <= 254 && EMAIL_RE.test(e) ? e : null;
+}
+
+/** Can the website offer "log in with email"? (needs SMTP or Resend + EMAIL_FROM) */
+export function emailLoginAvailable(): boolean {
+  return emailSendingConfigured();
+}
+
+const codeKey = (email: string) => `shopotp:${createHash("sha256").update(email).digest("hex")}`;
+const codeHash = (email: string, code: string) => createHmac("sha256", sessionKey()).update(`${email}|${code}`).digest("hex");
+
+/** Email a 6-digit login code (valid 10 minutes, 5 tries). */
+export async function sendEmailLoginCode(email: string): Promise<void> {
+  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+  await getRedis().set(codeKey(email), JSON.stringify({ h: codeHash(email, code), t: 0 }), "EX", CODE_TTL_SEC);
+  const store = loadConfig().STORE_NAME;
+  await enqueueEmail({
+    to: email,
+    subject: `${code} is your ${store} login code`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:480px"><h2>${store.replace(/</g, "&lt;")}</h2><p>Your login code:</p><p style="font-size:32px;font-weight:bold;letter-spacing:6px;margin:10px 0">${code}</p><p style="color:#666">It works for 10 minutes. If you didn't try to log in, ignore this email — nobody can get in without this code.</p></div>`,
+  });
+}
+
+/** True once, for the right code; wrong codes count towards the limit. */
+export async function checkEmailLoginCode(email: string, code: string): Promise<boolean> {
+  const redis = getRedis();
+  const k = codeKey(email);
+  const raw = await redis.get(k).catch(() => null);
+  if (!raw) return false;
+  let v: { h?: string; t?: number };
+  try { v = JSON.parse(raw) as { h?: string; t?: number }; } catch { return false; }
+  if ((v.t ?? 0) >= CODE_MAX_TRIES || !v.h || !/^\d{6}$/.test(code)) { if ((v.t ?? 0) >= CODE_MAX_TRIES) await redis.del(k).catch(() => undefined); return false; }
+  const a = Buffer.from(codeHash(email, code));
+  const b = Buffer.from(v.h);
+  if (a.length === b.length && timingSafeEqual(a, b)) { await redis.del(k).catch(() => undefined); return true; }
+  await redis.set(k, JSON.stringify({ h: v.h, t: (v.t ?? 0) + 1 }), "KEEPTTL").catch(() => undefined);
+  return false;
+}
+
+/** Wallet set to 0 and no orders: an account that can be merged away safely. */
+async function isEmptyAccount(userId: string): Promise<boolean> {
+  const [orders, wallet] = await Promise.all([
+    prisma.order.count({ where: { userId } }),
+    prisma.wallet.findUnique({ where: { userId }, select: { balanceMinor: true } }).catch(() => null),
+  ]);
+  return orders === 0 && Number(wallet?.balanceMinor ?? 0) === 0;
+}
+
+/** The customer for a verified email — found, or created like a new bot customer (wallet, role, referral). */
+export async function webEmailLoginUser(email: string, ref?: string | null): Promise<{ id: string; status: string }> {
+  const existing = await prisma.user.findFirst({ where: { email: { equals: email, mode: "insensitive" } }, select: { id: true, status: true, emailVerified: true } });
+  if (existing) {
+    if (!existing.emailVerified) await prisma.user.update({ where: { id: existing.id }, data: { emailVerified: true } });
+    return { id: existing.id, status: existing.status };
+  }
+  let referredById: string | undefined;
+  if (ref && /^[A-Za-z0-9_-]{3,40}$/.test(ref)) {
+    const r = await prisma.user.findUnique({ where: { referralCode: ref }, select: { id: true } }).catch(() => null);
+    if (r) referredById = r.id;
+  }
+  const customerRole = await prisma.role.findUnique({ where: { name: "CUSTOMER" } });
+  const currency = "USD" as Currency;
+  const name = (email.split("@")[0] ?? "").replace(/[^A-Za-z0-9._-]/g, "").slice(0, 30) || "Customer";
+  const user = await prisma.user.create({
+    data: {
+      email,
+      emailVerified: true,
+      firstName: name,
+      currency,
+      ...(referredById ? { referredById } : {}),
+      wallet: { create: { currency } },
+      ...(customerRole ? { roles: { create: { roleId: customerRole.id } } } : {}),
+    },
+    select: { id: true, status: true },
+  });
+  await prisma.activityLog.create({ data: { userId: user.id, event: "web.signup", meta: { via: "email", referred: Boolean(referredById) } } }).catch(() => undefined);
+  return { id: user.id, status: user.status };
+}
+
+export type LinkResult = { ok: true; switchTo?: string } | { ok: false; message: string };
+
+/**
+ * Add a verified email to the signed-in (Telegram) customer, so they can also
+ * log in with it. If that email already has its own, EMPTY website account,
+ * the email moves over; an account with orders or balance is never merged.
+ */
+export async function linkEmailToUser(userId: string, email: string): Promise<LinkResult> {
+  const other = await prisma.user.findFirst({ where: { email: { equals: email, mode: "insensitive" }, id: { not: userId } }, select: { id: true, telegramId: true } });
+  if (other) {
+    if (other.telegramId !== null || !(await isEmptyAccount(other.id))) {
+      return { ok: false, message: "That email already belongs to another account with orders or balance. Log in with it, or contact support to merge." };
+    }
+    await prisma.user.update({ where: { id: other.id }, data: { email: null, emailVerified: false } });
+  }
+  await prisma.user.update({ where: { id: userId }, data: { email, emailVerified: true } });
+  return { ok: true };
+}
+
+// ── Telegram login through the bot (no Login Widget, no BotFather domain) ────
+//
+// The page asks for a one-time token and opens t.me/<bot>?start=wl_<token>;
+// the bot asks "Log in to the website?" and, on ✅, records who confirmed;
+// the page polls and gets its session. Works on phones and without /setdomain.
+
+const BOT_LOGIN_TTL = 600;
+const blKey = (t: string) => `botlogin:${t}`;
+
+type BotLoginState = { u?: string; link?: string };
+
+/** A new login token. `linkTo`: the signed-in (email) account that wants Telegram linked. */
+export async function createBotLogin(linkTo?: string): Promise<string> {
+  const token = createHash("sha256").update(`${Date.now()}|${randomInt(0, 2 ** 47)}|${Math.random()}`).digest("base64url").slice(0, 24).replace(/[^A-Za-z0-9]/g, "x");
+  await getRedis().set(blKey(token), JSON.stringify({ ...(linkTo ? { link: linkTo } : {}) } satisfies BotLoginState), "EX", BOT_LOGIN_TTL);
+  return token;
+}
+
+export function isBotLoginToken(t: string): boolean {
+  return /^[A-Za-z0-9]{24}$/.test(t);
+}
+
+/** In the bot: the customer confirmed. False when the token is unknown, expired or used. */
+export async function approveBotLogin(token: string, userId: string): Promise<boolean> {
+  if (!isBotLoginToken(token)) return false;
+  const redis = getRedis();
+  const raw = await redis.get(blKey(token)).catch(() => null);
+  if (!raw) return false;
+  let v: BotLoginState;
+  try { v = JSON.parse(raw) as BotLoginState; } catch { return false; }
+  if (v.u) return v.u === userId;
+  await redis.set(blKey(token), JSON.stringify({ ...v, u: userId }), "KEEPTTL");
+  return true;
+}
+
+/** Is this token a "link Telegram to my email account" request? (the bot words its question accordingly) */
+export async function botLoginIsLink(token: string): Promise<boolean> {
+  if (!isBotLoginToken(token)) return false;
+  const raw = await getRedis().get(blKey(token)).catch(() => null);
+  try { return Boolean(raw && (JSON.parse(raw) as BotLoginState).link); } catch { return false; }
+}
+
+/** On the page: "pending", "expired", or the confirmed customer (the token is used up). */
+export async function takeBotLogin(token: string): Promise<{ state: "pending" | "expired" } | { state: "ok"; userId: string; linkTo?: string }> {
+  if (!isBotLoginToken(token)) return { state: "expired" };
+  const redis = getRedis();
+  const raw = await redis.get(blKey(token)).catch(() => null);
+  if (!raw) return { state: "expired" };
+  let v: BotLoginState;
+  try { v = JSON.parse(raw) as BotLoginState; } catch { return { state: "expired" }; }
+  if (!v.u) return { state: "pending" };
+  await redis.del(blKey(token)).catch(() => undefined);
+  return { state: "ok", userId: v.u, ...(v.link ? { linkTo: v.link } : {}) };
+}
+
+/**
+ * Join the signed-in email account (`meId`) with the Telegram customer the bot
+ * knows (`tgUserId`), so the bot and the website share ONE wallet:
+ *   - the Telegram row is empty (just created by /start) → Telegram moves onto this account;
+ *   - this account is empty → its email moves onto the Telegram account, and the session switches there;
+ *   - both have orders or balance → refused (never mixes two wallets).
+ */
+export async function linkBotUserToAccount(meId: string, tgUserId: string): Promise<LinkResult> {
+  if (meId === tgUserId) return { ok: true };
+  const [me, tg] = await Promise.all([
+    prisma.user.findUnique({ where: { id: meId }, select: { telegramId: true, email: true, emailVerified: true } }),
+    prisma.user.findUnique({ where: { id: tgUserId }, select: { telegramId: true, telegramHandle: true, firstName: true, lastName: true, email: true } }),
+  ]);
+  if (!me || !tg || tg.telegramId === null) return { ok: false, message: "Account not found." };
+  if (me.telegramId !== null) return { ok: false, message: "This account is already linked to another Telegram." };
+  if (!tg.email && (await isEmptyAccount(tgUserId))) {
+    // The empty row the bot just made gives up its Telegram id (nothing else is lost).
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: tgUserId }, data: { telegramId: null } }),
+      prisma.user.update({ where: { id: meId }, data: { telegramId: tg.telegramId, telegramHandle: tg.telegramHandle, ...(tg.firstName ? { firstName: tg.firstName } : {}), ...(tg.lastName ? { lastName: tg.lastName } : {}) } }),
+    ]);
+    return { ok: true };
+  }
+  if (await isEmptyAccount(meId)) {
+    if (me.email && me.emailVerified && !tg.email) {
+      await prisma.$transaction([
+        prisma.user.update({ where: { id: meId }, data: { email: null, emailVerified: false } }),
+        prisma.user.update({ where: { id: tgUserId }, data: { email: me.email, emailVerified: true } }),
+      ]);
+    }
+    return { ok: true, switchTo: tgUserId };
+  }
+  return { ok: false, message: "This Telegram already has its own account with orders or balance. Log out and log in with Telegram instead, or contact support to merge." };
 }
 
 // ── Product page ─────────────────────────────────────────────────────────────

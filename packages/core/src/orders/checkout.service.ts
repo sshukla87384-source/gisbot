@@ -190,7 +190,7 @@ export async function checkoutWithWallet(
    * `maxTotalMinor`: refuse if the price moved above what the buyer was shown
    * (in the wallet currency) — a Mini App quote can be a minute old.
    */
-  opts: { direct?: Array<{ variantId: string; quantity: number }>; maxTotalMinor?: number } = {},
+  opts: { direct?: Array<{ variantId: string; quantity: number }>; maxTotalMinor?: number; source?: "WEB" } = {},
 ): Promise<CheckoutResult> {
   const masterKey = loadConfig().ENCRYPTION_MASTER_KEY;
   const units = opts.direct ? opts.direct.reduce((s, l) => s + Math.max(0, l.quantity), 0) : await cartUnitsFor(userId);
@@ -240,7 +240,8 @@ export async function checkoutWithWallet(
           walletUsedMinor: totalMinor,
           totalMinor: 0, // nothing owed via gateway
           paidAt: new Date(),
-          channel,
+          // "WEB" marks a web-shop order (order feed label); pricing still uses `channel`.
+          channel: channel === "DIRECT" && opts.source ? opts.source : channel,
         },
       });
       if (coupon) await recordCouponUseTx(tx, coupon.couponId, userId, order.id, discountMinor);

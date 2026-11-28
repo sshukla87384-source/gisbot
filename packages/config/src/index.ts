@@ -100,6 +100,11 @@ const envSchema = z
     // ── Email (Resend) ──
     RESEND_API_KEY: z.string().optional(),
     EMAIL_FROM: z.string().optional(), // e.g. "Get It Sasta <no-reply@getitsasta.com>"
+    // ── Email (SMTP — Gmail / Zoho / Hostinger…; used instead of Resend when set) ──
+    SMTP_HOST: z.string().optional(), // e.g. smtp.gmail.com
+    SMTP_PORT: z.string().optional(), // 465 (TLS) or 587 (STARTTLS); empty = 465
+    SMTP_USER: z.string().optional(),
+    SMTP_PASS: z.string().optional(), // Gmail: an App Password, not the account password
 
     // ── S3-compatible storage (optional until media/download phases) ──
     S3_ENDPOINT: z.string().url().optional(),

@@ -18,6 +18,8 @@ import {
   TELEGRAM_TEXT_MAX,
   ensureCryptoProvider,
   premiumEmojiTransformer,
+  sendSmtpMail,
+  smtpConfigured,
 } from "@gis/core";
 import { ensureDbObjects, prisma } from "@gis/database";
 import { Worker } from "bullmq";
@@ -301,11 +303,16 @@ async function main(): Promise<void> {
   const emailWorker = new Worker<EmailJob>(
     QUEUE_NAMES.email,
     async (job) => {
+      // SMTP (Gmail, Zoho…) when configured — else Resend.
+      if (smtpConfigured()) {
+        await sendSmtpMail({ to: job.data.to, subject: job.data.subject, html: job.data.html });
+        return;
+      }
       if (!resend || !config.EMAIL_FROM) {
         if (!warnedEmailOff) {
           warnedEmailOff = true;
           // eslint-disable-next-line no-console
-          console.warn("email disabled (RESEND_API_KEY/EMAIL_FROM not set) — skipping email jobs");
+          console.warn("email disabled (set SMTP_* or RESEND_API_KEY, plus EMAIL_FROM) — skipping email jobs");
         }
         return;
       }

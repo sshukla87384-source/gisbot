@@ -21,6 +21,15 @@ import {
   webSessionUser,
   webShopProduct,
   revokeWebSessions,
+  emailLoginAvailable,
+  normalizeEmail,
+  sendEmailLoginCode,
+  checkEmailLoginCode,
+  webEmailLoginUser,
+  linkEmailToUser,
+  linkBotUserToAccount,
+  createBotLogin,
+  takeBotLogin,
   type TelegramLogin,
 } from "@gis/core";
 import { loadConfig } from "@gis/config";
@@ -43,6 +52,9 @@ import { webShopPage, webShopClosedPage } from "./webshop.page.js";
  *   GET  /shop/catalog?currency      public catalogue (same as the Mini App)
  *   GET  /shop/product/:id?currency  one product card (description / how to use / terms / bulk)
  *   POST /shop/auth/telegram         Telegram Login Widget payload → session cookie
+ *   POST /shop/auth/email/start {email} · /shop/auth/email/verify {email, code}   email login (6-digit code)
+ *   POST /shop/account/email/start|verify   add an email to a Telegram account
+ *   POST /shop/account/telegram             link Telegram to an email account
  *   POST /shop/auth/logout
  *   GET  /shop/me | orders | orders/:id | wallet | referral     signed-in reads
  *   POST /shop/buy {variantId, qty, quoteMinor, quoteCurrency}  wallet purchase
@@ -80,6 +92,8 @@ const buyBody = z.object({
   quoteCurrency: z.enum(["USD", "INR"]),
   idem: z.string().min(8).max(64).regex(/^[A-Za-z0-9._-]+$/),
 });
+const emailBody = z.object({ email: z.string().min(3).max(254) });
+const codeBody = z.object({ email: z.string().min(3).max(254), code: z.string().regex(/^\d{6}$/), ref: z.string().max(40).optional() });
 const topupBody = z.object({ amount: z.number().positive().max(100_000), network: z.string().min(2).max(32) });
 
 async function botUsername(): Promise<string | null> {
@@ -123,6 +137,7 @@ export class WebShopController {
       bot,
       website: site,
       enabled: await getWebShopEnabled(),
+      emailLogin: emailLoginAvailable(),
       networks: nets.map((n) => ({ code: n.code, label: n.label, asset: n.asset, chain: n.chain, emoji: n.emoji })),
     };
   }
@@ -162,9 +177,111 @@ export class WebShopController {
     if (!verifyTelegramLogin(tg as unknown as TelegramLogin)) throw new ApiError(401, "BAD_LOGIN", "Telegram login could not be verified — please try again.");
     const u = await webLoginUser(tg as unknown as TelegramLogin, ref ?? null);
     if (u.status !== "ACTIVE") throw new ApiError(403, "BANNED", "This account is suspended.");
-    const s = await makeWebSession(u.id);
-    res.cookie(COOKIE, s.token, { httpOnly: true, secure: loadConfig().NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: s.maxAgeSec * 1000 });
+    await this.startSession(res, u.id);
     return { ok: true };
+  }
+
+  @Post("auth/email/start")
+  async emailStart(@Body() body: unknown, @Req() req: ApiRequest) {
+    this.csrf(req);
+    const email = this.emailOf(body);
+    await limit(`mail-ip:${req.ip}`, 6, 600);
+    await limit(`mail-to:${email}`, 3, 600);
+    await sendEmailLoginCode(email);
+    return { ok: true };
+  }
+
+  @Post("auth/email/verify")
+  async emailVerify(@Body() body: unknown, @Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
+    this.csrf(req);
+    await limit(`mailchk:${req.ip}`, 20, 600);
+    const b = codeBody.safeParse(body);
+    if (!b.success) throw new ApiError(400, "VALIDATION", "Enter the 6-digit code from the email.");
+    const email = normalizeEmail(b.data.email);
+    if (!email || !(await checkEmailLoginCode(email, b.data.code))) throw new ApiError(401, "BAD_CODE", "Wrong or expired code — check the email or send a new code.");
+    const u = await webEmailLoginUser(email, b.data.ref ?? null);
+    if (u.status !== "ACTIVE") throw new ApiError(403, "BANNED", "This account is suspended.");
+    await this.startSession(res, u.id);
+    return { ok: true };
+  }
+
+  /** Signed in with Telegram: add an email so the website can also be used with it. */
+  @Post("account/email/start")
+  async addEmailStart(@Body() body: unknown, @Req() req: ApiRequest) {
+    this.csrf(req);
+    const user = await this.who(req);
+    const email = this.emailOf(body);
+    await limit(`mail-u:${user.id}`, 3, 600);
+    await limit(`mail-to:${email}`, 3, 600);
+    await sendEmailLoginCode(email);
+    return { ok: true };
+  }
+
+  @Post("account/email/verify")
+  async addEmailVerify(@Body() body: unknown, @Req() req: ApiRequest) {
+    this.csrf(req);
+    const user = await this.who(req);
+    await limit(`mailchk-u:${user.id}`, 10, 600);
+    const b = codeBody.safeParse(body);
+    if (!b.success) throw new ApiError(400, "VALIDATION", "Enter the 6-digit code from the email.");
+    const email = normalizeEmail(b.data.email);
+    if (!email || !(await checkEmailLoginCode(email, b.data.code))) throw new ApiError(401, "BAD_CODE", "Wrong or expired code — check the email or send a new code.");
+    const r = await linkEmailToUser(user.id, email);
+    if (!r.ok) throw new ApiError(409, "EMAIL_TAKEN", r.message);
+    return { ok: true, email };
+  }
+
+  // ── Telegram login through the bot: works on phones and needs no BotFather domain ──
+
+  @Post("auth/bot/start")
+  async botStart(@Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
+    this.csrf(req);
+    await limit(`bl-ip:${req.ip}`, 15, 600);
+    const bot = await botUsername();
+    if (!bot) throw new ApiError(503, "NO_BOT", "Telegram login is not configured.");
+    const token = await createBotLogin();
+    this.bindBotLogin(res, token);
+    return { token, url: `https://t.me/${bot}?start=wl_${token}` };
+  }
+
+  /** Signed in with email: link Telegram, so the bot and the website share one wallet. */
+  @Post("account/telegram/start")
+  async linkStart(@Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
+    this.csrf(req);
+    const user = await this.who(req);
+    await limit(`bl-u:${user.id}`, 10, 600);
+    const bot = await botUsername();
+    if (!bot) throw new ApiError(503, "NO_BOT", "Telegram is not configured.");
+    const token = await createBotLogin(user.id);
+    this.bindBotLogin(res, token);
+    return { token, url: `https://t.me/${bot}?start=wl_${token}` };
+  }
+
+  @Post("auth/bot/poll")
+  @Header("Cache-Control", "no-store")
+  async botPoll(@Body() body: unknown, @Req() req: ApiRequest, @Res({ passthrough: true }) res: ApiResponse) {
+    this.csrf(req);
+    await limit(`bl-poll:${req.ip}`, 400, 600);
+    const t = z.object({ token: z.string().max(64) }).safeParse(body);
+    if (!t.success) throw new ApiError(400, "VALIDATION", "Bad request.");
+    // Only the browser that asked for this token can finish it (someone who
+    // merely saw the t.me link cannot).
+    if ((req.cookies as Record<string, string> | undefined)?.gis_bl !== t.data.token) return { state: "expired" };
+    const r = await takeBotLogin(t.data.token);
+    if (r.state !== "ok") return { state: r.state };
+    if (r.linkTo) {
+      // Only the same signed-in browser can finish a link it started.
+      const user = await this.who(req);
+      if (user.id !== r.linkTo) throw new ApiError(403, "FORBIDDEN", "Please start again.");
+      const l = await linkBotUserToAccount(user.id, r.userId);
+      if (!l.ok) throw new ApiError(409, "TELEGRAM_TAKEN", l.message);
+      if (l.switchTo) await this.startSession(res, l.switchTo);
+      return { state: "ok", linked: true };
+    }
+    const u = await prisma.user.findUnique({ where: { id: r.userId }, select: { status: true } });
+    if (!u || u.status !== "ACTIVE") throw new ApiError(403, "BANNED", "This account is suspended.");
+    await this.startSession(res, r.userId);
+    return { state: "ok" };
   }
 
   @Post("auth/logout")
@@ -183,7 +300,7 @@ export class WebShopController {
   async me(@Req() req: ApiRequest) {
     const user = await this.who(req);
     const [profile, wallet] = await Promise.all([miniAppProfileFull(user.id, user.telegramId), miniAppWallet(user.id)]);
-    return { ...profile, balanceMinor: wallet.balanceMinor, walletCurrency: wallet.currency };
+    return { ...profile, email: user.email, balanceMinor: wallet.balanceMinor, walletCurrency: wallet.currency };
   }
 
   @Get("orders")
@@ -251,7 +368,7 @@ export class WebShopController {
     }
     const quote = { totalMinor: b.data.quoteMinor, currency: b.data.quoteCurrency as Currency };
     try {
-      const r = await miniAppBuyWithWallet({ id: user.id, telegramId: user.telegramId, currency: user.currency }, b.data.variantId, b.data.qty, quote);
+      const r = await miniAppBuyWithWallet({ id: user.id, telegramId: user.telegramId, currency: user.currency, email: user.email }, b.data.variantId, b.data.qty, quote, { source: "WEB" });
       // A refusal (balance, stock, price change) frees the key so the same click can be retried.
       if (r.ok) await redis.set(idemKey, JSON.stringify(r), "EX", 900).catch(() => undefined);
       else await redis.del(idemKey).catch(() => undefined);
@@ -300,6 +417,23 @@ export class WebShopController {
     return (req.cookies as Record<string, string> | undefined)?.[COOKIE];
   }
 
+  private emailOf(body: unknown): string {
+    if (!emailLoginAvailable()) throw new ApiError(503, "EMAIL_OFF", "Email login is not available right now — please log in with Telegram.");
+    const b = emailBody.safeParse(body);
+    const email = b.success ? normalizeEmail(b.data.email) : null;
+    if (!email) throw new ApiError(400, "VALIDATION", "Enter a valid email address.");
+    return email;
+  }
+
+  private bindBotLogin(res: ApiResponse, token: string): void {
+    res.cookie("gis_bl", token, { httpOnly: true, secure: loadConfig().NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: 600_000 });
+  }
+
+  private async startSession(res: ApiResponse, userId: string): Promise<void> {
+    const s = await makeWebSession(userId);
+    res.cookie(COOKIE, s.token, { httpOnly: true, secure: loadConfig().NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: s.maxAgeSec * 1000 });
+  }
+
   private csrf(req: ApiRequest): void {
     if (req.headers["x-shop"] !== "1") throw new ApiError(403, "FORBIDDEN", "Missing shop header.");
   }
@@ -307,7 +441,7 @@ export class WebShopController {
   private async who(req: ApiRequest) {
     if (!(await getWebShopEnabled())) throw new ApiError(404, "DISABLED", "The web shop is closed.");
     const user = await webSessionUser(this.cookie(req));
-    if (!user) throw new ApiError(401, "LOGIN_REQUIRED", "Please log in with Telegram.");
+    if (!user) throw new ApiError(401, "LOGIN_REQUIRED", "Please log in.");
     return user;
   }
 }

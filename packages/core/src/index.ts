@@ -26,6 +26,7 @@ export * from "./api-delivery.service.js";
 export * from "./channels.service.js";
 export * from "./web-shop.service.js";
 export * from "./web-shop-url.js";
+export * from "./smtp.js";
 export * from "./support/ticket.service.js";
 export * from "./finance.service.js";
 export * from "./recovery.service.js";
