@@ -412,12 +412,23 @@ function priceMinorOf(p: any): number {
 /** An explicit "not available" flag (inStock:false, status:"out_of_stock"…). */
 function flaggedOut(o: any): boolean {
   if (!o || typeof o !== "object") return false;
-  for (const k of ["inStock", "in_stock", "available", "is_available", "isAvailable", "instock"]) if (o[k] === false || o[k] === "false") return true;
-  const st = typeof o.status === "string" ? o.status.toLowerCase() : typeof o.stock_status === "string" ? o.stock_status.toLowerCase() : "";
-  return /out.?of.?stock|sold.?out|unavailable/.test(st);
+  for (const k of ["inStock", "in_stock", "available", "is_available", "isAvailable", "instock", "active", "is_active", "isActive", "enabled", "orderable"]) {
+    if (o[k] === false || o[k] === "false" || (o[k] === 0 && k !== "available")) return true;
+  }
+  for (const k of ["status", "stock_status", "stockStatus", "availability", "state"]) {
+    const st = typeof o[k] === "string" ? o[k].toLowerCase().trim() : "";
+    if (/out.?of.?stock|sold.?out|unavailable|not.?available|no.?stock/.test(st)) return true;
+    if (/^(inactive|disabled|paused|hidden|closed|off)$/.test(st)) return true;
+  }
+  return false;
 }
 
 function stockOf(p: any): number | null {
+  // The vendor SAYING it is out wins over any number it still sends: many
+  // panels keep the old "stock": 12 next to "status": "out_of_stock", and the
+  // number used to win — the shop kept showing (and selling) 12.
+  const v0 = p?.variants?.[0];
+  if (flaggedOut(p) || (v0 && flaggedOut(v0))) return 0;
   const direct = pickNum(p, ["stock", "available", "quantity", "qty", "inStock", "stock_count", "available_stock", "availableStock", "stock_available", "in_stock", "remaining", "count"]);
   if (direct !== null) return direct;
   const v = p?.variants?.[0];
@@ -426,9 +437,6 @@ function stockOf(p: any): number | null {
     const vs = pickNum(v, ["stock", "available", "quantity"]);
     if (vs !== null) return vs;
   }
-  // No number at all, but the vendor SAYS it is out: that is 0, not "unknown"
-  // (unknown counts as available, which kept sold-out items on sale).
-  if (flaggedOut(p) || (v && flaggedOut(v))) return 0;
   return null;
 }
 
@@ -1222,6 +1230,23 @@ export async function syncAllSuppliers(): Promise<{ suppliers: number; updated: 
   return { suppliers, updated, added, failed };
 }
 
+/**
+ * Sold out at the vendor: stock 0. A product on sale (or already paused for
+ * stock) also leaves the shelf as a stock-driven pause — the next sync that
+ * finds stock puts it back. Hidden / not-added products only get the 0.
+ * `ids` null = every product of this vendor.
+ */
+async function zeroSupplierStock(supplierId: string, ids: string[] | null): Promise<void> {
+  const base = { supplierId, deletedAt: null, ...(ids ? { id: { in: ids } } : {}) };
+  await prisma.product.updateMany({
+    where: { ...base, supplierPending: false, OR: [{ status: "ACTIVE" }, { status: "PAUSED", supplierStockDrivenPause: true }] },
+    data: { supplierStock: 0, status: "PAUSED", supplierStockDrivenPause: true },
+  });
+  // Unknown (null) counts as "available" elsewhere, so it is zeroed too.
+  await prisma.product.updateMany({ where: { ...base, OR: [{ supplierStock: null }, { supplierStock: { not: 0 } }] }, data: { supplierStock: 0 } });
+  await invalidate("cat:*");
+}
+
 async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult> {
   const s = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!s) return { added: 0, updated: 0, skipped: 0, failed: 0 };
@@ -1230,10 +1255,22 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
   // A supplier that answers nothing (wrong key, down) is not re-probed by the
   // 5-minute sweep for a while — see syncAllSuppliers.
   if (prods.length === 0) {
-    await getRedis().set(`supfail:${supplierId}`, "1", "EX", 1800).catch(() => undefined);
+    // Re-probed after 5 minutes (was 30: a vendor back online stayed "out" for half an hour).
+    await getRedis().set(`supfail:${supplierId}`, "1", "EX", 300).catch(() => undefined);
+    // Twice in a row with nothing to sell (everything sold out, or the vendor
+    // is down — either way nothing can be delivered): every live product of
+    // this vendor goes to 0 and off the shelf, as a stock-driven pause, so it
+    // comes back by itself as soon as the vendor lists it again.
+    const strikes = await getRedis().incr(`supempty:${supplierId}`).catch(() => 0);
+    await getRedis().expire(`supempty:${supplierId}`, 3600).catch(() => undefined);
+    if (strikes >= 2) {
+      await zeroSupplierStock(supplierId, null).catch(() => undefined);
+      // When it answers again, its stock coming back is not a "restock" to announce.
+      await getRedis().set(`supnoann:${supplierId}`, "1", "EX", 6 * 3600).catch(() => undefined);
+    }
     return { added: 0, updated: 0, skipped: 0, failed: 0, empty: true };
   }
-  await getRedis().del(`supfail:${supplierId}`).catch(() => undefined);
+  await getRedis().del(`supfail:${supplierId}`, `supempty:${supplierId}`).catch(() => undefined);
   const retail = await prisma.priceTier.findUniqueOrThrow({ where: { name: "RETAIL" } });
   // Everything this supplier already has, in ONE query. The old loop did a
   // findFirst + update + two upserts per product, every 5 minutes, even when
@@ -1377,12 +1414,28 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
   if (catalogue.complete) {
     const live = known.filter((k) => !k.deletedAt);
     const gone = live.filter((k) => !listedIds.has(k.id) && (k.supplierStock !== 0 || k.status === "ACTIVE"));
-    if (gone.length > 0 && prods.length >= Math.ceil(live.length * 0.3)) {
-      const visible = gone.filter((k) => k.status === "ACTIVE" || (k.status === "PAUSED" && k.supplierStockDrivenPause)).map((k) => k.id);
-      const quiet = gone.filter((k) => !visible.includes(k.id)).map((k) => k.id);
-      if (visible.length) await prisma.product.updateMany({ where: { id: { in: visible } }, data: { supplierStock: 0, status: "PAUSED", supplierStockDrivenPause: true } });
-      if (quiet.length) await prisma.product.updateMany({ where: { id: { in: quiet } }, data: { supplierStock: 0 } });
-      updated += gone.length;
+    const goneKey = `supgone:${supplierId}`;
+    if (gone.length > 0) {
+      let confirmed = gone;
+      if (prods.length < Math.ceil(live.length * 0.3)) {
+        // The list shrank a lot at once. That is usually a big sell-out, but
+        // can be a broken answer — so a product is zeroed when it is missing
+        // from TWO syncs in a row (about a minute apart), instead of never
+        // (which kept sold-out items showing their old quantity).
+        const prev = new Set(await getRedis().smembers(goneKey).catch(() => [] as string[]));
+        confirmed = gone.filter((k) => prev.has(k.id));
+        await getRedis().del(goneKey).catch(() => undefined);
+        await getRedis().sadd(goneKey, ...gone.map((k) => k.id)).catch(() => undefined);
+        await getRedis().expire(goneKey, 1800).catch(() => undefined);
+      } else {
+        await getRedis().del(goneKey).catch(() => undefined);
+      }
+      if (confirmed.length) {
+        await zeroSupplierStock(supplierId, confirmed.map((k) => k.id));
+        updated += confirmed.length;
+      }
+    } else {
+      await getRedis().del(goneKey).catch(() => undefined);
     }
   }
   await invalidate("cat:*");
@@ -1394,7 +1447,9 @@ async function syncSupplierProductsInner(supplierId: string): Promise<SyncResult
   // Vendor restocks of live products → "N new stock added" to customers. At
   // most 5 per sync, and one per product per 3 hours, so a vendor that loads
   // stock in small drips cannot flood everyone's chat.
-  if (restocked.length > 0 && (await getSupplierRestockAnnounce())) {
+  const quietRestock = await getRedis().get(`supnoann:${supplierId}`).catch(() => null);
+  if (quietRestock) await getRedis().del(`supnoann:${supplierId}`).catch(() => undefined);
+  if (restocked.length > 0 && !quietRestock && (await getSupplierRestockAnnounce())) {
     let sent = 0;
     for (const [pid, qty] of restocked.sort((a, b) => b[1] - a[1])) {
       if (sent >= 5) break;
